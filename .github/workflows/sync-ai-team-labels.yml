@@ -1,0 +1,82 @@
+name: Sync AI Team Labels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const oldLabels = [
+              "agent:gemini-ui-bot",
+              "agent:codex-bot",
+              "agent:claude-review-bot"
+            ];
+
+            const desiredLabels = [
+              { name: "role:pm", color: "5319E7", description: "PM / product manager" },
+              { name: "role:ui", color: "1D76DB", description: "UI / UX task" },
+              { name: "role:coder", color: "0E8A16", description: "Coding task" },
+              { name: "role:reviewer", color: "D93F0B", description: "Code review task" },
+
+              { name: "agent:pm-bot", color: "BFDADC", description: "Assigned to PM bot" },
+              { name: "agent:ui-bot", color: "C5DEF5", description: "Assigned to UI bot" },
+              { name: "agent:code-bot", color: "B60205", description: "Assigned to Code bot" },
+              { name: "agent:review-bot", color: "D4C5F9", description: "Assigned to Review bot" },
+
+              { name: "state:blocked", color: "D93F0B", description: "Blocked" },
+              { name: "state:needs-pm", color: "F9D0C4", description: "Needs PM action" },
+              { name: "state:needs-user", color: "FEF2C0", description: "Needs user input" }
+            ];
+
+            for (const name of oldLabels) {
+              try {
+                await github.rest.issues.deleteLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name
+                });
+                core.info(`Deleted old label: ${name}`);
+              } catch (error) {
+                if (error.status === 404) {
+                  core.info(`Old label not found, skip: ${name}`);
+                } else {
+                  throw error;
+                }
+              }
+            }
+
+            for (const label of desiredLabels) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                  color: label.color,
+                  description: label.description
+                });
+                core.info(`Created label: ${label.name}`);
+              } catch (error) {
+                if (error.status === 422) {
+                  await github.rest.issues.updateLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: label.name,
+                    new_name: label.name,
+                    color: label.color,
+                    description: label.description
+                  });
+                  core.info(`Updated label: ${label.name}`);
+                } else {
+                  throw error;
+                }
+              }
+            }
