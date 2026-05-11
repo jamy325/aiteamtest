@@ -15,6 +15,7 @@ class ResamplerConfig:
     curve_spacing: float = 1.5
     corner_angle_degrees: float = 35.0
     curvature_threshold: float = 0.08
+    noise_distance_threshold: float = 3.0
     duplicate_epsilon: float = 1e-6
 
 
@@ -29,8 +30,16 @@ class Resampler:
                 return normalized + (normalized[0],)
             return normalized
 
-        high_curvature = self._classify_curvature(normalized, closed=closed)
-        sampled = self._sample_by_spacing(normalized, high_curvature, closed=closed)
+        filtered = self._filter_noise_points(normalized, closed=closed)
+        if len(filtered) <= 2:
+            if closed and len(filtered) == 2 and filtered[0] != filtered[-1]:
+                return filtered + (filtered[0],)
+            return filtered
+
+        high_curvature = self._classify_curvature(filtered, closed=closed)
+        # MVP note: this is adaptive decimation over existing Vector Space points,
+        # not a full interpolation-based uniform resampling pass.
+        sampled = self._sample_by_spacing(filtered, high_curvature, closed=closed)
 
         if closed:
             if sampled[0] != sampled[-1]:
@@ -51,6 +60,30 @@ class Resampler:
             normalized.pop()
 
         return tuple(normalized)
+
+    def _filter_noise_points(self, points: tuple[Point, ...], closed: bool) -> tuple[Point, ...]:
+        if len(points) <= 2:
+            return points
+
+        filtered: list[Point] = []
+        count = len(points)
+
+        for index, point in enumerate(points):
+            if not closed and index in (0, count - 1):
+                filtered.append(point)
+                continue
+
+            prev_point = points[(index - 1) % count]
+            next_point = points[(index + 1) % count]
+            bridge_length = PrecisionUtility.distance_between_points(prev_point, next_point)
+            deviation = self._distance_to_segment(point, prev_point, next_point)
+
+            if deviation > self.config.noise_distance_threshold and bridge_length <= self.config.noise_distance_threshold * 2.0:
+                continue
+
+            filtered.append(point)
+
+        return tuple(filtered)
 
     def _classify_curvature(self, points: tuple[Point, ...], closed: bool) -> tuple[bool, ...]:
         flags: list[bool] = []
@@ -109,6 +142,17 @@ class Resampler:
             sampled.append(points[-1])
 
         return tuple(sampled)
+
+    def _distance_to_segment(self, point: Point, start: Point, end: Point) -> float:
+        segment = (end[0] - start[0], end[1] - start[1])
+        segment_length_sq = segment[0] ** 2 + segment[1] ** 2
+        if PrecisionUtility.near_zero(segment_length_sq, self.config.duplicate_epsilon):
+            return PrecisionUtility.distance_between_points(point, start)
+
+        projection = ((point[0] - start[0]) * segment[0] + (point[1] - start[1]) * segment[1]) / segment_length_sq
+        projection = max(0.0, min(1.0, projection))
+        closest = (start[0] + projection * segment[0], start[1] + projection * segment[1])
+        return PrecisionUtility.distance_between_points(point, closest)
 
 
 __all__ = ["Point", "Resampler", "ResamplerConfig"]

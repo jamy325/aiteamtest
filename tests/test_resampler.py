@@ -72,3 +72,33 @@ def test_resampler_preserves_closed_contour_start_end_relationship() -> None:
 
     assert sampled[0] == sampled[-1]
     assert len(sampled) >= 5
+
+
+def test_resampler_filters_single_spike_noise_point() -> None:
+    points = [(float(x), 0.0) for x in range(10)] + [(10.0, 10.0)] + [(float(x), 0.0) for x in range(11, 21)]
+    resampler = Resampler(ResamplerConfig(straight_spacing=5.0, curve_spacing=1.0, noise_distance_threshold=3.0))
+
+    sampled = resampler.resample(points, closed=False)
+
+    assert (10.0, 10.0) not in sampled
+    assert sampled[0] == (0.0, 0.0)
+    assert sampled[-1] == (20.0, 0.0)
+
+
+def test_resampler_removes_duplicate_and_near_duplicate_points() -> None:
+    points = [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (1.0, 0.0),
+        (1.0 + 1e-7, 0.0),
+        (2.0, 0.0),
+        (3.0, 0.0),
+        (4.0, 0.0),
+    ]
+    resampler = Resampler(ResamplerConfig(straight_spacing=2.0, curve_spacing=1.0, duplicate_epsilon=1e-6))
+
+    sampled = resampler.resample(points, closed=False)
+
+    assert sampled[0] == (0.0, 0.0)
+    assert sampled[-1] == (4.0, 0.0)
+    assert sampled.count((1.0, 0.0)) <= 1
