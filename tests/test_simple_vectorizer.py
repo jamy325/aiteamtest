@@ -1,4 +1,5 @@
 import ast
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -42,6 +43,66 @@ def _cubic_bezier_point(start: Point, control1: Point, control2: Point, end: Poi
     return (x, y)
 
 
+def _draw_wrapped_text(
+    image: np.ndarray,
+    text: str,
+    origin: tuple[int, int],
+    max_width: int,
+    *,
+    font_scale: float = 0.45,
+    color: tuple[int, int, int] = (30, 30, 30),
+    line_height: int = 18,
+) -> int:
+    x, y = origin
+    words = text.split()
+    if not words:
+        return y
+
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        candidate_width = cv2.getTextSize(candidate, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)[0][0]
+        if candidate_width <= max_width:
+            current = candidate
+            continue
+        lines.append(current)
+        current = word
+    lines.append(current)
+
+    for line in lines:
+        cv2.putText(
+            image,
+            line,
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        y += line_height
+    return y
+
+
+def _closed_parametric_points(
+    *,
+    center: Point,
+    radius_x: float,
+    radius_y: float,
+    point_count: int,
+) -> list[Point]:
+    points = [
+        (
+            center[0] + radius_x * math.cos((2.0 * math.pi * index) / point_count),
+            center[1] + radius_y * math.sin((2.0 * math.pi * index) / point_count),
+        )
+        for index in range(point_count)
+    ]
+    points.append(points[0])
+    return points
+
+
 def _write_vectorizer_overlay(
     *,
     test_name: str,
@@ -52,12 +113,13 @@ def _write_vectorizer_overlay(
         return
 
     try:
-        width = 800
-        height = 600
-        padding = 40
-        legend_height = 110
+        width = 1200
+        drawing_height = 760
+        metadata_height = 220
+        height = drawing_height + metadata_height
+        padding = 60
         drawable_width = width - (padding * 2)
-        drawable_height = height - (padding * 2) - legend_height
+        drawable_height = drawing_height - (padding * 2)
 
         bounds_points: list[Point] = [(float(x), float(y)) for x, y in points]
         bounds_points.extend(anchor.position for anchor in result.anchors)
@@ -79,27 +141,30 @@ def _write_vectorizer_overlay(
         span_x = max(max_x - min_x, 1.0)
         span_y = max(max_y - min_y, 1.0)
         scale = min(drawable_width / span_x, drawable_height / span_y)
+        offset_x = padding + (drawable_width - (span_x * scale)) / 2.0
+        offset_y = padding + (drawable_height - (span_y * scale)) / 2.0
 
         image = np.full((height, width, 3), 255, dtype=np.uint8)
+        image[drawing_height:, :] = (246, 246, 246)
 
         def to_image(point: Point) -> tuple[int, int]:
-            x = padding + (point[0] - min_x) * scale
-            y = padding + (point[1] - min_y) * scale
+            x = offset_x + (point[0] - min_x) * scale
+            y = offset_y + (point[1] - min_y) * scale
             return (int(round(x)), int(round(y)))
 
         contour = np.array([to_image((float(x), float(y))) for x, y in points], dtype=np.int32)
         if len(contour) >= 2:
-            cv2.polylines(image, [contour], isClosed=result.path.closed, color=(200, 200, 200), thickness=2)
+            cv2.polylines(image, [contour], isClosed=result.path.closed, color=(210, 210, 210), thickness=2)
 
         for index, point in enumerate(points):
             pixel = to_image((float(point[0]), float(point[1])))
-            cv2.circle(image, pixel, 4, (220, 120, 20), thickness=-1)
+            cv2.circle(image, pixel, 6, (0, 140, 255), thickness=2)
             cv2.putText(
                 image,
                 str(index),
-                (pixel[0] + 5, pixel[1] - 5),
+                (pixel[0] + 7, pixel[1] - 7),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
+                0.45,
                 (120, 120, 120),
                 1,
                 cv2.LINE_AA,
@@ -136,27 +201,29 @@ def _write_vectorizer_overlay(
                 handle_pixel = to_image(anchor.out_handle)
                 cv2.line(image, anchor_pixel, handle_pixel, (160, 80, 160), thickness=1, lineType=cv2.LINE_AA)
                 cv2.circle(image, handle_pixel, 3, (160, 80, 160), thickness=-1)
-            cv2.circle(image, anchor_pixel, 5, (30, 30, 220), thickness=-1)
+            cv2.circle(image, anchor_pixel, 3, (40, 40, 220), thickness=-1)
 
-        legend_top = height - legend_height + 20
+        cv2.rectangle(image, (0, drawing_height), (width - 1, height - 1), (220, 220, 220), thickness=1)
+        legend_top = drawing_height + 28
         segment_type = result.segments[0].type if result.segments else "none"
-        legend_lines = [
+        metadata_lines = [
             f"test: {test_name}",
             f"path_id: {result.path.path_id}",
-            f"segments: {len(result.segments)}  anchors: {len(result.anchors)}  type: {segment_type}",
-            "layers: gray=input contour, orange=input points, green=line, magenta=bezier, red=anchor, purple=handles",
+            f"segments: {len(result.segments)}  anchors: {len(result.anchors)}  type: {segment_type}  closed: {result.path.closed}  topology_status: {result.path.topology_status}",
+            "layers: gray=input contour, orange=input points, green=line, magenta=bezier, red=anchors, purple=bezier handles",
         ]
-        for index, line in enumerate(legend_lines):
-            cv2.putText(
+        current_y = legend_top
+        for line in metadata_lines:
+            current_y = _draw_wrapped_text(
                 image,
                 line,
-                (padding, legend_top + (index * 22)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (20, 20, 20),
-                1,
-                cv2.LINE_AA,
+                (padding, current_y),
+                width - (padding * 2),
+                font_scale=0.58,
+                color=(20, 20, 20),
+                line_height=24,
             )
+            current_y += 4
 
         output_dir = _visual_artifact_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -260,6 +327,107 @@ def test_simple_vectorizer_result_is_writable_to_vector_document() -> None:
     assert document.segments[0].anchors == ("path_doc_anchor_0", "path_doc_anchor_1")
     _write_vectorizer_overlay(
         test_name="test_simple_vectorizer_result_is_writable_to_vector_document",
+        points=points,
+        result=result,
+    )
+
+
+def test_simple_vectorizer_visualizes_closed_circle_like_bezier_contour() -> None:
+    point_count = 16
+    points = _closed_parametric_points(center=(50.0, 50.0), radius_x=30.0, radius_y=30.0, point_count=point_count)
+    result = SimpleVectorizer(segment_type="bezier").vectorize_contour(
+        points,
+        path_id="path_circle_bezier",
+        closed=True,
+    )
+
+    assert result.path.closed is True
+    assert len(result.anchors) == point_count
+    assert len(result.segments) == point_count
+    assert all(segment.type == "bezier" for segment in result.segments)
+    assert result.segments[-1].anchors == (
+        f"{result.path.path_id}_anchor_{point_count - 1}",
+        f"{result.path.path_id}_anchor_0",
+    )
+    _write_vectorizer_overlay(
+        test_name="test_simple_vectorizer_visualizes_closed_circle_like_bezier_contour",
+        points=points,
+        result=result,
+    )
+
+
+def test_simple_vectorizer_visualizes_closed_ellipse_like_bezier_contour() -> None:
+    point_count = 18
+    points = _closed_parametric_points(center=(60.0, 40.0), radius_x=45.0, radius_y=20.0, point_count=point_count)
+    result = SimpleVectorizer(segment_type="bezier").vectorize_contour(
+        points,
+        path_id="path_ellipse_bezier",
+        closed=True,
+    )
+
+    assert result.path.closed is True
+    assert len(result.anchors) == point_count
+    assert len(result.segments) == point_count
+    assert all(segment.type == "bezier" for segment in result.segments)
+    assert result.segments[-1].anchors == (
+        f"{result.path.path_id}_anchor_{point_count - 1}",
+        f"{result.path.path_id}_anchor_0",
+    )
+    _write_vectorizer_overlay(
+        test_name="test_simple_vectorizer_visualizes_closed_ellipse_like_bezier_contour",
+        points=points,
+        result=result,
+    )
+
+
+def test_simple_vectorizer_visualizes_open_wave_bezier_contour() -> None:
+    points = [
+        (float(x), 40.0 + 15.0 * math.sin(x / 10.0))
+        for x in range(0, 121, 8)
+    ]
+    result = SimpleVectorizer(segment_type="bezier").vectorize_contour(
+        points,
+        path_id="path_wave_bezier",
+        closed=False,
+    )
+
+    assert result.path.closed is False
+    assert result.path.topology_status == "open"
+    assert len(result.anchors) == len(points)
+    assert len(result.segments) == len(points) - 1
+    assert result.segments[0].anchors == ("path_wave_bezier_anchor_0", "path_wave_bezier_anchor_1")
+    assert result.segments[-1].anchors == (
+        f"path_wave_bezier_anchor_{len(points) - 2}",
+        f"path_wave_bezier_anchor_{len(points) - 1}",
+    )
+    assert result.anchors[0].in_handle is None
+    assert result.anchors[-1].out_handle is None
+    _write_vectorizer_overlay(
+        test_name="test_simple_vectorizer_visualizes_open_wave_bezier_contour",
+        points=points,
+        result=result,
+    )
+
+
+def test_simple_vectorizer_visualizes_closed_circle_like_line_contour() -> None:
+    point_count = 16
+    points = _closed_parametric_points(center=(50.0, 50.0), radius_x=30.0, radius_y=30.0, point_count=point_count)
+    result = SimpleVectorizer(segment_type="line").vectorize_contour(
+        points,
+        path_id="path_circle_line",
+        closed=True,
+    )
+
+    assert result.path.closed is True
+    assert len(result.anchors) == point_count
+    assert len(result.segments) == point_count
+    assert all(segment.type == "line" for segment in result.segments)
+    assert result.segments[-1].anchors == (
+        f"{result.path.path_id}_anchor_{point_count - 1}",
+        f"{result.path.path_id}_anchor_0",
+    )
+    _write_vectorizer_overlay(
+        test_name="test_simple_vectorizer_visualizes_closed_circle_like_line_contour",
         points=points,
         result=result,
     )
