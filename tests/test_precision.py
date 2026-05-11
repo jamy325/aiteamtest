@@ -25,9 +25,10 @@ def test_point_distance_and_near_zero_helpers() -> None:
 
 
 def test_normalize_vector_handles_zero_safely() -> None:
-    assert PrecisionUtility.normalize_vector((0.0, 0.0)) == (0.0, 0.0)
+    assert PrecisionUtility.normalize_vector((0.0, 0.0)) is None
 
     normalized = PrecisionUtility.normalize_vector((3.0, 4.0))
+    assert normalized is not None
     assert math.isclose(normalized[0], 0.6)
     assert math.isclose(normalized[1], 0.8)
 

@@ -36,11 +36,11 @@ class PrecisionUtility:
         return PrecisionUtility.distance_between_points(first, second) <= threshold
 
     @staticmethod
-    def normalize_vector(vector: Vector2, epsilon: float | None = None) -> Vector2:
+    def normalize_vector(vector: Vector2, epsilon: float | None = None) -> Vector2 | None:
         threshold = PrecisionUtility.EPSILON if epsilon is None else abs(epsilon)
         length = math.hypot(vector[0], vector[1])
         if length <= threshold:
-            return (0.0, 0.0)
+            return None
         return (vector[0] / length, vector[1] / length)
 
     @staticmethod
