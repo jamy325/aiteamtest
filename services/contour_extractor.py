@@ -5,8 +5,11 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from core.coordinate import CoordinateTransformer
+from core.types import CoordinateSystem
 
-Point = tuple[int, int]
+
+Point = tuple[float, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +17,7 @@ class BinaryContour:
     contour_id: str
     source: str
     points: tuple[Point, ...]
+    coordinate_space: str
     closed: bool
     area: float
     depth: int
@@ -33,10 +37,12 @@ class ContourExtractor:
         threshold: int = 127,
         blur_kernel_size: int = 5,
         morphology_kernel_size: int = 3,
+        coordinate_transformer: CoordinateTransformer | None = None,
     ) -> None:
         self.threshold = threshold
         self.blur_kernel_size = blur_kernel_size
         self.morphology_kernel_size = morphology_kernel_size
+        self.coordinate_transformer = coordinate_transformer or CoordinateTransformer(CoordinateSystem())
 
     def extract_contours(self, image: np.ndarray) -> ExtractedContours:
         binary_contours = self.extract_binary_contours(image)
@@ -56,7 +62,7 @@ class ContourExtractor:
 
         extracted: list[BinaryContour] = []
         for index, contour in enumerate(contours):
-            points = tuple((int(point[0][0]), int(point[0][1])) for point in contour)
+            points = self._to_vector_points(tuple((int(point[0][0]), int(point[0][1])) for point in contour))
             parent_index = int(hierarchy_data[index][3])
             parent_contour = contour_ids[parent_index] if parent_index >= 0 else None
             extracted.append(
@@ -64,6 +70,7 @@ class ContourExtractor:
                     contour_id=contour_ids[index],
                     source="binary_contour",
                     points=points,
+                    coordinate_space="vector",
                     closed=len(points) >= 3,
                     area=float(cv2.contourArea(contour)),
                     depth=depths[index],
@@ -86,12 +93,15 @@ class ContourExtractor:
 
             # TODO: replace row-major point ordering with path/topology ordering
             # before fitting/resampling tasks consume skeleton contours.
-            points = tuple((int(x), int(y)) for y, x in sorted(zip(ys.tolist(), xs.tolist()), key=lambda item: (item[0], item[1])))
+            points = self._to_vector_points(
+                tuple((int(x), int(y)) for y, x in sorted(zip(ys.tolist(), xs.tolist()), key=lambda item: (item[0], item[1])))
+            )
             extracted.append(
                 BinaryContour(
                     contour_id=f"skeleton_contour_{component - 1}",
                     source="skeleton_contour",
                     points=points,
+                    coordinate_space="vector",
                     closed=False,
                     area=float(len(points)),
                     depth=0,
@@ -122,6 +132,9 @@ class ContourExtractor:
         grayscale = self._to_grayscale(image)
         _, binary = cv2.threshold(grayscale, self.threshold, 255, cv2.THRESH_BINARY)
         return binary
+
+    def _to_vector_points(self, points: tuple[tuple[int, int], ...]) -> tuple[Point, ...]:
+        return tuple(self.coordinate_transformer.pixel_to_vector((float(point[0]), float(point[1]))) for point in points)
 
     @staticmethod
     def _skeletonize(binary_mask: np.ndarray) -> np.ndarray:
