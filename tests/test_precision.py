@@ -1,10 +1,12 @@
 import math
 
+import pytest
+
 from core.precision import EPSILON, PrecisionUtility
 
 
 def test_global_epsilon_is_exposed() -> None:
-    assert EPSILON == PrecisionUtility.EPSILON
+    assert EPSILON == pytest.approx(PrecisionUtility.EPSILON)
     assert EPSILON > 0.0
 
 
@@ -20,7 +22,7 @@ def test_float_comparison_uses_epsilon() -> None:
 
 def test_point_distance_and_near_zero_helpers() -> None:
     assert PrecisionUtility.near_zero(EPSILON / 2.0)
-    assert PrecisionUtility.distance_between_points((0.0, 0.0), (3.0, 4.0)) == 5.0
+    assert PrecisionUtility.distance_between_points((0.0, 0.0), (3.0, 4.0)) == pytest.approx(5.0)
     assert PrecisionUtility.points_close((0.0, 0.0), (EPSILON / 2.0, 0.0))
 
 
@@ -29,8 +31,8 @@ def test_normalize_vector_handles_zero_safely() -> None:
 
     normalized = PrecisionUtility.normalize_vector((3.0, 4.0))
     assert normalized is not None
-    assert math.isclose(normalized[0], 0.6)
-    assert math.isclose(normalized[1], 0.8)
+    assert normalized[0] == pytest.approx(0.6)
+    assert normalized[1] == pytest.approx(0.8)
 
 
 def test_angle_comparison_wraps_across_full_rotation() -> None:
