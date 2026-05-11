@@ -50,6 +50,34 @@ def test_extract_binary_contours_handles_color_images() -> None:
     assert contours[0].children == ()
 
 
+def test_extract_contours_keeps_binary_and_skeleton_sets() -> None:
+    image = np.zeros((120, 120), dtype=np.uint8)
+    cv2.rectangle(image, (10, 10), (110, 110), 255, thickness=-1)
+    cv2.rectangle(image, (40, 40), (80, 80), 0, thickness=-1)
+
+    extracted = ContourExtractor().extract_contours(image)
+
+    assert len(extracted.binary_contours) == 2
+    assert len(extracted.skeleton_contours) >= 1
+    assert all(contour.source == "binary_contour" for contour in extracted.binary_contours)
+    assert all(contour.source == "skeleton_contour" for contour in extracted.skeleton_contours)
+
+
+def test_extract_skeleton_contours_from_thin_line_input() -> None:
+    image = np.zeros((80, 80), dtype=np.uint8)
+    cv2.line(image, (10, 40), (70, 40), 255, thickness=3)
+
+    binary_contours = ContourExtractor().extract_binary_contours(image)
+    skeleton_contours = ContourExtractor().extract_skeleton_contours(image)
+
+    assert len(binary_contours) == 1
+    assert len(skeleton_contours) == 1
+    assert skeleton_contours[0].source == "skeleton_contour"
+    assert skeleton_contours[0].closed is False
+    assert len(skeleton_contours[0].points) >= 40
+    assert all(abs(point[1] - 40) <= 1 for point in skeleton_contours[0].points)
+
+
 def test_contour_extractor_has_no_forbidden_dependencies() -> None:
     source = Path("services/contour_extractor.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
