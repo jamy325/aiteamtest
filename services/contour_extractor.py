@@ -75,8 +75,7 @@ class ContourExtractor:
         return tuple(extracted)
 
     def extract_skeleton_contours(self, image: np.ndarray) -> tuple[BinaryContour, ...]:
-        binary_mask = self._preprocess_binary_mask(image)
-        skeleton_mask = self._skeletonize(binary_mask)
+        skeleton_mask = self._skeletonize(self._preprocess_skeleton_mask(image))
         component_count, labels = cv2.connectedComponents(skeleton_mask)
         extracted: list[BinaryContour] = []
 
@@ -85,6 +84,8 @@ class ContourExtractor:
             if len(xs) == 0:
                 continue
 
+            # TODO: replace row-major point ordering with path/topology ordering
+            # before fitting/resampling tasks consume skeleton contours.
             points = tuple((int(x), int(y)) for y, x in sorted(zip(ys.tolist(), xs.tolist()), key=lambda item: (item[0], item[1])))
             extracted.append(
                 BinaryContour(
@@ -116,6 +117,11 @@ class ContourExtractor:
         denoised = cv2.medianBlur(binary, 3)
         kernel = np.ones((self.morphology_kernel_size, self.morphology_kernel_size), dtype=np.uint8)
         return cv2.morphologyEx(denoised, cv2.MORPH_CLOSE, kernel)
+
+    def _preprocess_skeleton_mask(self, image: np.ndarray) -> np.ndarray:
+        grayscale = self._to_grayscale(image)
+        _, binary = cv2.threshold(grayscale, self.threshold, 255, cv2.THRESH_BINARY)
+        return binary
 
     @staticmethod
     def _skeletonize(binary_mask: np.ndarray) -> np.ndarray:
