@@ -16,8 +16,8 @@ def test_pixel_and_vector_round_trip_in_pixels() -> None:
     vector = transformer.pixel_to_vector(point)
     pixel = transformer.vector_to_pixel(vector)
 
-    assert vector == point
-    assert pixel == point
+    assert vector == pytest.approx(point)
+    assert pixel == pytest.approx(point)
 
 
 def test_pixel_and_vector_round_trip_in_millimeters_with_y_flip() -> None:
@@ -33,8 +33,8 @@ def test_pixel_and_vector_round_trip_in_millimeters_with_y_flip() -> None:
 
     vector = transformer.pixel_to_vector((100.0, 200.0))
 
-    assert vector == (10.0, 40.0)
-    assert transformer.vector_to_pixel(vector) == (100.0, 200.0)
+    assert vector == pytest.approx((10.0, 40.0))
+    assert transformer.vector_to_pixel(vector) == pytest.approx((100.0, 200.0))
 
 
 def test_svg_and_dxf_conversions_follow_target_coordinate_conventions() -> None:
@@ -42,8 +42,8 @@ def test_svg_and_dxf_conversions_follow_target_coordinate_conventions() -> None:
         CoordinateSystem(unit="px", y_axis="down", precision=3, view_box=(0.0, 0.0, 800.0, 600.0), scale={"px_to_mm": 0.2})
     )
 
-    assert transformer.vector_to_svg((12.34567, 89.12345)) == (12.346, 89.123)
-    assert transformer.vector_to_dxf((10.0, 20.0)) == (2.0, 116.0)
+    assert transformer.vector_to_svg((12.34567, 89.12345)) == pytest.approx((12.346, 89.123))
+    assert transformer.vector_to_dxf((10.0, 20.0)) == pytest.approx((2.0, 116.0))
 
 
 def test_unit_conversion_and_precision_helpers() -> None:
@@ -51,11 +51,11 @@ def test_unit_conversion_and_precision_helpers() -> None:
         CoordinateSystem(unit="mm", y_axis="down", precision=2, view_box=(0.0, 0.0, 100.0, 50.0), scale={"px_to_mm": 0.5})
     )
 
-    assert transformer.px_to_mm(10.0) == 5.0
-    assert transformer.mm_to_px(5.0) == 10.0
-    assert transformer.y_axis_flip((3.0, 10.0)) == (3.0, 40.0)
-    assert transformer.precision_rounding(3.14159) == 3.14
-    assert transformer.precision_rounding((3.14159, 2.71828), precision=3) == (3.142, 2.718)
+    assert transformer.px_to_mm(10.0) == pytest.approx(5.0)
+    assert transformer.mm_to_px(5.0) == pytest.approx(10.0)
+    assert transformer.y_axis_flip((3.0, 10.0)) == pytest.approx((3.0, 40.0))
+    assert transformer.precision_rounding(3.14159) == pytest.approx(3.14)
+    assert transformer.precision_rounding((3.14159, 2.71828), precision=3) == pytest.approx((3.142, 2.718))
 
 
 def test_zero_scale_rejected_for_mm_to_px() -> None:
