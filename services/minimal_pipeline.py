@@ -89,7 +89,7 @@ class MinimalPipeline:
                 for anchor in vectorized.anchors:
                     document = add_anchor(document, anchor)
                 for segment in vectorized.segments:
-                    document = add_segment(document, updated(segment, params=self._json_ready_value(segment.params)))
+                    document = add_segment(document, segment)
 
         return MinimalPipelineResult(
             document=document,
@@ -132,15 +132,6 @@ class MinimalPipeline:
             "points": [list(point) for point in points],
             "coordinate_space": "vector",
         }
-
-    def _json_ready_value(self, value: Any) -> Any:
-        if isinstance(value, tuple):
-            return [self._json_ready_value(item) for item in value]
-        if isinstance(value, list):
-            return [self._json_ready_value(item) for item in value]
-        if isinstance(value, dict):
-            return {key: self._json_ready_value(item) for key, item in value.items()}
-        return value
 
 
 __all__ = ["MinimalPipeline", "MinimalPipelineResult"]

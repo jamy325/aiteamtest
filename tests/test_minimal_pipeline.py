@@ -81,3 +81,4 @@ def test_minimal_pipeline_has_no_ui_or_ai_dependencies() -> None:
     forbidden_imports = {"PyQt5", "PyQt6", "openai", "anthropic", "ui"}
 
     assert imports.isdisjoint(forbidden_imports)
+    assert "_json_ready_value" not in source

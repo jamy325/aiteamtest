@@ -8,7 +8,7 @@ from typing import Sequence
 import cv2
 import numpy as np
 
-from core.document import add_anchor, add_path, add_segment, create_document
+from core.document import add_anchor, add_path, add_segment, create_document, from_json, to_json
 from core.types import CoordinateSystem
 from services.simple_vectorizer import SimpleVectorizer, VectorizationResult
 
@@ -258,8 +258,8 @@ def test_simple_vectorizer_creates_closed_line_path_segments_and_anchors() -> No
     assert all(segment.type == "line" for segment in result.segments)
     assert result.segments[0].anchors == ("path_line_anchor_0", "path_line_anchor_1")
     assert result.segments[-1].anchors == ("path_line_anchor_3", "path_line_anchor_0")
-    assert result.segments[0].params["start"] == (0.0, 0.0)
-    assert result.segments[0].params["end"] == (10.0, 0.0)
+    assert result.segments[0].params["start"] == [0.0, 0.0]
+    assert result.segments[0].params["end"] == [10.0, 0.0]
     _write_vectorizer_overlay(
         test_name="test_simple_vectorizer_creates_closed_line_path_segments_and_anchors",
         points=points,
@@ -290,6 +290,10 @@ def test_simple_vectorizer_creates_closed_bezier_segments_with_handles() -> None
     assert all(segment.type == "bezier" for segment in result.segments)
     assert all(segment.anchors[0] != segment.anchors[1] for segment in result.segments)
     assert set(result.segments[0].params) == {"start", "control1", "control2", "end"}
+    assert result.segments[0].params["start"] == [0.0, 0.0]
+    assert isinstance(result.segments[0].params["control1"], list)
+    assert isinstance(result.segments[0].params["control2"], list)
+    assert isinstance(result.segments[0].params["end"], list)
     assert result.segments[-1].anchors == ("path_bezier_anchor_4", "path_bezier_anchor_0")
     _write_vectorizer_overlay(
         test_name="test_simple_vectorizer_creates_closed_bezier_segments_with_handles",
@@ -325,6 +329,8 @@ def test_simple_vectorizer_result_is_writable_to_vector_document() -> None:
     assert len(document.segments) == 4
     assert document.paths[0].segments == tuple(segment.segment_id for segment in result.segments)
     assert document.segments[0].anchors == ("path_doc_anchor_0", "path_doc_anchor_1")
+    assert document.segments[0].params["start"] == [0.0, 0.0]
+    assert from_json(to_json(document)) == document
     _write_vectorizer_overlay(
         test_name="test_simple_vectorizer_result_is_writable_to_vector_document",
         points=points,
