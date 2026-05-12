@@ -107,6 +107,83 @@ def test_fitting_confidence_metric_flags_unstable_arc_parameters() -> None:
     assert 0.0 <= result.confidence < 0.5
 
 
+@pytest.mark.parametrize(
+    ("segment_type", "parameter_delta"),
+    (
+        ("line", {}),
+        ("circle", {"center_distance": 0.1}),
+        ("arc", {"center_distance": 0.1, "radius_delta": 0.1, "start_angle_delta": 0.05}),
+    ),
+)
+def test_fitting_confidence_metric_rejects_missing_parameter_delta_fields(
+    segment_type: str,
+    parameter_delta: dict[str, object],
+) -> None:
+    metric = FittingConfidenceMetric()
+    inputs = FittingConfidenceInputs(
+        segment_type=segment_type,
+        inlier_ratio=0.9,
+        rmse=0.02,
+        segment_length=12.0,
+        radial_error=0.02 if segment_type != "line" else None,
+        arc_angle_coverage=math.pi if segment_type == "arc" else None,
+        parameter_delta=parameter_delta,
+    )
+
+    result = metric.evaluate(inputs)
+
+    assert result.confidence == 0.0
+    assert result.failure_reason == "missing_parameter_delta"
+
+
+@pytest.mark.parametrize("invalid_value", (math.nan, math.inf, -math.inf))
+def test_fitting_confidence_metric_rejects_invalid_numeric_inputs(invalid_value: float) -> None:
+    metric = FittingConfidenceMetric()
+
+    result = metric.evaluate(
+        FittingConfidenceInputs(
+            segment_type="line",
+            inlier_ratio=invalid_value,
+            rmse=0.02,
+            segment_length=12.0,
+            parameter_delta={
+                "direction_angle": 0.01,
+                "start_distance": 0.02,
+                "end_distance": 0.02,
+                "line_offset": 0.01,
+            },
+        )
+    )
+
+    assert result.confidence == 0.0
+    assert result.failure_reason == "invalid_numeric_input"
+
+
+def test_fitting_confidence_metric_rejects_invalid_parameter_delta_numeric_inputs() -> None:
+    metric = FittingConfidenceMetric()
+
+    result = metric.evaluate(
+        FittingConfidenceInputs(
+            segment_type="arc",
+            inlier_ratio=0.9,
+            rmse=0.02,
+            segment_length=12.0,
+            radial_error=0.02,
+            arc_angle_coverage=math.pi,
+            parameter_delta={
+                "center_distance": math.nan,
+                "radius_delta": 0.02,
+                "start_angle_delta": 0.01,
+                "end_angle_delta": 0.01,
+                "direction_changed": False,
+            },
+        )
+    )
+
+    assert result.confidence == 0.0
+    assert result.failure_reason == "invalid_numeric_input"
+
+
 def test_fitting_confidence_metric_has_no_forbidden_dependencies() -> None:
     source_path = Path("services/fitting_confidence.py")
     source = source_path.read_text(encoding="utf-8")

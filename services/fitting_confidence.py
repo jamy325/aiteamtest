@@ -57,6 +57,12 @@ class FittingConfidenceMetric:
 
     def evaluate(self, inputs: FittingConfidenceInputs) -> FittingConfidenceResult:
         segment_type = inputs.segment_type.lower()
+        missing_parameter_delta = self._missing_parameter_delta_fields(segment_type, inputs.parameter_delta)
+        if missing_parameter_delta:
+            return FittingConfidenceResult(confidence=0.0, failure_reason="missing_parameter_delta")
+        if not self._has_valid_numeric_inputs(segment_type, inputs):
+            return FittingConfidenceResult(confidence=0.0, failure_reason="invalid_numeric_input")
+
         scores = {
             "inlier_ratio": self._higher_is_better(
                 inputs.inlier_ratio,
@@ -113,6 +119,41 @@ class FittingConfidenceMetric:
         confidence = self._weighted_average(scores, weight_keys) * min(scores[key] for key in weight_keys)
         confidence = self._clamp01(confidence)
         return FittingConfidenceResult(confidence=confidence, failure_reason=failure_reason)
+
+    def _missing_parameter_delta_fields(self, segment_type: str, parameter_delta: dict[str, object]) -> tuple[str, ...]:
+        required_fields_by_type = {
+            "line": ("direction_angle", "start_distance", "end_distance", "line_offset"),
+            "circle": ("center_distance", "radius_delta"),
+            "arc": ("center_distance", "radius_delta", "start_angle_delta", "end_angle_delta", "direction_changed"),
+        }
+        if segment_type not in required_fields_by_type:
+            raise ValueError(f"unsupported segment type: {segment_type}")
+        return tuple(field for field in required_fields_by_type[segment_type] if field not in parameter_delta)
+
+    def _has_valid_numeric_inputs(self, segment_type: str, inputs: FittingConfidenceInputs) -> bool:
+        numeric_values = [inputs.inlier_ratio, inputs.rmse, inputs.segment_length]
+        if inputs.radial_error is not None:
+            numeric_values.append(inputs.radial_error)
+        if inputs.arc_angle_coverage is not None:
+            numeric_values.append(inputs.arc_angle_coverage)
+        if not all(math.isfinite(value) for value in numeric_values):
+            return False
+
+        numeric_parameter_delta_fields_by_type = {
+            "line": ("direction_angle", "start_distance", "end_distance", "line_offset"),
+            "circle": ("center_distance", "radius_delta"),
+            "arc": ("center_distance", "radius_delta", "start_angle_delta", "end_angle_delta"),
+        }
+        for field in numeric_parameter_delta_fields_by_type[segment_type]:
+            value = inputs.parameter_delta[field]
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                return False
+
+        if segment_type == "arc":
+            direction_changed = inputs.parameter_delta["direction_changed"]
+            if not isinstance(direction_changed, bool):
+                return False
+        return True
 
     def _base_failure_reason(self, inputs: FittingConfidenceInputs) -> str | None:
         if inputs.inlier_ratio < self.config.min_inlier_ratio:
