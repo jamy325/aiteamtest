@@ -25,6 +25,23 @@ class RansacLineResult:
     outlier_indexes: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RansacCircleConfig:
+    iterations: int = 96
+    inlier_threshold: float = 0.25
+    min_inlier_ratio: float = 0.5
+    random_seed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RansacCircleResult:
+    params: dict[str, float]
+    inlier_ratio: float
+    fit_error: float
+    inlier_indexes: tuple[int, ...]
+    outlier_indexes: tuple[int, ...]
+
+
 class RansacLineFitter:
     def __init__(self, config: RansacLineConfig | None = None) -> None:
         self.config = config or RansacLineConfig()
@@ -182,7 +199,142 @@ class RansacLineFitter:
         return direction
 
 
+class RansacCircleFitter:
+    def __init__(self, config: RansacCircleConfig | None = None) -> None:
+        self.config = config or RansacCircleConfig()
+
+    def fit(self, points: tuple[Point, ...] | list[Point]) -> RansacCircleResult:
+        point_sequence = tuple((float(x), float(y)) for x, y in points)
+        if len(point_sequence) < 3:
+            raise ValueError("at least three Vector Space points are required")
+
+        rng = random.Random(self.config.random_seed)
+        best: tuple[tuple[int, ...], tuple[float, float, float], float] | None = None
+
+        for first_index, second_index, third_index in self._sample_triplets(len(point_sequence), rng):
+            circle = self._circle_from_points(
+                point_sequence[first_index],
+                point_sequence[second_index],
+                point_sequence[third_index],
+            )
+            if circle is None:
+                continue
+
+            inlier_indexes = tuple(
+                index
+                for index, point in enumerate(point_sequence)
+                if self._radial_error(point, circle) <= self.config.inlier_threshold
+            )
+            if len(inlier_indexes) < 3:
+                continue
+
+            fit_error = self._fit_error(point_sequence, inlier_indexes, circle)
+            candidate = (inlier_indexes, circle, fit_error)
+            if best is None or self._is_better_candidate(candidate, best, len(point_sequence)):
+                best = candidate
+
+        if best is None:
+            raise ValueError("unable to fit a robust circle from the provided points")
+
+        inlier_indexes, circle, fit_error = best
+        inlier_ratio = len(inlier_indexes) / len(point_sequence)
+        if inlier_ratio < self.config.min_inlier_ratio:
+            raise ValueError("insufficient inlier ratio for robust circle fit")
+
+        outlier_index_set = set(range(len(point_sequence))) - set(inlier_indexes)
+        cx, cy, radius = circle
+        return RansacCircleResult(
+            params={"cx": cx, "cy": cy, "r": radius},
+            inlier_ratio=inlier_ratio,
+            fit_error=fit_error,
+            inlier_indexes=inlier_indexes,
+            outlier_indexes=tuple(sorted(outlier_index_set)),
+        )
+
+    def _sample_triplets(self, point_count: int, rng: random.Random) -> tuple[tuple[int, int, int], ...]:
+        if point_count == 3:
+            return ((0, 1, 2),)
+
+        triplets: list[tuple[int, int, int]] = []
+        seen: set[tuple[int, int, int]] = set()
+        max_unique_triplets = math.comb(point_count, 3)
+        target_iterations = min(self.config.iterations, max_unique_triplets)
+
+        while len(triplets) < target_iterations:
+            triplet = tuple(sorted(rng.sample(range(point_count), 3)))
+            if triplet in seen:
+                continue
+            seen.add(triplet)
+            triplets.append(triplet)
+
+        return tuple(triplets)
+
+    def _circle_from_points(self, first: Point, second: Point, third: Point) -> tuple[float, float, float] | None:
+        x1, y1 = first
+        x2, y2 = second
+        x3, y3 = third
+
+        determinant = 2.0 * (
+            (x1 * (y2 - y3))
+            + (x2 * (y3 - y1))
+            + (x3 * (y1 - y2))
+        )
+        if PrecisionUtility.near_zero(determinant):
+            return None
+
+        x1_sq_y1_sq = (x1 * x1) + (y1 * y1)
+        x2_sq_y2_sq = (x2 * x2) + (y2 * y2)
+        x3_sq_y3_sq = (x3 * x3) + (y3 * y3)
+        cx = (
+            (x1_sq_y1_sq * (y2 - y3))
+            + (x2_sq_y2_sq * (y3 - y1))
+            + (x3_sq_y3_sq * (y1 - y2))
+        ) / determinant
+        cy = (
+            (x1_sq_y1_sq * (x3 - x2))
+            + (x2_sq_y2_sq * (x1 - x3))
+            + (x3_sq_y3_sq * (x2 - x1))
+        ) / determinant
+        radius = math.hypot(x1 - cx, y1 - cy)
+        if PrecisionUtility.near_zero(radius):
+            return None
+
+        return (cx, cy, radius)
+
+    def _radial_error(self, point: Point, circle: tuple[float, float, float]) -> float:
+        cx, cy, radius = circle
+        return abs(math.hypot(point[0] - cx, point[1] - cy) - radius)
+
+    def _fit_error(
+        self,
+        points: tuple[Point, ...],
+        inlier_indexes: tuple[int, ...],
+        circle: tuple[float, float, float],
+    ) -> float:
+        errors = [self._radial_error(points[index], circle) for index in inlier_indexes]
+        if not errors:
+            return math.inf
+        return sum(errors) / len(errors)
+
+    def _is_better_candidate(
+        self,
+        candidate: tuple[tuple[int, ...], tuple[float, float, float], float],
+        current_best: tuple[tuple[int, ...], tuple[float, float, float], float],
+        point_count: int,
+    ) -> bool:
+        candidate_inliers, _, candidate_error = candidate
+        best_inliers, _, best_error = current_best
+        if len(candidate_inliers) != len(best_inliers):
+            return len(candidate_inliers) > len(best_inliers)
+        if not PrecisionUtility.almost_equal(candidate_error, best_error):
+            return candidate_error < best_error
+        return (len(candidate_inliers) / point_count) > (len(best_inliers) / point_count)
+
+
 __all__ = [
+    "RansacCircleConfig",
+    "RansacCircleFitter",
+    "RansacCircleResult",
     "RansacLineConfig",
     "RansacLineFitter",
     "RansacLineResult",
