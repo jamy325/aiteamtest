@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol
 
+from core.document import add_constraint
 from core.precision import PrecisionUtility
-from core.types import Anchor, VectorDocument
+from core.types import Anchor, Constraint, VectorDocument
 
 AnchorRelation = Literal["same_path", "cross_path_same_object", "cross_object", "cross_path_unknown_object"]
+CoincidentConstraintMode = Literal["soft", "hard"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +25,15 @@ class SnappingCandidate:
     distance: float
     locked_involved: bool
     movable_anchor_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CoincidentConstraintConfig:
+    soft_confidence_threshold: float = 0.5
+    hard_confidence_threshold: float = 0.9
+    soft_strength: float = 0.5
+    hard_strength: float = 1.0
+    source: str = "global_snapping"
 
 
 class AnchorSpatialIndex(Protocol):
@@ -115,10 +126,90 @@ class GlobalSnappingEngine:
         return "cross_object"
 
 
+class CoincidentConstraintEngine:
+    def __init__(
+        self,
+        snapping_engine: GlobalSnappingEngine | None = None,
+        config: CoincidentConstraintConfig | None = None,
+    ) -> None:
+        self.snapping_engine = snapping_engine or GlobalSnappingEngine()
+        self.config = config or CoincidentConstraintConfig()
+
+    def generate_constraints(self, document: VectorDocument) -> tuple[Constraint, ...]:
+        constraints: list[Constraint] = []
+        seen_target_pairs = {
+            tuple(sorted(constraint.targets))
+            for constraint in document.constraints
+            if constraint.type == "coincident"
+        }
+
+        for candidate in self.snapping_engine.find_candidates(document):
+            constraint = self._constraint_from_candidate(candidate)
+            if constraint is None:
+                continue
+            target_pair = tuple(sorted(constraint.targets))
+            if target_pair in seen_target_pairs:
+                continue
+            seen_target_pairs.add(target_pair)
+            constraints.append(constraint)
+
+        return tuple(constraints)
+
+    def apply_constraints(self, document: VectorDocument) -> VectorDocument:
+        updated_document = document
+        for constraint in self.generate_constraints(document):
+            if any(
+                existing.constraint_id == constraint.constraint_id
+                or (existing.type == "coincident" and tuple(sorted(existing.targets)) == tuple(sorted(constraint.targets)))
+                for existing in updated_document.constraints
+            ):
+                continue
+            updated_document = add_constraint(updated_document, constraint)
+        return updated_document
+
+    def _constraint_from_candidate(self, candidate: SnappingCandidate) -> Constraint | None:
+        confidence = self._confidence_for_candidate(candidate)
+        if confidence < self.config.soft_confidence_threshold:
+            return None
+
+        mode: CoincidentConstraintMode = "soft"
+        strength = self.config.soft_strength
+        if not candidate.locked_involved and confidence >= self.config.hard_confidence_threshold:
+            mode = "hard"
+            strength = self.config.hard_strength
+
+        anchor_ids = tuple(sorted(candidate.anchor_ids))
+        return Constraint(
+            constraint_id=f"constraint_coincident_{anchor_ids[0]}_{anchor_ids[1]}",
+            type="coincident",
+            targets=anchor_ids,
+            strength=strength,
+            source=self.config.source,
+            confidence=confidence,
+            metadata={
+                "mode": mode,
+                "relation": candidate.relation,
+                "distance": candidate.distance,
+                "locked_involved": candidate.locked_involved,
+                # Preserve the candidate's non-forcible movement information for downstream topology work.
+                "movable_anchor_ids": list(candidate.movable_anchor_ids),
+            },
+        )
+
+    def _confidence_for_candidate(self, candidate: SnappingCandidate) -> float:
+        epsilon = self.snapping_engine.config.epsilon
+        if PrecisionUtility.near_zero(epsilon):
+            return 1.0 if PrecisionUtility.near_zero(candidate.distance) else 0.0
+        return max(0.0, min(1.0, 1.0 - (candidate.distance / epsilon)))
+
+
 __all__ = [
     "AnchorRelation",
     "AnchorSpatialIndex",
     "BruteForceAnchorIndex",
+    "CoincidentConstraintConfig",
+    "CoincidentConstraintEngine",
+    "CoincidentConstraintMode",
     "GlobalSnappingEngine",
     "SnappingCandidate",
     "SnappingConfig",

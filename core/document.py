@@ -84,8 +84,9 @@ def add_constraint(document: VectorDocument, constraint: Constraint) -> VectorDo
     _ensure_unique_ids(document.constraints, constraint.constraint_id, "constraint_id")
 
     objects = document.objects
+    target_object_ids = _constraint_object_ids(document, constraint)
     for index, obj in enumerate(document.objects):
-        if obj.object_id in constraint.targets:
+        if obj.object_id in target_object_ids:
             objects = _replace_at(
                 objects,
                 index,
@@ -237,6 +238,23 @@ def _append_unique(values: Iterable[str], item: str) -> tuple[str, ...]:
     if item in current:
         return current
     return current + (item,)
+
+
+def _constraint_object_ids(document: VectorDocument, constraint: Constraint) -> set[str]:
+    path_to_object = {path.path_id: path.object_id for path in document.paths}
+    anchor_to_path = {anchor.anchor_id: anchor.path_id for anchor in document.anchors}
+    object_ids: set[str] = set()
+
+    for target in constraint.targets:
+        path_id = anchor_to_path.get(target, target)
+        object_id = path_to_object.get(path_id)
+        if object_id is not None:
+            object_ids.add(object_id)
+            continue
+        if _find_index(document.objects, "object_id", target) is not None:
+            object_ids.add(target)
+
+    return object_ids
 
 
 def _replace_at(values: tuple[Any, ...], index: int, replacement: Any) -> tuple[Any, ...]:
