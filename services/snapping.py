@@ -64,11 +64,14 @@ class GlobalSnappingEngine:
 
         for anchor in anchors:
             for neighbor in index.query_radius(anchor, self.config.epsilon):
+                distance = PrecisionUtility.distance_between_points(anchor.position, neighbor.position)
+                if distance > self.config.epsilon:
+                    continue
                 pair = tuple(sorted((anchor.anchor_id, neighbor.anchor_id)))
                 if pair in seen_pairs:
                     continue
                 seen_pairs.add(pair)
-                candidates.append(self._candidate(anchor, neighbor, path_to_object))
+                candidates.append(self._candidate(anchor, neighbor, path_to_object, distance))
 
         candidates.sort(key=lambda candidate: (candidate.distance, candidate.anchor_ids))
         return tuple(candidates)
@@ -78,6 +81,7 @@ class GlobalSnappingEngine:
         left: Anchor,
         right: Anchor,
         path_to_object: dict[str, str | None],
+        distance: float,
     ) -> SnappingCandidate:
         relation = self._relation(left, right, path_to_object)
         locked_involved = left.locked or right.locked
@@ -88,7 +92,7 @@ class GlobalSnappingEngine:
             path_ids=(left.path_id, right.path_id),
             object_ids=(path_to_object.get(left.path_id), path_to_object.get(right.path_id)),
             relation=relation,
-            distance=PrecisionUtility.distance_between_points(left.position, right.position),
+            distance=distance,
             locked_involved=locked_involved,
             movable_anchor_ids=movable_anchor_ids,
         )

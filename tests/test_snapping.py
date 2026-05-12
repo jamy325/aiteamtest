@@ -110,6 +110,44 @@ def test_global_snapping_engine_uses_spatial_index_interface() -> None:
     assert created_indexes[0].query_count == len(document.anchors)
 
 
+def test_global_snapping_engine_exact_filters_spatial_index_superset() -> None:
+    document = create_document(
+        document_id="doc_superset",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(),
+    )
+    path = VectorPath(path_id="path_a")
+    document = add_path(document, path)
+    anchors = (
+        Anchor(anchor_id="a1", path_id="path_a", position=(0.0, 0.0)),
+        Anchor(anchor_id="a2", path_id="path_a", position=(0.05, 0.0)),
+        Anchor(anchor_id="far_1", path_id="path_a", position=(0.01, 99.0)),
+    )
+    for anchor in anchors:
+        document = add_anchor(document, anchor)
+
+    class SupersetIndex:
+        def __init__(self, indexed_anchors: tuple[Anchor, ...]) -> None:
+            self.anchors = indexed_anchors
+
+        def query_radius(self, anchor: Anchor, radius: float) -> tuple[Anchor, ...]:
+            return tuple(candidate for candidate in self.anchors if candidate.anchor_id != anchor.anchor_id)
+
+    engine = GlobalSnappingEngine(
+        SnappingConfig(epsilon=0.1),
+        index_builder=SupersetIndex,
+    )
+
+    candidates = engine.find_candidates(document)
+    pairs = {tuple(sorted(candidate.anchor_ids)) for candidate in candidates}
+
+    assert ("a1", "a2") in pairs
+    assert ("a1", "far_1") not in pairs
+    assert ("a2", "far_1") not in pairs
+    assert all(candidate.distance <= 0.1 for candidate in candidates)
+
+
 def test_global_snapping_engine_does_not_mutate_document_or_anchors() -> None:
     document, _ = _document_with_anchors()
     original_document = document
