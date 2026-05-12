@@ -284,7 +284,7 @@ class SelfIntersectionDetector:
         q_minus_p = (q1[0] - p1[0], q1[1] - p1[1])
 
         if PrecisionUtility.near_zero(r_cross_s, epsilon=self.config.epsilon):
-            return None
+            return self._collinear_overlap_point(p1, q1, q2, r, q_minus_p)
 
         t = self._cross(q_minus_p, s) / r_cross_s
         u = self._cross(q_minus_p, r) / r_cross_s
@@ -294,11 +294,44 @@ class SelfIntersectionDetector:
 
         return (p1[0] + t * r[0], p1[1] + t * r[1])
 
+    def _collinear_overlap_point(
+        self,
+        p1: Point,
+        q1: Point,
+        q2: Point,
+        r: Point,
+        q_minus_p: Point,
+    ) -> Point | None:
+        if not PrecisionUtility.near_zero(self._cross(q_minus_p, r), epsilon=self.config.epsilon):
+            return None
+
+        r_dot_r = self._dot(r, r)
+        if PrecisionUtility.near_zero(r_dot_r, epsilon=self.config.epsilon):
+            return None
+
+        t0 = self._dot(q_minus_p, r) / r_dot_r
+        t1 = self._dot((q2[0] - p1[0], q2[1] - p1[1]), r) / r_dot_r
+        overlap_start = max(0.0, min(t0, t1))
+        overlap_end = min(1.0, max(t0, t1))
+        if overlap_end < overlap_start - self.config.epsilon:
+            return None
+
+        if overlap_end - overlap_start <= self.config.epsilon:
+            representative_t = overlap_start
+        else:
+            representative_t = (overlap_start + overlap_end) / 2.0
+
+        clamped_t = min(max(representative_t, 0.0), 1.0)
+        return (p1[0] + clamped_t * r[0], p1[1] + clamped_t * r[1])
+
     def _within_segment(self, value: float) -> bool:
         return -self.config.epsilon <= value <= 1.0 + self.config.epsilon
 
     def _cross(self, left: Point, right: Point) -> float:
         return left[0] * right[1] - left[1] * right[0]
+
+    def _dot(self, left: Point, right: Point) -> float:
+        return left[0] * right[0] + left[1] * right[1]
 
     def _coerce_point(self, value: Point | list[float]) -> Point:
         return (float(value[0]), float(value[1]))

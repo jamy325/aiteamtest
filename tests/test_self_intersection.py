@@ -43,6 +43,40 @@ def test_self_intersection_detector_detects_line_path_crossing() -> None:
     assert document.paths[0].metadata == {}
 
 
+def test_self_intersection_detector_detects_non_adjacent_collinear_overlap() -> None:
+    path = VectorPath(path_id="path_overlap", closed=False, topology_status="open")
+    segments = (
+        Segment("seg_1", "path_overlap", "line", params={"start": [0.0, 0.0], "end": [10.0, 0.0]}),
+        Segment("seg_2", "path_overlap", "line", params={"start": [20.0, 0.0], "end": [20.0, 10.0]}),
+        Segment("seg_3", "path_overlap", "line", params={"start": [5.0, 0.0], "end": [15.0, 0.0]}),
+    )
+    document = _build_document(path, segments)
+    detector = SelfIntersectionDetector()
+
+    result = detector.detect_path_self_intersections(document, "path_overlap")
+
+    assert result.self_intersection_count == 1
+    assert 5.0 <= result.self_intersection_points[0][0] <= 10.0
+    assert result.self_intersection_points[0][1] == pytest.approx(0.0)
+    assert result.document.paths[0].topology_status == "self_intersected"
+
+
+def test_self_intersection_detector_ignores_adjacent_collinear_continuous_segments() -> None:
+    path = VectorPath(path_id="path_adjacent_collinear", closed=False, topology_status="open")
+    segments = (
+        Segment("seg_1", "path_adjacent_collinear", "line", params={"start": [0.0, 0.0], "end": [10.0, 0.0]}),
+        Segment("seg_2", "path_adjacent_collinear", "line", params={"start": [10.0, 0.0], "end": [20.0, 0.0]}),
+    )
+    document = _build_document(path, segments)
+    detector = SelfIntersectionDetector()
+
+    result = detector.detect_path_self_intersections(document, "path_adjacent_collinear")
+
+    assert result.self_intersection_count == 0
+    assert result.self_intersection_points == ()
+    assert result.document.paths[0].topology_status == "open"
+
+
 def test_self_intersection_detector_ignores_adjacent_shared_endpoints_on_closed_path() -> None:
     path = VectorPath(path_id="path_closed_rect", closed=True, topology_status="closed")
     segments = (
