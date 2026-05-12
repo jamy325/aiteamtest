@@ -56,23 +56,31 @@ class RefinementFeedback:
         )
 
     def _has_valid_numeric_inputs(self, inputs: RefinementFeedbackInputs) -> bool:
-        return all(
+        if not all(
             math.isfinite(value)
             for value in (
                 inputs.inlier_ratio,
                 inputs.fit_error,
                 inputs.confidence_result.confidence,
             )
-        )
+        ):
+            return False
+        if not 0.0 <= inputs.inlier_ratio <= 1.0:
+            return False
+        if inputs.fit_error < 0.0:
+            return False
+        if not 0.0 <= inputs.confidence_result.confidence <= 1.0:
+            return False
+        return True
 
     def _invalid_numeric_result(self, inputs: RefinementFeedbackInputs) -> RefinementFeedbackResult:
         suggestion, retry_policy = self._suggestion("invalid_numeric_input", inputs.segment_type)
         return RefinementFeedbackResult(
             success=False,
             reason="invalid_numeric_input",
-            inlier_ratio=self._safe_numeric(inputs.inlier_ratio),
-            fit_error=self._safe_numeric(inputs.fit_error),
-            confidence=self._safe_numeric(inputs.confidence_result.confidence),
+            inlier_ratio=self._safe_ratio(inputs.inlier_ratio),
+            fit_error=self._safe_non_negative(inputs.fit_error),
+            confidence=self._safe_ratio(inputs.confidence_result.confidence),
             suggestion=suggestion,
             retry_policy=retry_policy,
         )
@@ -106,8 +114,19 @@ class RefinementFeedback:
             return "high_fit_error"
         return reason if reason in allowed_reasons else "low_confidence"
 
-    def _safe_numeric(self, value: float) -> float:
-        return float(value) if math.isfinite(value) else 0.0
+    def _safe_ratio(self, value: float) -> float:
+        if not math.isfinite(value):
+            return 0.0
+        if 0.0 <= value <= 1.0:
+            return float(value)
+        return 0.0
+
+    def _safe_non_negative(self, value: float) -> float:
+        if not math.isfinite(value):
+            return 0.0
+        if value >= 0.0:
+            return float(value)
+        return 0.0
 
     def _suggestion(self, reason: str | None, segment_type: str) -> tuple[str, str]:
         if reason is None:

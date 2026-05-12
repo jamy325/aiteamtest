@@ -152,6 +152,28 @@ def test_refinement_feedback_rejects_invalid_inlier_ratio(invalid_value: float) 
     json.dumps(result.to_dict(), allow_nan=False)
 
 
+@pytest.mark.parametrize("invalid_value", (-0.1, 1.1, 2.0))
+def test_refinement_feedback_rejects_out_of_range_inlier_ratio(invalid_value: float) -> None:
+    feedback = RefinementFeedback()
+
+    result = feedback.evaluate(
+        RefinementFeedbackInputs(
+            segment_type="line",
+            inlier_ratio=invalid_value,
+            fit_error=0.01,
+            confidence_result=FittingConfidenceResult(confidence=0.9, failure_reason=None),
+        )
+    )
+
+    assert result.success is False
+    assert result.reason == "invalid_numeric_input"
+    assert result.inlier_ratio == 0.0
+    assert result.fit_error == 0.01
+    assert result.confidence == 0.9
+    assert result.retry_policy == "abort_and_recompute"
+    json.dumps(result.to_dict(), allow_nan=False)
+
+
 @pytest.mark.parametrize("invalid_value", (math.nan, math.inf, -math.inf))
 def test_refinement_feedback_rejects_invalid_fit_error(invalid_value: float) -> None:
     feedback = RefinementFeedback()
@@ -175,6 +197,27 @@ def test_refinement_feedback_rejects_invalid_fit_error(invalid_value: float) -> 
     json.dumps(result.to_dict(), allow_nan=False)
 
 
+def test_refinement_feedback_rejects_negative_fit_error() -> None:
+    feedback = RefinementFeedback()
+
+    result = feedback.evaluate(
+        RefinementFeedbackInputs(
+            segment_type="line",
+            inlier_ratio=0.9,
+            fit_error=-1.0,
+            confidence_result=FittingConfidenceResult(confidence=0.9, failure_reason=None),
+        )
+    )
+
+    assert result.success is False
+    assert result.reason == "invalid_numeric_input"
+    assert result.inlier_ratio == 0.9
+    assert result.fit_error == 0.0
+    assert result.confidence == 0.9
+    assert result.retry_policy == "abort_and_recompute"
+    json.dumps(result.to_dict(), allow_nan=False)
+
+
 @pytest.mark.parametrize("invalid_value", (math.nan, math.inf, -math.inf))
 def test_refinement_feedback_rejects_invalid_confidence(invalid_value: float) -> None:
     feedback = RefinementFeedback()
@@ -194,6 +237,28 @@ def test_refinement_feedback_rejects_invalid_confidence(invalid_value: float) ->
     assert result.fit_error == 0.09
     assert result.confidence == 0.0
     assert result.suggestion == "reject invalid fit metrics and recompute deterministically"
+    assert result.retry_policy == "abort_and_recompute"
+    json.dumps(result.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize("invalid_value", (-0.1, 1.1, 2.0))
+def test_refinement_feedback_rejects_out_of_range_confidence(invalid_value: float) -> None:
+    feedback = RefinementFeedback()
+
+    result = feedback.evaluate(
+        RefinementFeedbackInputs(
+            segment_type="circle",
+            inlier_ratio=0.87,
+            fit_error=0.09,
+            confidence_result=FittingConfidenceResult(confidence=invalid_value, failure_reason=None),
+        )
+    )
+
+    assert result.success is False
+    assert result.reason == "invalid_numeric_input"
+    assert result.inlier_ratio == 0.87
+    assert result.fit_error == 0.09
+    assert result.confidence == 0.0
     assert result.retry_policy == "abort_and_recompute"
     json.dumps(result.to_dict(), allow_nan=False)
 
