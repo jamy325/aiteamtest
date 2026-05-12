@@ -84,7 +84,7 @@ class EdgeErrorCalculator:
     def _combine_directional_errors(self, missing_edge_error: float, overdraw_error: float) -> float:
         if math.isinf(missing_edge_error) or math.isinf(overdraw_error):
             return math.inf
-        return (missing_edge_error + overdraw_error) / 2.0
+        return missing_edge_error + overdraw_error
 
 
 __all__ = ["EdgeErrorCalculator", "EdgeErrorResult"]

@@ -30,7 +30,7 @@ def test_edge_error_calculator_reports_bidirectional_error_for_shifted_line_samp
 
     assert result.missing_edge_error == pytest.approx(1.0)
     assert result.overdraw_error == pytest.approx(1.0)
-    assert result.chamfer_error == pytest.approx(1.0)
+    assert result.chamfer_error == pytest.approx(2.0)
 
 
 def test_edge_error_calculator_reports_missing_edge_for_closed_contour_gap() -> None:
@@ -59,7 +59,19 @@ def test_edge_error_calculator_reports_missing_edge_for_closed_contour_gap() -> 
 
     assert result.missing_edge_error == pytest.approx(0.125)
     assert result.overdraw_error == pytest.approx(0.0)
-    assert result.chamfer_error == pytest.approx(0.0625)
+    assert result.chamfer_error == pytest.approx(0.125)
+
+
+def test_edge_error_calculator_reports_asymmetric_overdraw_error() -> None:
+    calculator = EdgeErrorCalculator()
+    source_points = ((0.0, 0.0), (1.0, 0.0))
+    vector_points = ((0.0, 0.0), (1.0, 0.0), (100.0, 0.0))
+
+    result = calculator.calculate(source_points, vector_points)
+
+    assert result.missing_edge_error == pytest.approx(0.0)
+    assert result.overdraw_error == pytest.approx(33.0)
+    assert result.chamfer_error == pytest.approx(33.0)
 
 
 def test_edge_error_calculator_handles_empty_vector_samples_without_mutating_inputs() -> None:
