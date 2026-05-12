@@ -368,12 +368,19 @@ class RansacArcFitter:
             raise ValueError("at least three Vector Space points are required")
 
         circle_result = self._circle_fitter.fit(point_sequence)
-        if circle_result.fit_error > self.config.max_radial_error:
+        circle = (
+            float(circle_result.params["cx"]),
+            float(circle_result.params["cy"]),
+            float(circle_result.params["r"]),
+        )
+        radial_errors = tuple(
+            self._circle_fitter._radial_error(point_sequence[index], circle)
+            for index in circle_result.inlier_indexes
+        )
+        if radial_errors and max(radial_errors) > self.config.max_radial_error:
             raise ValueError("arc radial fit error exceeds maximum radial error")
 
-        cx = float(circle_result.params["cx"])
-        cy = float(circle_result.params["cy"])
-        radius = float(circle_result.params["r"])
+        cx, cy, radius = circle
         inlier_points = tuple(point_sequence[index] for index in circle_result.inlier_indexes)
         start_angle, end_angle, direction, arc_span = self._arc_angles(inlier_points, (cx, cy))
         if arc_span < self.config.min_arc_angle:

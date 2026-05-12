@@ -98,6 +98,38 @@ def test_ransac_arc_fitter_rejects_excessive_radial_error() -> None:
         fitter.fit(points)
 
 
+def test_ransac_arc_fitter_rejects_single_inlier_exceeding_max_radial_error() -> None:
+    center = (10.0, -3.0)
+    radius = 5.0
+    angles = [math.radians(20.0 + (index * 10.0)) for index in range(10)]
+    points = list(
+        (
+            center[0] + radius * math.cos(angle),
+            center[1] + radius * math.sin(angle),
+        )
+        for angle in angles
+    )
+    spike_index = 5
+    spike_angle = angles[spike_index]
+    points[spike_index] = (
+        center[0] + (radius + 0.12) * math.cos(spike_angle),
+        center[1] + (radius + 0.12) * math.sin(spike_angle),
+    )
+    fitter = RansacArcFitter(
+        RansacArcConfig(
+            iterations=96,
+            inlier_threshold=0.2,
+            min_inlier_ratio=1.0,
+            random_seed=17,
+            min_arc_angle=0.5,
+            max_radial_error=0.05,
+        )
+    )
+
+    with pytest.raises(ValueError, match="maximum radial error"):
+        fitter.fit(tuple(points))
+
+
 def test_ransac_arc_fitter_requires_three_points() -> None:
     fitter = RansacArcFitter()
 
