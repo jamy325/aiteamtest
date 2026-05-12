@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 
 from services.fitting_confidence import FittingConfidenceResult
@@ -39,6 +40,8 @@ class RefinementFeedback:
         self.config = config or RefinementFeedbackConfig()
 
     def evaluate(self, inputs: RefinementFeedbackInputs) -> RefinementFeedbackResult:
+        if not self._has_valid_numeric_inputs(inputs):
+            return self._invalid_numeric_result(inputs)
         reason = self._failure_reason(inputs)
         success = reason is None
         suggestion, retry_policy = self._suggestion(reason, inputs.segment_type)
@@ -48,6 +51,28 @@ class RefinementFeedback:
             inlier_ratio=inputs.inlier_ratio,
             fit_error=inputs.fit_error,
             confidence=inputs.confidence_result.confidence,
+            suggestion=suggestion,
+            retry_policy=retry_policy,
+        )
+
+    def _has_valid_numeric_inputs(self, inputs: RefinementFeedbackInputs) -> bool:
+        return all(
+            math.isfinite(value)
+            for value in (
+                inputs.inlier_ratio,
+                inputs.fit_error,
+                inputs.confidence_result.confidence,
+            )
+        )
+
+    def _invalid_numeric_result(self, inputs: RefinementFeedbackInputs) -> RefinementFeedbackResult:
+        suggestion, retry_policy = self._suggestion("invalid_numeric_input", inputs.segment_type)
+        return RefinementFeedbackResult(
+            success=False,
+            reason="invalid_numeric_input",
+            inlier_ratio=self._safe_numeric(inputs.inlier_ratio),
+            fit_error=self._safe_numeric(inputs.fit_error),
+            confidence=self._safe_numeric(inputs.confidence_result.confidence),
             suggestion=suggestion,
             retry_policy=retry_policy,
         )
@@ -80,6 +105,9 @@ class RefinementFeedback:
         if reason == "high_rmse":
             return "high_fit_error"
         return reason if reason in allowed_reasons else "low_confidence"
+
+    def _safe_numeric(self, value: float) -> float:
+        return float(value) if math.isfinite(value) else 0.0
 
     def _suggestion(self, reason: str | None, segment_type: str) -> tuple[str, str]:
         if reason is None:
