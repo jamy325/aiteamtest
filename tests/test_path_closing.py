@@ -110,6 +110,72 @@ def test_topology_engine_corrects_closed_path_last_to_first_gap() -> None:
     assert result.document.anchors[3].position == (0.1, 0.0)
 
 
+def test_topology_engine_corrects_closed_single_segment_small_gap() -> None:
+    path = VectorPath(path_id="path_closed_single_small", closed=True, topology_status="open")
+    anchors = (
+        Anchor(anchor_id="a1", path_id="path_closed_single_small", position=(0.0, 0.0)),
+        Anchor(anchor_id="a2", path_id="path_closed_single_small", position=(0.2, 0.0)),
+    )
+    segments = (
+        Segment(
+            "seg_1",
+            "path_closed_single_small",
+            "line",
+            params={"start": [0.0, 0.0], "end": [0.2, 0.0]},
+            anchors=("a1", "a2"),
+        ),
+    )
+    document = _build_document(path=path, anchors=anchors, segments=segments)
+    engine = TopologyEngine(PathClosingConfig(auto_snap_distance=0.5))
+
+    result = engine.enforce_path_topology(document, "path_closed_single_small")
+
+    assert result.topology_status == "closed"
+    assert result.topology_error is False
+    assert result.max_gap == pytest.approx(0.2)
+    assert len(result.corrections) == 1
+    assert result.corrections[0].closing_gap is True
+    assert result.corrections[0].strategy == "move_both_minimal"
+    assert result.document.segments[0].params["start"] == [0.1, 0.0]
+    assert result.document.segments[0].params["end"] == [0.1, 0.0]
+    assert result.document.anchors[0].position == (0.1, 0.0)
+    assert result.document.anchors[1].position == (0.1, 0.0)
+    assert document.segments[0].params["start"] == [0.0, 0.0]
+    assert document.segments[0].params["end"] == [0.2, 0.0]
+
+
+def test_topology_engine_marks_closed_single_segment_large_gap_as_topology_error() -> None:
+    path = VectorPath(path_id="path_closed_single_large", closed=True, topology_status="open")
+    anchors = (
+        Anchor(anchor_id="a1", path_id="path_closed_single_large", position=(0.0, 0.0)),
+        Anchor(anchor_id="a2", path_id="path_closed_single_large", position=(2.0, 0.0)),
+    )
+    segments = (
+        Segment(
+            "seg_1",
+            "path_closed_single_large",
+            "line",
+            params={"start": [0.0, 0.0], "end": [2.0, 0.0]},
+            anchors=("a1", "a2"),
+        ),
+    )
+    document = _build_document(path=path, anchors=anchors, segments=segments)
+    engine = TopologyEngine(PathClosingConfig(auto_snap_distance=0.5))
+
+    result = engine.enforce_path_topology(document, "path_closed_single_large")
+
+    assert result.topology_status == "topology_error"
+    assert result.topology_error is True
+    assert result.max_gap == pytest.approx(2.0)
+    assert len(result.corrections) == 1
+    assert result.corrections[0].closing_gap is True
+    assert result.corrections[0].corrected is False
+    assert result.corrections[0].topology_error is True
+    assert result.corrections[0].reason == "gap_exceeds_auto_snap_distance"
+    assert result.document.segments[0].params["start"] == [0.0, 0.0]
+    assert result.document.segments[0].params["end"] == [2.0, 0.0]
+
+
 def test_topology_engine_marks_large_gap_as_topology_error() -> None:
     path = VectorPath(path_id="path_error", closed=False, topology_status="open")
     anchors = (

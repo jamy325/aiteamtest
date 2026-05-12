@@ -55,7 +55,7 @@ class TopologyEngine:
 
         path = document.paths[path_index]
         segment_ids = tuple(path.segments)
-        if len(segment_ids) < 2:
+        if not segment_ids or (len(segment_ids) == 1 and not path.closed):
             topology_status: TopologyStatus = "closed" if path.closed else "open"
             updated_document = self._replace_path(document, path_index, updated(path, topology_status=topology_status, max_gap=0.0))
             return PathTopologyResult(
