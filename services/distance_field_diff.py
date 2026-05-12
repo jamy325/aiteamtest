@@ -31,6 +31,12 @@ class DistanceFieldDiffResult:
     vector_point_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class RasterPolyline:
+    points: np.ndarray
+    closed: bool = False
+
+
 class DistanceFieldDiffRenderer:
     def __init__(
         self,
@@ -68,18 +74,15 @@ class DistanceFieldDiffRenderer:
         return encoded.tobytes()
 
     def _canvas_size(self, document: VectorDocument) -> tuple[int, int]:
-        if document.coordinate_system.view_box is not None:
-            _, _, width, height = document.coordinate_system.view_box
-            return (max(1, int(round(height))), max(1, int(round(width))))
         return (max(1, int(round(document.height))), max(1, int(round(document.width))))
 
     def _source_contours(
         self,
         document: VectorDocument,
         transformer: CoordinateTransformer,
-    ) -> tuple[tuple[Point, ...], tuple[np.ndarray, ...]]:
+    ) -> tuple[tuple[Point, ...], tuple[RasterPolyline, ...]]:
         vector_points: list[Point] = []
-        polylines: list[np.ndarray] = []
+        polylines: list[RasterPolyline] = []
         pipeline = document.metadata.get("pipeline", {})
         source_contours = pipeline.get("source_contours", {})
 
@@ -94,9 +97,12 @@ class DistanceFieldDiffRenderer:
                 )
                 vector_points.extend(contour_vector_points)
                 polylines.append(
-                    np.array(
-                        [self._point_to_pixel(transformer, point) for point in contour_vector_points],
-                        dtype=np.int32,
+                    RasterPolyline(
+                        points=np.array(
+                            [self._point_to_pixel(transformer, point) for point in contour_vector_points],
+                            dtype=np.int32,
+                        ),
+                        closed=bool(contour.get("closed", False)),
                     )
                 )
 
@@ -106,9 +112,9 @@ class DistanceFieldDiffRenderer:
         self,
         document: VectorDocument,
         transformer: CoordinateTransformer,
-    ) -> tuple[tuple[Point, ...], tuple[np.ndarray, ...]]:
+    ) -> tuple[tuple[Point, ...], tuple[RasterPolyline, ...]]:
         sampled_points: list[Point] = []
-        polylines: list[np.ndarray] = []
+        polylines: list[RasterPolyline] = []
 
         for segment in document.segments:
             if segment.type == "line":
@@ -127,7 +133,10 @@ class DistanceFieldDiffRenderer:
                 continue
             sampled_points.extend(segment_points)
             polylines.append(
-                np.array([self._point_to_pixel(transformer, point) for point in segment_points], dtype=np.int32)
+                RasterPolyline(
+                    points=np.array([self._point_to_pixel(transformer, point) for point in segment_points], dtype=np.int32),
+                    closed=False,
+                )
             )
 
         return (tuple(sampled_points), tuple(polylines))
@@ -194,15 +203,15 @@ class DistanceFieldDiffRenderer:
 
     def _rasterize_polylines(
         self,
-        polylines: tuple[np.ndarray, ...],
+        polylines: tuple[RasterPolyline, ...],
         width: int,
         height: int,
     ) -> np.ndarray:
         mask = np.zeros((height, width), dtype=np.uint8)
         for polyline in polylines:
-            if len(polyline) < 2:
+            if len(polyline.points) < 2:
                 continue
-            cv2.polylines(mask, [polyline], False, 255, self.options.line_thickness, cv2.LINE_8)
+            cv2.polylines(mask, [polyline.points], polyline.closed, 255, self.options.line_thickness, cv2.LINE_8)
         return mask
 
     def _build_diff_image(self, source_mask: np.ndarray, vector_mask: np.ndarray) -> np.ndarray:
@@ -260,4 +269,5 @@ __all__ = [
     "DistanceFieldDiffOptions",
     "DistanceFieldDiffRenderer",
     "DistanceFieldDiffResult",
+    "RasterPolyline",
 ]

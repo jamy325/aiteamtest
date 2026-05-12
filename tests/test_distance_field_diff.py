@@ -46,6 +46,73 @@ def _diff_document() -> object:
     return document
 
 
+def _scaled_diff_document() -> object:
+    document = create_document(
+        document_id="doc_diff_scaled",
+        width=64.0,
+        height=64.0,
+        coordinate_system=CoordinateSystem(
+            unit="mm",
+            precision=4,
+            view_box=(0.0, 0.0, 32.0, 32.0),
+            scale={"px_to_mm": 0.5},
+        ),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {
+                            "contour_id": "binary_scaled",
+                            "points": [[2.5, 5.0], [12.5, 5.0]],
+                            "coordinate_space": "vector",
+                            "closed": False,
+                        }
+                    ],
+                    "skeleton_contours": [],
+                }
+            }
+        },
+    )
+    path = VectorPath(path_id="path_scaled")
+    segment = Segment(
+        segment_id="segment_scaled",
+        path_id="path_scaled",
+        type="line",
+        params={"start": [2.5, 6.0], "end": [12.5, 6.0]},
+    )
+    document = add_path(document, path)
+    document = add_segment(document, segment)
+    return document
+
+
+def _closed_source_rectangle_document() -> object:
+    return create_document(
+        document_id="doc_closed_source",
+        width=64.0,
+        height=64.0,
+        coordinate_system=CoordinateSystem(
+            unit="px",
+            precision=4,
+            view_box=(0.0, 0.0, 64.0, 64.0),
+        ),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {
+                            "contour_id": "binary_closed",
+                            "points": [[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]],
+                            "coordinate_space": "vector",
+                            "closed": True,
+                        }
+                    ],
+                    "skeleton_contours": [],
+                }
+            }
+        },
+    )
+
+
 def test_distance_field_diff_renderer_generates_missing_and_overdraw_image() -> None:
     document = _diff_document()
     renderer = DistanceFieldDiffRenderer()
@@ -74,6 +141,26 @@ def test_distance_field_diff_renderer_sampling_density_affects_vector_sample_cou
 
     assert sparse_result.vector_point_count < dense_result.vector_point_count
     assert sparse_result.source_point_count == dense_result.source_point_count
+
+
+def test_distance_field_diff_renderer_uses_document_pixel_dimensions_for_scaled_coordinate_system() -> None:
+    document = _scaled_diff_document()
+    renderer = DistanceFieldDiffRenderer()
+
+    result = renderer.render_diff(document)
+
+    assert result.image.shape == (64, 64, 3)
+    assert result.image[10, 5, 2] > 0
+    assert result.image[12, 5, 0] > 0
+
+
+def test_distance_field_diff_renderer_preserves_closed_source_contour_edges() -> None:
+    document = _closed_source_rectangle_document()
+    renderer = DistanceFieldDiffRenderer()
+
+    result = renderer.render_diff(document)
+
+    assert result.image[20, 10, 2] > 0
 
 
 def test_distance_field_diff_renderer_does_not_mutate_document() -> None:
