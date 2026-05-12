@@ -20,6 +20,16 @@ def _copy_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
     return dict(value or {})
 
 
+def _canonicalize_json_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_canonicalize_json_value(item) for item in value]
+    if isinstance(value, list):
+        return [_canonicalize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _canonicalize_json_value(item) for key, item in value.items()}
+    return value
+
+
 def _copy_float_mapping(value: Mapping[str, float] | None) -> dict[str, float]:
     return {str(key): float(item) for key, item in (value or {}).items()}
 
@@ -93,7 +103,7 @@ class Segment:
     def __post_init__(self) -> None:
         if self.type not in SegmentTypes:
             raise ValueError(f"unsupported segment type: {self.type}")
-        object.__setattr__(self, "params", _copy_mapping(self.params))
+        object.__setattr__(self, "params", _canonicalize_json_value(_copy_mapping(self.params)))
         object.__setattr__(self, "anchors", _tuple_of_strings(self.anchors))
         object.__setattr__(self, "metadata", _copy_mapping(self.metadata))
 

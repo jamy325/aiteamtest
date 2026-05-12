@@ -158,6 +158,37 @@ def test_document_add_requires_existing_parent_relationships() -> None:
         add_anchor(document, Anchor(anchor_id="anchor_1", path_id="missing_path", position=(0.0, 0.0)))
 
 
+def test_document_round_trip_canonicalizes_recursive_segment_params() -> None:
+    document = create_document(
+        document_id="doc_tuple_params",
+        width=100.0,
+        height=100.0,
+        coordinate_system=CoordinateSystem(),
+    )
+    path = VectorPath(path_id="path_tuple")
+    segment = Segment(
+        segment_id="segment_tuple",
+        path_id="path_tuple",
+        type="bezier",
+        params={
+            "start": (0.0, 0.0),
+            "controls": ((1.0, 2.0), (3.0, 4.0)),
+            "nested": {"end": (5.0, 6.0)},
+        },
+    )
+
+    document = add_path(document, path)
+    document = add_segment(document, segment)
+    restored = from_json(to_json(document))
+
+    assert document.segments[0].params == {
+        "start": [0.0, 0.0],
+        "controls": [[1.0, 2.0], [3.0, 4.0]],
+        "nested": {"end": [5.0, 6.0]},
+    }
+    assert restored == document
+
+
 def test_core_document_has_no_forbidden_dependencies() -> None:
     source_path = Path("core/document.py")
     source = source_path.read_text(encoding="utf-8")

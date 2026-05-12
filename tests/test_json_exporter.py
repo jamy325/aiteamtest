@@ -99,6 +99,40 @@ def test_json_exporter_output_round_trips_back_to_vector_document() -> None:
     assert exported_dict["paths"][0]["segments"] == ["segment_1"]
 
 
+def test_json_exporter_round_trips_tuple_like_segment_params() -> None:
+    document = create_document(
+        document_id="doc_tuple_export",
+        width=50.0,
+        height=50.0,
+        coordinate_system=CoordinateSystem(),
+    )
+    path = VectorPath(path_id="path_tuple_export")
+    segment = Segment(
+        segment_id="segment_tuple_export",
+        path_id="path_tuple_export",
+        type="bezier",
+        params={
+            "start": (0.0, 0.0),
+            "control_points": ((1.0, 1.0), (2.0, 2.0)),
+            "end": (3.0, 3.0),
+        },
+    )
+
+    document = add_path(document, path)
+    document = add_segment(document, segment)
+    exporter = JsonExporter()
+
+    payload = exporter.export_document(document)
+    restored = from_json(payload)
+
+    assert document.segments[0].params == {
+        "start": [0.0, 0.0],
+        "control_points": [[1.0, 1.0], [2.0, 2.0]],
+        "end": [3.0, 3.0],
+    }
+    assert restored == document
+
+
 def test_json_exporter_has_no_forbidden_dependencies() -> None:
     source_path = Path("services/json_exporter.py")
     source = source_path.read_text(encoding="utf-8")
