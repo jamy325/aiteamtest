@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
+from typing import Any
 
 from core.types import Anchor, Path, Segment, VectorDocument
 from services.edge_error import EdgeErrorResult
@@ -126,11 +126,18 @@ class Scorer:
             score += self._coordinate_space_penalty(anchor.metadata)
         return score
 
-    def _coordinate_space_penalty(self, metadata: dict[str, object]) -> float:
-        coordinate_space = metadata.get("coordinate_space")
-        if coordinate_space is None:
-            return 0.0
-        return 0.0 if coordinate_space == "vector" else self.config.non_vector_metadata_penalty
+    def _coordinate_space_penalty(self, value: Any) -> float:
+        if isinstance(value, dict):
+            score = 0.0
+            for key, nested_value in value.items():
+                if key == "coordinate_space":
+                    score += 0.0 if nested_value == "vector" else self.config.non_vector_metadata_penalty
+                else:
+                    score += self._coordinate_space_penalty(nested_value)
+            return score
+        if isinstance(value, (list, tuple)):
+            return sum(self._coordinate_space_penalty(item) for item in value)
+        return 0.0
 
 
 __all__ = [

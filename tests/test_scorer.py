@@ -122,6 +122,66 @@ def test_scorer_penalizes_coordinate_inconsistency_without_mutating_document() -
     assert document == original_document
 
 
+def test_scorer_penalizes_nested_non_vector_coordinate_space_metadata() -> None:
+    path = VectorPath(path_id="path_nested")
+    document = _build_document(path=path)
+    document = document.__class__(
+        document_id=document.document_id,
+        width=document.width,
+        height=document.height,
+        coordinate_system=document.coordinate_system,
+        objects=document.objects,
+        paths=document.paths,
+        segments=document.segments,
+        anchors=document.anchors,
+        constraints=document.constraints,
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {"coordinate_space": "pixel"},
+                    ]
+                }
+            }
+        },
+    )
+    scorer = Scorer()
+
+    result = scorer.score_document(document)
+
+    assert result.breakdown.coordinate_consistency_score == pytest.approx(2.0)
+
+
+def test_scorer_does_not_penalize_nested_vector_coordinate_space_metadata() -> None:
+    path = VectorPath(path_id="path_nested_vector")
+    document = _build_document(path=path)
+    document = document.__class__(
+        document_id=document.document_id,
+        width=document.width,
+        height=document.height,
+        coordinate_system=document.coordinate_system,
+        objects=document.objects,
+        paths=document.paths,
+        segments=document.segments,
+        anchors=document.anchors,
+        constraints=document.constraints,
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {"coordinate_space": "vector"},
+                    ]
+                }
+            }
+        },
+    )
+    scorer = Scorer()
+
+    result = scorer.score_document(document)
+
+    assert result.breakdown.coordinate_consistency_score == pytest.approx(0.0)
+
+
 def test_scorer_has_no_forbidden_dependencies() -> None:
     source_path = Path("services/scorer.py")
     source = source_path.read_text(encoding="utf-8")
