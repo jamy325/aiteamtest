@@ -61,6 +61,30 @@ class RansacArcResult:
     outlier_indexes: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PreciseLineResult:
+    params: dict[str, object]
+    mse: float
+    rmse: float
+    parameter_delta: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class PreciseCircleResult:
+    params: dict[str, float]
+    mse: float
+    rmse: float
+    parameter_delta: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class PreciseArcResult:
+    params: dict[str, object]
+    mse: float
+    rmse: float
+    parameter_delta: dict[str, object]
+
+
 class RansacLineFitter:
     def __init__(self, config: RansacLineConfig | None = None) -> None:
         self.config = config or RansacLineConfig()
@@ -431,7 +455,262 @@ class RansacArcFitter:
         return normalized
 
 
+class PreciseLineFitter:
+    def fit(self, points: tuple[Point, ...] | list[Point], initial_params: dict[str, object]) -> PreciseLineResult:
+        point_sequence = tuple((float(x), float(y)) for x, y in points)
+        if len(point_sequence) < 2:
+            raise ValueError("at least two Vector Space points are required")
+
+        direction = self._principal_direction(point_sequence)
+        initial_direction = _coerce_vector(initial_params["direction"])
+        if _dot(direction, initial_direction) < 0.0:
+            direction = (-direction[0], -direction[1])
+
+        origin = point_sequence[0]
+        projected = tuple(
+            ((point[0] - origin[0]) * direction[0]) + ((point[1] - origin[1]) * direction[1])
+            for point in point_sequence
+        )
+        start_offset = min(projected)
+        end_offset = max(projected)
+        start = (origin[0] + (direction[0] * start_offset), origin[1] + (direction[1] * start_offset))
+        end = (origin[0] + (direction[0] * end_offset), origin[1] + (direction[1] * end_offset))
+        line = _line_from_segment(start, end)
+        if line is None:
+            raise ValueError("degenerate inlier set")
+
+        distances = tuple(_point_line_distance(point, line) for point in point_sequence)
+        mse = sum(distance * distance for distance in distances) / len(distances)
+        rmse = math.sqrt(mse)
+        a, b, c = line
+        return PreciseLineResult(
+            params={
+                "start": [start[0], start[1]],
+                "end": [end[0], end[1]],
+                "direction": [direction[0], direction[1]],
+                "line": {"a": a, "b": b, "c": c},
+            },
+            mse=mse,
+            rmse=rmse,
+            parameter_delta={
+                "start_distance": PrecisionUtility.distance_between_points(start, _coerce_point(initial_params["start"])),
+                "end_distance": PrecisionUtility.distance_between_points(end, _coerce_point(initial_params["end"])),
+                "direction_angle": _angle_delta(direction, initial_direction),
+                "line_offset": abs(c - float(_coerce_line(initial_params["line"])[2])),
+            },
+        )
+
+    def _principal_direction(self, points: tuple[Point, ...]) -> tuple[float, float]:
+        if len(points) == 2:
+            direction = PrecisionUtility.normalize_vector((points[1][0] - points[0][0], points[1][1] - points[0][1]))
+            if direction is None:
+                raise ValueError("degenerate inlier set")
+            return direction
+
+        mean_x = sum(point[0] for point in points) / len(points)
+        mean_y = sum(point[1] for point in points) / len(points)
+        sxx = sum((point[0] - mean_x) ** 2 for point in points)
+        syy = sum((point[1] - mean_y) ** 2 for point in points)
+        sxy = sum((point[0] - mean_x) * (point[1] - mean_y) for point in points)
+        direction = PrecisionUtility.normalize_vector((math.cos(0.5 * math.atan2(2.0 * sxy, sxx - syy)), math.sin(0.5 * math.atan2(2.0 * sxy, sxx - syy))))
+        if direction is None:
+            raise ValueError("degenerate inlier set")
+        return direction
+
+
+class PreciseCircleFitter:
+    def fit(self, points: tuple[Point, ...] | list[Point], initial_params: dict[str, float]) -> PreciseCircleResult:
+        point_sequence = tuple((float(x), float(y)) for x, y in points)
+        if len(point_sequence) < 3:
+            raise ValueError("at least three Vector Space points are required")
+
+        circle = self._least_squares_circle(point_sequence)
+        cx, cy, radius = circle
+        errors = tuple(self._radial_error(point, circle) for point in point_sequence)
+        mse = sum(error * error for error in errors) / len(errors)
+        rmse = math.sqrt(mse)
+        initial_center = (float(initial_params["cx"]), float(initial_params["cy"]))
+        return PreciseCircleResult(
+            params={"cx": cx, "cy": cy, "r": radius},
+            mse=mse,
+            rmse=rmse,
+            parameter_delta={
+                "center_distance": PrecisionUtility.distance_between_points((cx, cy), initial_center),
+                "radius_delta": abs(radius - float(initial_params["r"])),
+            },
+        )
+
+    def _least_squares_circle(self, points: tuple[Point, ...]) -> tuple[float, float, float]:
+        sum_x = sum(point[0] for point in points)
+        sum_y = sum(point[1] for point in points)
+        sum_xx = sum(point[0] * point[0] for point in points)
+        sum_yy = sum(point[1] * point[1] for point in points)
+        sum_xy = sum(point[0] * point[1] for point in points)
+        sum_z = sum((point[0] * point[0]) + (point[1] * point[1]) for point in points)
+        sum_xz = sum(point[0] * ((point[0] * point[0]) + (point[1] * point[1])) for point in points)
+        sum_yz = sum(point[1] * ((point[0] * point[0]) + (point[1] * point[1])) for point in points)
+
+        solution = _solve_3x3(
+            (
+                (sum_xx, sum_xy, sum_x),
+                (sum_xy, sum_yy, sum_y),
+                (sum_x, sum_y, float(len(points))),
+            ),
+            (-sum_xz, -sum_yz, -sum_z),
+        )
+        a, b, c = solution
+        cx = -a / 2.0
+        cy = -b / 2.0
+        radius_sq = (cx * cx) + (cy * cy) - c
+        if radius_sq <= PrecisionUtility.EPSILON:
+            raise ValueError("unable to fit a precise circle from the provided points")
+        return (cx, cy, math.sqrt(radius_sq))
+
+    def _radial_error(self, point: Point, circle: tuple[float, float, float]) -> float:
+        cx, cy, radius = circle
+        return abs(math.hypot(point[0] - cx, point[1] - cy) - radius)
+
+
+class PreciseArcFitter:
+    def __init__(self) -> None:
+        self._circle_fitter = PreciseCircleFitter()
+
+    def fit(self, points: tuple[Point, ...] | list[Point], initial_params: dict[str, object]) -> PreciseArcResult:
+        point_sequence = tuple((float(x), float(y)) for x, y in points)
+        if len(point_sequence) < 3:
+            raise ValueError("at least three Vector Space points are required")
+
+        circle_result = self._circle_fitter.fit(
+            point_sequence,
+            {
+                "cx": float(initial_params["cx"]),
+                "cy": float(initial_params["cy"]),
+                "r": float(initial_params["r"]),
+            },
+        )
+        cx = float(circle_result.params["cx"])
+        cy = float(circle_result.params["cy"])
+        radius = float(circle_result.params["r"])
+        start_angle, end_angle, direction = self._arc_angles(point_sequence, (cx, cy))
+        return PreciseArcResult(
+            params={
+                "cx": cx,
+                "cy": cy,
+                "r": radius,
+                "start_angle": start_angle,
+                "end_angle": end_angle,
+                "direction": direction,
+                "start": [point_sequence[0][0], point_sequence[0][1]],
+                "end": [point_sequence[-1][0], point_sequence[-1][1]],
+            },
+            mse=circle_result.mse,
+            rmse=circle_result.rmse,
+            parameter_delta={
+                "center_distance": circle_result.parameter_delta["center_distance"],
+                "radius_delta": circle_result.parameter_delta["radius_delta"],
+                "start_angle_delta": _wrapped_angle_delta(start_angle, float(initial_params["start_angle"])),
+                "end_angle_delta": _wrapped_angle_delta(end_angle, float(initial_params["end_angle"])),
+                "direction_changed": direction != str(initial_params["direction"]),
+            },
+        )
+
+    def _arc_angles(self, points: tuple[Point, ...], center: tuple[float, float]) -> tuple[float, float, str]:
+        raw_angles = tuple(math.atan2(point[1] - center[1], point[0] - center[0]) for point in points)
+        unwrapped = [raw_angles[0]]
+
+        for index, angle in enumerate(raw_angles[1:], start=1):
+            delta = (angle - raw_angles[index - 1] + math.pi) % (2.0 * math.pi) - math.pi
+            unwrapped.append(unwrapped[-1] + delta)
+
+        net_delta = unwrapped[-1] - unwrapped[0]
+        return (_normalize_angle(unwrapped[0]), _normalize_angle(unwrapped[-1]), "ccw" if net_delta >= 0.0 else "cw")
+
+
+def _coerce_point(value: object) -> tuple[float, float]:
+    x, y = value  # type: ignore[misc]
+    return (float(x), float(y))
+
+
+def _coerce_vector(value: object) -> tuple[float, float]:
+    x, y = value  # type: ignore[misc]
+    return (float(x), float(y))
+
+
+def _coerce_line(value: object) -> tuple[float, float, float]:
+    line = value  # type: ignore[assignment]
+    return (float(line["a"]), float(line["b"]), float(line["c"]))
+
+
+def _dot(left: tuple[float, float], right: tuple[float, float]) -> float:
+    return (left[0] * right[0]) + (left[1] * right[1])
+
+
+def _angle_delta(left: tuple[float, float], right: tuple[float, float]) -> float:
+    return abs(math.atan2((left[0] * right[1]) - (left[1] * right[0]), _dot(left, right)))
+
+
+def _wrapped_angle_delta(left: float, right: float) -> float:
+    return abs((left - right + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _normalize_angle(angle: float) -> float:
+    normalized = angle % (2.0 * math.pi)
+    if PrecisionUtility.almost_equal(normalized, 2.0 * math.pi):
+        return 0.0
+    return normalized
+
+
+def _line_from_segment(start: Point, end: Point) -> tuple[float, float, float] | None:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if PrecisionUtility.near_zero(length):
+        return None
+    a = dy / length
+    b = -dx / length
+    c = -((a * start[0]) + (b * start[1]))
+    return (a, b, c)
+
+
+def _point_line_distance(point: Point, line: tuple[float, float, float]) -> float:
+    a, b, c = line
+    return abs((a * point[0]) + (b * point[1]) + c)
+
+
+def _solve_3x3(matrix: tuple[tuple[float, float, float], ...], vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    augmented = [
+        [float(matrix[row][0]), float(matrix[row][1]), float(matrix[row][2]), float(vector[row])]
+        for row in range(3)
+    ]
+
+    for pivot_index in range(3):
+        pivot_row = max(range(pivot_index, 3), key=lambda row: abs(augmented[row][pivot_index]))
+        if PrecisionUtility.near_zero(augmented[pivot_row][pivot_index]):
+            raise ValueError("unable to fit a precise circle from the provided points")
+        if pivot_row != pivot_index:
+            augmented[pivot_index], augmented[pivot_row] = augmented[pivot_row], augmented[pivot_index]
+
+        pivot = augmented[pivot_index][pivot_index]
+        for column in range(pivot_index, 4):
+            augmented[pivot_index][column] /= pivot
+
+        for row in range(3):
+            if row == pivot_index:
+                continue
+            factor = augmented[row][pivot_index]
+            for column in range(pivot_index, 4):
+                augmented[row][column] -= factor * augmented[pivot_index][column]
+
+    return (augmented[0][3], augmented[1][3], augmented[2][3])
+
+
 __all__ = [
+    "PreciseArcFitter",
+    "PreciseArcResult",
+    "PreciseCircleFitter",
+    "PreciseCircleResult",
+    "PreciseLineFitter",
+    "PreciseLineResult",
     "RansacArcConfig",
     "RansacArcFitter",
     "RansacArcResult",
