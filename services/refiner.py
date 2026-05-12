@@ -2,10 +2,28 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from core.precision import PrecisionUtility
 from core.types import Point
+from services.breakpoint_optimizer import (
+    BreakPointOptimizer,
+    BreakPointOptimizerConfig,
+    BreakPointRequest,
+    BreakPointResult,
+)
+from services.fitting_confidence import (
+    FittingConfidenceConfig,
+    FittingConfidenceInputs,
+    FittingConfidenceMetric,
+    FittingConfidenceResult,
+)
+from services.refinement_feedback import (
+    RefinementFeedback,
+    RefinementFeedbackConfig,
+    RefinementFeedbackInputs,
+    RefinementFeedbackResult,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +101,256 @@ class PreciseArcResult:
     mse: float
     rmse: float
     parameter_delta: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class RefinementEngineConfig:
+    breakpoint_optimizer_config: BreakPointOptimizerConfig = field(default_factory=BreakPointOptimizerConfig)
+    fitting_confidence_config: FittingConfidenceConfig = field(default_factory=FittingConfidenceConfig)
+    refinement_feedback_config: RefinementFeedbackConfig = field(default_factory=RefinementFeedbackConfig)
+    line_ransac_config: RansacLineConfig = field(default_factory=RansacLineConfig)
+    circle_ransac_config: RansacCircleConfig = field(default_factory=RansacCircleConfig)
+    arc_ransac_config: RansacArcConfig = field(default_factory=RansacArcConfig)
+
+
+@dataclass(frozen=True, slots=True)
+class RefinementRequest:
+    points: tuple[Point, ...]
+    rough_range: tuple[int, int]
+    target_type: str
+    residuals: tuple[float, ...] = ()
+    tangent_vectors: tuple[tuple[float, float] | None, ...] = ()
+    user_breakpoints: tuple[int, ...] = ()
+    adjacent_endpoints: tuple[int, ...] = ()
+    ai_marked_range: tuple[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "points", tuple((float(x), float(y)) for x, y in self.points))
+        object.__setattr__(self, "rough_range", (int(self.rough_range[0]), int(self.rough_range[1])))
+        object.__setattr__(self, "target_type", str(self.target_type).lower())
+        object.__setattr__(self, "residuals", tuple(float(value) for value in self.residuals))
+        object.__setattr__(
+            self,
+            "tangent_vectors",
+            tuple(None if vector is None else (float(vector[0]), float(vector[1])) for vector in self.tangent_vectors),
+        )
+        object.__setattr__(self, "user_breakpoints", tuple(int(index) for index in self.user_breakpoints))
+        object.__setattr__(self, "adjacent_endpoints", tuple(int(index) for index in self.adjacent_endpoints))
+        if self.ai_marked_range is not None:
+            object.__setattr__(self, "ai_marked_range", (int(self.ai_marked_range[0]), int(self.ai_marked_range[1])))
+
+
+@dataclass(frozen=True, slots=True)
+class RefinementResult:
+    target_type: str
+    optimized_range: tuple[int, int]
+    breakpoint_result: BreakPointResult
+    params: dict[str, object] | None
+    inlier_ratio: float
+    fit_error: float
+    confidence_result: FittingConfidenceResult
+    feedback: RefinementFeedbackResult
+    inlier_indexes: tuple[int, ...]
+    outlier_indexes: tuple[int, ...]
+    failure_message: str | None = None
+
+
+class RefinementEngine:
+    def __init__(
+        self,
+        config: RefinementEngineConfig | None = None,
+        *,
+        breakpoint_optimizer: BreakPointOptimizer | None = None,
+        fitting_confidence_metric: FittingConfidenceMetric | None = None,
+        refinement_feedback: RefinementFeedback | None = None,
+    ) -> None:
+        self.config = config or RefinementEngineConfig()
+        self.breakpoint_optimizer = breakpoint_optimizer or BreakPointOptimizer(self.config.breakpoint_optimizer_config)
+        self.fitting_confidence_metric = fitting_confidence_metric or FittingConfidenceMetric(
+            self.config.fitting_confidence_config
+        )
+        self.refinement_feedback = refinement_feedback or RefinementFeedback(self.config.refinement_feedback_config)
+        self.line_ransac_fitter = RansacLineFitter(self.config.line_ransac_config)
+        self.circle_ransac_fitter = RansacCircleFitter(self.config.circle_ransac_config)
+        self.arc_ransac_fitter = RansacArcFitter(self.config.arc_ransac_config)
+        self.line_precise_fitter = PreciseLineFitter()
+        self.circle_precise_fitter = PreciseCircleFitter()
+        self.arc_precise_fitter = PreciseArcFitter()
+
+    def refine(self, request: RefinementRequest) -> RefinementResult:
+        if request.target_type == "line":
+            return self.refine_line(request)
+        if request.target_type == "circle":
+            return self.refine_circle(request)
+        if request.target_type == "arc":
+            return self.refine_arc(request)
+        raise ValueError(f"unsupported refinement target type: {request.target_type}")
+
+    def refine_line(self, request: RefinementRequest) -> RefinementResult:
+        return self._refine(request, target_type="line")
+
+    def refine_circle(self, request: RefinementRequest) -> RefinementResult:
+        return self._refine(request, target_type="circle")
+
+    def refine_arc(self, request: RefinementRequest) -> RefinementResult:
+        return self._refine(request, target_type="arc")
+
+    def _refine(self, request: RefinementRequest, *, target_type: str) -> RefinementResult:
+        breakpoint_result = self.breakpoint_optimizer.optimize(
+            BreakPointRequest(
+                points=request.points,
+                rough_range=request.rough_range,
+                target_type=target_type,
+                residuals=request.residuals,
+                tangent_vectors=request.tangent_vectors,
+                user_breakpoints=request.user_breakpoints,
+                adjacent_endpoints=request.adjacent_endpoints,
+                ai_marked_range=request.ai_marked_range,
+            )
+        )
+        selected_points, global_indexes = self._slice_points(request.points, breakpoint_result.optimized_range)
+
+        try:
+            if target_type == "line":
+                ransac_result = self.line_ransac_fitter.fit(selected_points)
+                inlier_points = tuple(selected_points[index] for index in ransac_result.inlier_indexes)
+                precise_result = self.line_precise_fitter.fit(inlier_points, ransac_result.params)
+                confidence_inputs = self._line_confidence_inputs(ransac_result, precise_result, inlier_points)
+            elif target_type == "circle":
+                ransac_result = self.circle_ransac_fitter.fit(selected_points)
+                inlier_points = tuple(selected_points[index] for index in ransac_result.inlier_indexes)
+                precise_result = self.circle_precise_fitter.fit(inlier_points, ransac_result.params)
+                confidence_inputs = self._circle_confidence_inputs(ransac_result, precise_result, inlier_points)
+            elif target_type == "arc":
+                ransac_result = self.arc_ransac_fitter.fit(selected_points)
+                inlier_points = tuple(selected_points[index] for index in ransac_result.inlier_indexes)
+                precise_result = self.arc_precise_fitter.fit(inlier_points, ransac_result.params)
+                confidence_inputs = self._arc_confidence_inputs(ransac_result, precise_result, inlier_points)
+            else:
+                raise ValueError(f"unsupported refinement target type: {target_type}")
+        except ValueError as exc:
+            return self._failure_result(
+                target_type=target_type,
+                breakpoint_result=breakpoint_result,
+                message=str(exc),
+            )
+
+        confidence_result = self.fitting_confidence_metric.evaluate(confidence_inputs)
+        feedback = self.refinement_feedback.evaluate(
+            RefinementFeedbackInputs(
+                segment_type=target_type,
+                inlier_ratio=ransac_result.inlier_ratio,
+                fit_error=precise_result.rmse,
+                confidence_result=confidence_result,
+            )
+        )
+        return RefinementResult(
+            target_type=target_type,
+            optimized_range=breakpoint_result.optimized_range,
+            breakpoint_result=breakpoint_result,
+            params=precise_result.params,
+            inlier_ratio=ransac_result.inlier_ratio,
+            fit_error=precise_result.rmse,
+            confidence_result=confidence_result,
+            feedback=feedback,
+            inlier_indexes=tuple(global_indexes[index] for index in ransac_result.inlier_indexes),
+            outlier_indexes=tuple(global_indexes[index] for index in ransac_result.outlier_indexes),
+            failure_message=None,
+        )
+
+    def _line_confidence_inputs(
+        self,
+        ransac_result: RansacLineResult,
+        precise_result: PreciseLineResult,
+        inlier_points: tuple[Point, ...],
+    ) -> FittingConfidenceInputs:
+        return FittingConfidenceInputs(
+            segment_type="line",
+            inlier_ratio=ransac_result.inlier_ratio,
+            rmse=precise_result.rmse,
+            segment_length=_polyline_length(inlier_points),
+            parameter_delta=precise_result.parameter_delta,
+        )
+
+    def _circle_confidence_inputs(
+        self,
+        ransac_result: RansacCircleResult,
+        precise_result: PreciseCircleResult,
+        inlier_points: tuple[Point, ...],
+    ) -> FittingConfidenceInputs:
+        return FittingConfidenceInputs(
+            segment_type="circle",
+            inlier_ratio=ransac_result.inlier_ratio,
+            rmse=precise_result.rmse,
+            segment_length=_polyline_length(inlier_points),
+            radial_error=precise_result.rmse,
+            parameter_delta=precise_result.parameter_delta,
+        )
+
+    def _arc_confidence_inputs(
+        self,
+        ransac_result: RansacArcResult,
+        precise_result: PreciseArcResult,
+        inlier_points: tuple[Point, ...],
+    ) -> FittingConfidenceInputs:
+        return FittingConfidenceInputs(
+            segment_type="arc",
+            inlier_ratio=ransac_result.inlier_ratio,
+            rmse=precise_result.rmse,
+            segment_length=_polyline_length(inlier_points),
+            radial_error=precise_result.rmse,
+            arc_angle_coverage=_arc_angle_coverage(precise_result.params),
+            parameter_delta=precise_result.parameter_delta,
+        )
+
+    def _slice_points(
+        self,
+        points: tuple[Point, ...],
+        optimized_range: tuple[int, int],
+    ) -> tuple[tuple[Point, ...], tuple[int, ...]]:
+        start, end = optimized_range
+        selected_points = points[start : end + 1]
+        global_indexes = tuple(range(start, end + 1))
+        return (selected_points, global_indexes)
+
+    def _failure_result(
+        self,
+        *,
+        target_type: str,
+        breakpoint_result: BreakPointResult,
+        message: str,
+    ) -> RefinementResult:
+        if "inlier ratio" in message:
+            reason = "low_inlier_ratio"
+            inlier_ratio = 0.0
+            fit_error = 0.0
+        else:
+            reason = "high_fit_error"
+            inlier_ratio = 1.0
+            fit_error = self.refinement_feedback.config.max_fit_error + 1.0
+
+        confidence_result = FittingConfidenceResult(confidence=0.0, failure_reason=reason)
+        feedback = self.refinement_feedback.evaluate(
+            RefinementFeedbackInputs(
+                segment_type=target_type,
+                inlier_ratio=inlier_ratio,
+                fit_error=fit_error,
+                confidence_result=confidence_result,
+            )
+        )
+        return RefinementResult(
+            target_type=target_type,
+            optimized_range=breakpoint_result.optimized_range,
+            breakpoint_result=breakpoint_result,
+            params=None,
+            inlier_ratio=inlier_ratio,
+            fit_error=fit_error,
+            confidence_result=confidence_result,
+            feedback=feedback,
+            inlier_indexes=(),
+            outlier_indexes=(),
+            failure_message=message,
+        )
 
 
 class RansacLineFitter:
@@ -663,6 +931,24 @@ def _normalize_angle(angle: float) -> float:
     return normalized
 
 
+def _polyline_length(points: tuple[Point, ...]) -> float:
+    if len(points) < 2:
+        return 0.0
+    return sum(
+        PrecisionUtility.distance_between_points(points[index - 1], points[index])
+        for index in range(1, len(points))
+    )
+
+
+def _arc_angle_coverage(params: dict[str, object]) -> float:
+    start_angle = float(params["start_angle"])
+    end_angle = float(params["end_angle"])
+    direction = str(params["direction"])
+    if direction == "cw":
+        return (start_angle - end_angle) % (2.0 * math.pi)
+    return (end_angle - start_angle) % (2.0 * math.pi)
+
+
 def _line_from_segment(start: Point, end: Point) -> tuple[float, float, float] | None:
     dx = end[0] - start[0]
     dy = end[1] - start[1]
@@ -708,6 +994,10 @@ def _solve_3x3(matrix: tuple[tuple[float, float, float], ...], vector: tuple[flo
 
 
 __all__ = [
+    "RefinementEngine",
+    "RefinementEngineConfig",
+    "RefinementRequest",
+    "RefinementResult",
     "PreciseArcFitter",
     "PreciseArcResult",
     "PreciseCircleFitter",
