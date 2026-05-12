@@ -6,6 +6,7 @@ from typing import Literal
 from core.types import Segment, SegmentType
 
 RigidityLevel = Literal["high", "medium_high", "medium", "low"]
+MovementStrategy = Literal["move_left", "move_right", "move_both_midpoint", "move_both_minimal", "blocked"]
 
 RIGIDITY_BY_TYPE: dict[SegmentType, RigidityLevel] = {
     "line": "high",
@@ -27,6 +28,7 @@ RIGIDITY_RANK: dict[RigidityLevel, int] = {
 
 @dataclass(frozen=True, slots=True)
 class SegmentMovementDecision:
+    strategy: MovementStrategy
     move_segment_id: str | None
     reference_segment_id: str | None
     move_rigidity: RigidityLevel | None
@@ -48,6 +50,7 @@ class SegmentRigidityPolicy:
 
         if left.locked and right.locked:
             return SegmentMovementDecision(
+                strategy="blocked",
                 move_segment_id=None,
                 reference_segment_id=None,
                 move_rigidity=None,
@@ -58,6 +61,7 @@ class SegmentRigidityPolicy:
 
         if left.locked:
             return SegmentMovementDecision(
+                strategy="move_right",
                 move_segment_id=right.segment_id,
                 reference_segment_id=left.segment_id,
                 move_rigidity=right_rigidity,
@@ -67,6 +71,7 @@ class SegmentRigidityPolicy:
 
         if right.locked:
             return SegmentMovementDecision(
+                strategy="move_left",
                 move_segment_id=left.segment_id,
                 reference_segment_id=right.segment_id,
                 move_rigidity=left_rigidity,
@@ -76,6 +81,7 @@ class SegmentRigidityPolicy:
 
         if RIGIDITY_RANK[left_rigidity] < RIGIDITY_RANK[right_rigidity]:
             return SegmentMovementDecision(
+                strategy="move_left",
                 move_segment_id=left.segment_id,
                 reference_segment_id=right.segment_id,
                 move_rigidity=left_rigidity,
@@ -85,6 +91,7 @@ class SegmentRigidityPolicy:
 
         if RIGIDITY_RANK[right_rigidity] < RIGIDITY_RANK[left_rigidity]:
             return SegmentMovementDecision(
+                strategy="move_right",
                 move_segment_id=right.segment_id,
                 reference_segment_id=left.segment_id,
                 move_rigidity=right_rigidity,
@@ -92,18 +99,58 @@ class SegmentRigidityPolicy:
                 reason="move_less_rigid_right",
             )
 
+        return self._equal_rigidity_decision(left, right, left_rigidity)
+
+    def _equal_rigidity_decision(
+        self,
+        left: Segment,
+        right: Segment,
+        rigidity: RigidityLevel,
+    ) -> SegmentMovementDecision:
+        if rigidity == "low":
+            return SegmentMovementDecision(
+                strategy="move_both_midpoint",
+                move_segment_id=None,
+                reference_segment_id=None,
+                move_rigidity=rigidity,
+                reference_rigidity=rigidity,
+                reason="equal_low_rigidity_move_both_midpoint",
+            )
+
+        if rigidity == "medium":
+            return SegmentMovementDecision(
+                strategy="move_both_midpoint",
+                move_segment_id=None,
+                reference_segment_id=None,
+                move_rigidity=rigidity,
+                reference_rigidity=rigidity,
+                reason="equal_medium_rigidity_move_both_midpoint",
+            )
+
+        if rigidity == "medium_high":
+            return SegmentMovementDecision(
+                strategy="move_both_minimal",
+                move_segment_id=None,
+                reference_segment_id=None,
+                move_rigidity=rigidity,
+                reference_rigidity=rigidity,
+                reason="equal_medium_high_rigidity_move_both_minimal",
+            )
+
         return SegmentMovementDecision(
-            move_segment_id=right.segment_id,
-            reference_segment_id=left.segment_id,
-            move_rigidity=right_rigidity,
-            reference_rigidity=left_rigidity,
-            reason="equal_rigidity_prefer_trailing_segment",
+            strategy="move_both_minimal",
+            move_segment_id=None,
+            reference_segment_id=None,
+            move_rigidity=rigidity,
+            reference_rigidity=rigidity,
+            reason="equal_high_rigidity_move_both_minimal",
         )
 
 
 __all__ = [
     "RIGIDITY_BY_TYPE",
     "RIGIDITY_RANK",
+    "MovementStrategy",
     "RigidityLevel",
     "SegmentMovementDecision",
     "SegmentRigidityPolicy",
