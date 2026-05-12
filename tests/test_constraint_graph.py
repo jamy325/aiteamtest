@@ -93,6 +93,20 @@ def test_constraint_graph_rejects_duplicate_constraint_ids() -> None:
         graph.add_constraint(tangent)
 
 
+def test_constraint_graph_rejects_duplicate_target_ids_within_one_constraint() -> None:
+    duplicate_targets = Constraint(
+        constraint_id="dup_target",
+        type="coincident",
+        targets=("same", "same"),
+    )
+
+    with pytest.raises(ValueError, match="duplicate target ids"):
+        ConstraintGraph((duplicate_targets,))
+
+    with pytest.raises(ValueError, match="duplicate target ids"):
+        ConstraintGraph().add_constraint(duplicate_targets)
+
+
 def test_constraint_graph_remove_missing_constraint_raises_key_error() -> None:
     with pytest.raises(KeyError, match="unknown constraint_id"):
         ConstraintGraph().remove_constraint("constraint_missing")

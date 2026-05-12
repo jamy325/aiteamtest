@@ -38,7 +38,7 @@ class ConstraintGraph:
         by_target_id: dict[str, list[Constraint]] = {}
 
         for constraint in constraints:
-            _validate_constraint_type(constraint.type)
+            _validate_constraint(constraint)
             if constraint.constraint_id in by_constraint_id:
                 raise ValueError(f"duplicate constraint_id: {constraint.constraint_id}")
             by_constraint_id[constraint.constraint_id] = constraint
@@ -56,7 +56,7 @@ class ConstraintGraph:
     def add_constraint(self, constraint: Constraint) -> ConstraintGraph:
         if constraint.constraint_id in self._by_constraint_id:
             raise ValueError(f"duplicate constraint_id: {constraint.constraint_id}")
-        _validate_constraint_type(constraint.type)
+        _validate_constraint(constraint)
         return ConstraintGraph(self.constraints + (constraint,))
 
     def remove_constraint(self, constraint_id: str) -> ConstraintGraph:
@@ -82,6 +82,12 @@ class ConstraintGraph:
 def _validate_constraint_type(constraint_type: str) -> None:
     if constraint_type not in SUPPORTED_CONSTRAINT_TYPES:
         raise ValueError(f"unsupported constraint type: {constraint_type}")
+
+
+def _validate_constraint(constraint: Constraint) -> None:
+    _validate_constraint_type(constraint.type)
+    if len(set(constraint.targets)) != len(constraint.targets):
+        raise ValueError(f"duplicate target ids in constraint: {constraint.constraint_id}")
 
 
 def supports_constraint_type(constraint_type: str) -> bool:
