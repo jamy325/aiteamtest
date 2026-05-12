@@ -47,6 +47,34 @@ def test_precise_line_fitter_refits_ransac_inliers() -> None:
     assert result.parameter_delta["end_distance"] < 0.08
 
 
+def test_precise_line_fitter_uses_centroid_instead_of_first_noisy_inlier() -> None:
+    inlier_points = (
+        (0.0, 1.5),
+        (1.0, 3.0),
+        (2.0, 5.0),
+        (3.0, 7.0),
+        (4.0, 9.0),
+        (5.0, 11.0),
+    )
+    initial_params = {
+        "start": [0.0, 1.5],
+        "end": [5.0, 11.0],
+        "direction": [0.4472135955, 0.8944271910],
+        "line": {"a": 0.8944271910, "b": -0.4472135955, "c": 0.6708203932},
+    }
+
+    result = PreciseLineFitter().fit(inlier_points, initial_params)
+    fitted_line = result.params["line"]
+    a = float(fitted_line["a"])
+    b = float(fitted_line["b"])
+    c = float(fitted_line["c"])
+    first_point_distance = abs((a * inlier_points[0][0]) + (b * inlier_points[0][1]) + c)
+
+    assert result.rmse < 0.19
+    assert first_point_distance > 0.05
+    assert first_point_distance < 0.2
+
+
 def test_precise_circle_fitter_refits_ransac_inliers() -> None:
     center = (8.0, -4.0)
     radius = 6.0

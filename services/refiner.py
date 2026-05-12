@@ -466,15 +466,18 @@ class PreciseLineFitter:
         if _dot(direction, initial_direction) < 0.0:
             direction = (-direction[0], -direction[1])
 
-        origin = point_sequence[0]
+        centroid = (
+            sum(point[0] for point in point_sequence) / len(point_sequence),
+            sum(point[1] for point in point_sequence) / len(point_sequence),
+        )
         projected = tuple(
-            ((point[0] - origin[0]) * direction[0]) + ((point[1] - origin[1]) * direction[1])
+            ((point[0] - centroid[0]) * direction[0]) + ((point[1] - centroid[1]) * direction[1])
             for point in point_sequence
         )
         start_offset = min(projected)
         end_offset = max(projected)
-        start = (origin[0] + (direction[0] * start_offset), origin[1] + (direction[1] * start_offset))
-        end = (origin[0] + (direction[0] * end_offset), origin[1] + (direction[1] * end_offset))
+        start = (centroid[0] + (direction[0] * start_offset), centroid[1] + (direction[1] * start_offset))
+        end = (centroid[0] + (direction[0] * end_offset), centroid[1] + (direction[1] * end_offset))
         line = _line_from_segment(start, end)
         if line is None:
             raise ValueError("degenerate inlier set")
