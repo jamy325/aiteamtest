@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jamy325.github.io/aiteamtest/schemas/ai_commands.schema.json",
+  "title": "AI Review Proposed Commands",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "issues",
+    "proposed_commands"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "proposed_commands": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/command"
+      }
+    }
+  },
+  "$defs": {
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "category",
+        "severity",
+        "summary"
+      ],
+      "properties": {
+        "issue_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "geometry",
+            "topology",
+            "self_intersection",
+            "alpha",
+            "color",
+            "style",
+            "constraint"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "object_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "segment_range": {
+          "$ref": "#/$defs/segment_range_or_null"
+        },
+        "topology_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "self_intersection_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "alpha_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "color_hint": {
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "nullable_string": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "segment_range": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "segment_range_or_null": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/segment_range"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "base_command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_type",
+        "path_id",
+        "segment_range",
+        "reason",
+        "confidence",
+        "requires_user_confirmation"
+      ],
+      "properties": {
+        "command_type": {
+          "type": "string"
+        },
+        "path_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "segment_range": {
+          "$ref": "#/$defs/segment_range"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "requires_user_confirmation": {
+          "type": "boolean"
+        },
+        "locked_anchor_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "topology_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "self_intersection_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "alpha_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "color_hint": {
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "line_command": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_command"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "propose_replace_segment_with_line"
+            }
+          }
+        }
+      ]
+    },
+    "arc_command": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_command"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "propose_replace_segment_with_arc"
+            }
+          }
+        }
+      ]
+    },
+    "circle_command": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_command"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "propose_replace_segment_with_circle"
+            }
+          }
+        }
+      ]
+    },
+    "ellipse_command": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_command"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "propose_replace_segment_with_ellipse"
+            }
+          }
+        }
+      ]
+    },
+    "batch_command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_type",
+        "summary",
+        "commands",
+        "confidence",
+        "requires_user_confirmation"
+      ],
+      "properties": {
+        "command_type": {
+          "const": "propose_batch_refinement"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/line_command"
+              },
+              {
+                "$ref": "#/$defs/arc_command"
+              },
+              {
+                "$ref": "#/$defs/circle_command"
+              },
+              {
+                "$ref": "#/$defs/ellipse_command"
+              }
+            ]
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "requires_user_confirmation": {
+          "type": "boolean"
+        },
+        "topology_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "self_intersection_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "alpha_hint": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "color_hint": {
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "command": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/line_command"
+        },
+        {
+          "$ref": "#/$defs/arc_command"
+        },
+        {
+          "$ref": "#/$defs/circle_command"
+        },
+        {
+          "$ref": "#/$defs/ellipse_command"
+        },
+        {
+          "$ref": "#/$defs/batch_command"
+        }
+      ]
+    }
+  }
+}
