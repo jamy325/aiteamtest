@@ -42,6 +42,25 @@ class RansacCircleResult:
     outlier_indexes: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RansacArcConfig:
+    iterations: int = 96
+    inlier_threshold: float = 0.25
+    min_inlier_ratio: float = 0.5
+    random_seed: int = 0
+    min_arc_angle: float = math.pi / 12.0
+    max_radial_error: float = 0.25
+
+
+@dataclass(frozen=True, slots=True)
+class RansacArcResult:
+    params: dict[str, object]
+    inlier_ratio: float
+    fit_error: float
+    inlier_indexes: tuple[int, ...]
+    outlier_indexes: tuple[int, ...]
+
+
 class RansacLineFitter:
     def __init__(self, config: RansacLineConfig | None = None) -> None:
         self.config = config or RansacLineConfig()
@@ -331,7 +350,84 @@ class RansacCircleFitter:
         return (len(candidate_inliers) / point_count) > (len(best_inliers) / point_count)
 
 
+class RansacArcFitter:
+    def __init__(self, config: RansacArcConfig | None = None) -> None:
+        self.config = config or RansacArcConfig()
+        self._circle_fitter = RansacCircleFitter(
+            RansacCircleConfig(
+                iterations=self.config.iterations,
+                inlier_threshold=self.config.inlier_threshold,
+                min_inlier_ratio=self.config.min_inlier_ratio,
+                random_seed=self.config.random_seed,
+            )
+        )
+
+    def fit(self, points: tuple[Point, ...] | list[Point]) -> RansacArcResult:
+        point_sequence = tuple((float(x), float(y)) for x, y in points)
+        if len(point_sequence) < 3:
+            raise ValueError("at least three Vector Space points are required")
+
+        circle_result = self._circle_fitter.fit(point_sequence)
+        if circle_result.fit_error > self.config.max_radial_error:
+            raise ValueError("arc radial fit error exceeds maximum radial error")
+
+        cx = float(circle_result.params["cx"])
+        cy = float(circle_result.params["cy"])
+        radius = float(circle_result.params["r"])
+        inlier_points = tuple(point_sequence[index] for index in circle_result.inlier_indexes)
+        start_angle, end_angle, direction, arc_span = self._arc_angles(inlier_points, (cx, cy))
+        if arc_span < self.config.min_arc_angle:
+            raise ValueError("arc span is below minimum arc angle")
+
+        return RansacArcResult(
+            params={
+                "cx": cx,
+                "cy": cy,
+                "r": radius,
+                "start_angle": start_angle,
+                "end_angle": end_angle,
+                "direction": direction,
+                "start": [inlier_points[0][0], inlier_points[0][1]],
+                "end": [inlier_points[-1][0], inlier_points[-1][1]],
+            },
+            inlier_ratio=circle_result.inlier_ratio,
+            fit_error=circle_result.fit_error,
+            inlier_indexes=circle_result.inlier_indexes,
+            outlier_indexes=circle_result.outlier_indexes,
+        )
+
+    def _arc_angles(
+        self,
+        points: tuple[Point, ...],
+        center: tuple[float, float],
+    ) -> tuple[float, float, str, float]:
+        raw_angles = tuple(math.atan2(point[1] - center[1], point[0] - center[0]) for point in points)
+        unwrapped = [raw_angles[0]]
+
+        for angle in raw_angles[1:]:
+            delta = (angle - raw_angles[len(unwrapped) - 1] + math.pi) % (2.0 * math.pi) - math.pi
+            unwrapped.append(unwrapped[-1] + delta)
+
+        net_delta = unwrapped[-1] - unwrapped[0]
+        direction = "ccw" if net_delta >= 0.0 else "cw"
+        return (
+            self._normalize_angle(unwrapped[0]),
+            self._normalize_angle(unwrapped[-1]),
+            direction,
+            abs(net_delta),
+        )
+
+    def _normalize_angle(self, angle: float) -> float:
+        normalized = angle % (2.0 * math.pi)
+        if PrecisionUtility.almost_equal(normalized, 2.0 * math.pi):
+            return 0.0
+        return normalized
+
+
 __all__ = [
+    "RansacArcConfig",
+    "RansacArcFitter",
+    "RansacArcResult",
     "RansacCircleConfig",
     "RansacCircleFitter",
     "RansacCircleResult",
