@@ -41,3 +41,29 @@ def test_extracted_binary_and_skeleton_points_are_in_vector_space() -> None:
 
     expected_skeleton_point = transformer.pixel_to_vector((40.0, 50.0))
     assert any(point == pytest.approx(expected_skeleton_point) for contour in extracted.skeleton_contours for point in contour.points)
+    assert all(contour.area >= 0.0 for contour in extracted.binary_contours)
+    assert all(contour.area >= 0.0 for contour in extracted.skeleton_contours)
+
+
+def test_binary_contour_area_is_converted_to_vector_space_mm2() -> None:
+    image = np.zeros((100, 100), dtype=np.uint8)
+    cv2.rectangle(image, (20, 20), (60, 50), 255, thickness=-1)
+
+    scale = 0.5
+    pixel_extractor = ContourExtractor()
+    extractor = ContourExtractor(
+        coordinate_transformer=CoordinateTransformer(
+            CoordinateSystem(
+                unit="mm",
+                scale={"px_to_mm": scale},
+            )
+        )
+    )
+
+    pixel_contours = pixel_extractor.extract_binary_contours(image)
+    contours = extractor.extract_binary_contours(image)
+
+    assert len(pixel_contours) == 1
+    assert len(contours) == 1
+    assert contours[0].coordinate_space == "vector"
+    assert contours[0].area == pytest.approx(pixel_contours[0].area * scale * scale)
