@@ -68,6 +68,7 @@ class ContourExtractor:
             points = self._to_vector_points(tuple((int(point[0][0]), int(point[0][1])) for point in contour))
             parent_index = int(hierarchy_data[index][3])
             parent_contour = contour_ids[parent_index] if parent_index >= 0 else None
+            area_px = float(cv2.contourArea(contour))
             extracted.append(
                 BinaryContour(
                     contour_id=contour_ids[index],
@@ -75,7 +76,7 @@ class ContourExtractor:
                     points=points,
                     coordinate_space="vector",
                     closed=len(points) >= 3,
-                    area=float(cv2.contourArea(contour)),
+                    area=self._pixel_area_to_vector_area(area_px),
                     depth=depths[index],
                     parent_contour=parent_contour,
                     children=children_lookup[index],
@@ -101,6 +102,8 @@ class ContourExtractor:
                     points=points,
                     coordinate_space="vector",
                     closed=traced_path.closed,
+                    # Skeleton contours are centerline traces, so this field currently
+                    # represents traced point count rather than enclosed geometric area.
                     area=float(len(points)),
                     depth=0,
                     parent_contour=None,
@@ -133,6 +136,13 @@ class ContourExtractor:
 
     def _to_vector_points(self, points: tuple[tuple[int, int], ...]) -> tuple[Point, ...]:
         return tuple(self.coordinate_transformer.pixel_to_vector((float(point[0]), float(point[1]))) for point in points)
+
+    def _pixel_area_to_vector_area(self, area_px: float) -> float:
+        coordinate_system = self.coordinate_transformer.coordinate_system
+        if coordinate_system.unit == "mm":
+            scale = float(coordinate_system.scale.get("px_to_mm", 1.0))
+            return float(area_px) * scale * scale
+        return float(area_px)
 
     @staticmethod
     def _skeletonize(binary_mask: np.ndarray) -> np.ndarray:

@@ -3,7 +3,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
+from core.coordinate import CoordinateTransformer
+from core.types import CoordinateSystem
 from services.contour_extractor import ContourExtractor
 
 
@@ -50,6 +53,47 @@ def test_extract_binary_contours_preserves_hierarchy_and_fields() -> None:
     assert len(child.points) >= 4
 
 
+def test_extract_binary_contours_area_matches_pixel_area_in_px_unit() -> None:
+    image = np.zeros((100, 100), dtype=np.uint8)
+    top_left = (15, 20)
+    bottom_right = (70, 65)
+    cv2.rectangle(image, top_left, bottom_right, 255, thickness=-1)
+
+    extractor = ContourExtractor()
+    contours = extractor.extract_binary_contours(image)
+
+    assert len(contours) == 1
+    contour = contours[0]
+    processed_mask = extractor._preprocess_binary_mask(image)
+    processed_contours, _ = cv2.findContours(processed_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    expected_area = float(cv2.contourArea(processed_contours[0]))
+    assert contour.coordinate_space == "vector"
+    assert contour.area == pytest.approx(expected_area)
+
+
+def test_extract_binary_contours_area_scales_with_non_unit_px_to_mm_factor() -> None:
+    image = np.zeros((120, 120), dtype=np.uint8)
+    cv2.circle(image, (60, 60), 18, 255, thickness=-1)
+
+    scale = 0.2
+    pixel_extractor = ContourExtractor()
+    extractor = ContourExtractor(
+        coordinate_transformer=CoordinateTransformer(
+            CoordinateSystem(
+                unit="mm",
+                scale={"px_to_mm": scale},
+            )
+        )
+    )
+
+    pixel_contours = pixel_extractor.extract_binary_contours(image)
+    contours = extractor.extract_binary_contours(image)
+
+    assert len(pixel_contours) == 1
+    assert len(contours) == 1
+    assert contours[0].area == pytest.approx(pixel_contours[0].area * scale * scale)
+
+
 def test_extract_binary_contours_handles_color_images() -> None:
     image = np.zeros((60, 60, 3), dtype=np.uint8)
     cv2.circle(image, (30, 30), 15, (255, 255, 255), thickness=-1)
@@ -73,6 +117,8 @@ def test_extract_contours_keeps_binary_and_skeleton_sets() -> None:
     assert len(extracted.skeleton_contours) >= 1
     assert all(contour.source == "binary_contour" for contour in extracted.binary_contours)
     assert all(contour.source == "skeleton_contour" for contour in extracted.skeleton_contours)
+    assert all(contour.coordinate_space == "vector" for contour in extracted.binary_contours)
+    assert all(contour.coordinate_space == "vector" for contour in extracted.skeleton_contours)
 
 
 def test_extract_skeleton_contours_from_thin_line_input() -> None:
@@ -85,6 +131,7 @@ def test_extract_skeleton_contours_from_thin_line_input() -> None:
     assert skeleton_contours[0].source == "skeleton_contour"
     assert skeleton_contours[0].closed is False
     assert len(skeleton_contours[0].points) >= 20
+    assert skeleton_contours[0].area == float(len(skeleton_contours[0].points))
     _assert_continuous_points(skeleton_contours[0].points, closed=False)
     assert skeleton_contours[0].points[0] == (10.0, 40.0)
     assert skeleton_contours[0].points[-1] == (70.0, 40.0)
