@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
 
@@ -71,6 +71,16 @@ class AIReviewInput:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class AIReviewOutput:
+    summary: str
+    issues: tuple[dict[str, Any], ...]
+    proposed_commands: tuple[dict[str, Any], ...]
+    prompt: str
+    review_input: AIReviewInput
+    raw_response: dict[str, Any]
+
+
 def build_review_prompt(review_input: AIReviewInput) -> str:
     payload = json.dumps(review_input.to_payload(), ensure_ascii=True, sort_keys=True, indent=2)
     return f"{AI_REVIEW_PROMPT}\n\nReview input:\n{payload}"
@@ -85,8 +95,34 @@ def validate_ai_review_response(response: dict[str, Any]) -> None:
     validator.validate(response)
 
 
+class AIReviewService:
+    def __init__(
+        self,
+        responder: Callable[[str, AIReviewInput], dict[str, Any]] | None = None,
+    ) -> None:
+        self.responder = responder
+
+    def run_review(self, review_input: AIReviewInput) -> AIReviewOutput:
+        if self.responder is None:
+            raise RuntimeError("AI review responder is not configured")
+
+        prompt = build_review_prompt(review_input)
+        response = self.responder(prompt, review_input)
+        validate_ai_review_response(response)
+        return AIReviewOutput(
+            summary=str(response["summary"]),
+            issues=tuple(dict(issue) for issue in response["issues"]),
+            proposed_commands=tuple(dict(command) for command in response["proposed_commands"]),
+            prompt=prompt,
+            review_input=review_input,
+            raw_response=dict(response),
+        )
+
+
 __all__ = [
     "AIReviewInput",
+    "AIReviewOutput",
+    "AIReviewService",
     "AI_REVIEW_PROMPT",
     "SCHEMA_PATH",
     "build_review_prompt",
