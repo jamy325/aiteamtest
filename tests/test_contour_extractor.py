@@ -103,6 +103,54 @@ def test_extract_skeleton_contours_marks_closed_loops() -> None:
     _assert_continuous_points(skeleton_contours[0].points, closed=True)
 
 
+def test_extract_skeleton_contours_from_thick_open_stroke_keeps_one_ordered_path() -> None:
+    image = np.zeros((120, 120), dtype=np.uint8)
+    start = (10, 60)
+    end = (110, 60)
+    cv2.line(image, start, end, 255, thickness=3)
+
+    skeleton_contours = ContourExtractor().extract_skeleton_contours(image)
+
+    assert len(skeleton_contours) == 1
+    contour = skeleton_contours[0]
+    assert contour.closed is False
+    _assert_continuous_points(contour.points, closed=False)
+    assert _chebyshev_distance(contour.points[0], (float(start[0]), float(start[1]))) <= 2.0
+    assert _chebyshev_distance(contour.points[-1], (float(end[0]), float(end[1]))) <= 2.0
+
+
+def test_extract_skeleton_contours_from_thick_circle_stroke_has_major_closed_loop() -> None:
+    image = np.zeros((140, 140), dtype=np.uint8)
+    center = (70, 70)
+    radius = 40
+    cv2.circle(image, center, radius, 255, thickness=3)
+
+    skeleton_contours = ContourExtractor().extract_skeleton_contours(image)
+
+    assert skeleton_contours
+    major = max(skeleton_contours, key=lambda contour: len(contour.points))
+    assert major.closed is True
+    _assert_continuous_points(major.points, closed=True)
+    assert len(major.points) == max(len(contour.points) for contour in skeleton_contours)
+    assert all(len(contour.points) >= 2 for contour in skeleton_contours)
+
+
+def test_extract_skeleton_contours_from_thick_rectangle_stroke_has_major_closed_loop() -> None:
+    image = np.zeros((140, 140), dtype=np.uint8)
+    top_left = (20, 25)
+    bottom_right = (115, 105)
+    cv2.rectangle(image, top_left, bottom_right, 255, thickness=3)
+
+    skeleton_contours = ContourExtractor().extract_skeleton_contours(image)
+
+    assert skeleton_contours
+    major = max(skeleton_contours, key=lambda contour: len(contour.points))
+    assert major.closed is True
+    _assert_continuous_points(major.points, closed=True)
+    assert len(major.points) == max(len(contour.points) for contour in skeleton_contours)
+    assert all(len(contour.points) >= 2 for contour in skeleton_contours)
+
+
 def test_contour_extractor_has_no_forbidden_dependencies() -> None:
     source = Path("services/contour_extractor.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
