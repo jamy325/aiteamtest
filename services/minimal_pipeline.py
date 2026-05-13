@@ -16,6 +16,7 @@ from services.json_exporter import JsonExporter
 from services.renderer import Renderer
 from services.resampler import Resampler
 from services.simple_vectorizer import InitialSegmentType, SimpleVectorizer
+from services.skeleton_graph import SkeletonJunction
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +75,9 @@ class MinimalPipeline:
                             self._serialize_contour(contour) for contour in extracted_contours.skeleton_contours
                         ],
                     },
+                    "skeleton_junctions": [
+                        self._serialize_junction(junction) for junction in extracted_contours.skeleton_junctions
+                    ],
                     "resampled_contours": {
                         "binary_contours": [
                             self._serialize_resampled(contour_id, points)
@@ -189,6 +193,20 @@ class MinimalPipeline:
             "contour_id": contour_id,
             "points": [list(point) for point in points],
             "coordinate_space": "vector",
+        }
+
+    def _serialize_junction(self, junction: SkeletonJunction) -> dict[str, Any]:
+        return {
+            "pixel": list(junction.pixel),
+            "junction_id": junction.junction_id,
+            "degree": junction.degree,
+            "endpoints": [
+                {
+                    "path_index": endpoint.path_index,
+                    "is_start": endpoint.is_start,
+                }
+                for endpoint in junction.endpoints
+            ],
         }
 
 

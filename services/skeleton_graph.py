@@ -25,12 +25,35 @@ class SkeletonPath:
     closed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SkeletonEndpoint:
+    path_index: int
+    is_start: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SkeletonJunction:
+    pixel: Pixel
+    junction_id: str
+    degree: int
+    endpoints: tuple[SkeletonEndpoint, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SkeletonGraphTraceResult:
+    paths: tuple[SkeletonPath, ...]
+    junctions: tuple[SkeletonJunction, ...]
+
+
 class SkeletonGraphTracer:
     def trace_mask(self, skeleton_mask: np.ndarray) -> tuple[SkeletonPath, ...]:
+        return self.trace_graph(skeleton_mask).paths
+
+    def trace_graph(self, skeleton_mask: np.ndarray) -> SkeletonGraphTraceResult:
         normalized = self._normalize_mask(skeleton_mask)
         pixels = self._mask_pixels(normalized)
         if not pixels:
-            return ()
+            return SkeletonGraphTraceResult(paths=(), junctions=())
 
         adjacency = self._build_adjacency(pixels)
         traced_paths: list[SkeletonPath] = []
@@ -42,7 +65,33 @@ class SkeletonGraphTracer:
             }
             traced_paths.extend(self._trace_component(component_adjacency))
 
-        return tuple(traced_paths)
+        junction_pixels = {pixel for pixel, neighbors in adjacency.items() if len(neighbors) >= 3}
+        junction_endpoints: dict[Pixel, list[SkeletonEndpoint]] = {p: [] for p in junction_pixels}
+
+        for path_index, path in enumerate(traced_paths):
+            if path.closed:
+                continue
+            
+            start_p = path.pixels[0]
+            if start_p in junction_pixels:
+                junction_endpoints[start_p].append(SkeletonEndpoint(path_index=path_index, is_start=True))
+                
+            end_p = path.pixels[-1]
+            if end_p in junction_pixels:
+                junction_endpoints[end_p].append(SkeletonEndpoint(path_index=path_index, is_start=False))
+
+        junctions: list[SkeletonJunction] = []
+        for i, p in enumerate(sorted(junction_pixels, key=self._pixel_sort_key)):
+            junctions.append(
+                SkeletonJunction(
+                    pixel=p,
+                    junction_id=f"junction_{i}",
+                    degree=len(adjacency[p]),
+                    endpoints=tuple(junction_endpoints[p]),
+                )
+            )
+
+        return SkeletonGraphTraceResult(paths=tuple(traced_paths), junctions=tuple(junctions))
 
     def _trace_component(self, adjacency: dict[Pixel, tuple[Pixel, ...]]) -> tuple[SkeletonPath, ...]:
         if not adjacency:
@@ -184,4 +233,4 @@ class SkeletonGraphTracer:
         return (right, left)
 
 
-__all__ = ["Pixel", "SkeletonGraphTracer", "SkeletonPath"]
+__all__ = ["Pixel", "SkeletonEndpoint", "SkeletonGraphTraceResult", "SkeletonGraphTracer", "SkeletonJunction", "SkeletonPath"]
