@@ -7,6 +7,7 @@ import numpy as np
 
 from core.coordinate import CoordinateTransformer
 from core.types import CoordinateSystem
+from services.skeleton_graph import SkeletonGraphTracer
 
 
 Point = tuple[float, float]
@@ -38,11 +39,13 @@ class ContourExtractor:
         blur_kernel_size: int = 5,
         morphology_kernel_size: int = 3,
         coordinate_transformer: CoordinateTransformer | None = None,
+        skeleton_graph_tracer: SkeletonGraphTracer | None = None,
     ) -> None:
         self.threshold = threshold
         self.blur_kernel_size = blur_kernel_size
         self.morphology_kernel_size = morphology_kernel_size
         self.coordinate_transformer = coordinate_transformer or CoordinateTransformer(CoordinateSystem())
+        self.skeleton_graph_tracer = skeleton_graph_tracer or SkeletonGraphTracer()
 
     def extract_contours(self, image: np.ndarray) -> ExtractedContours:
         binary_contours = self.extract_binary_contours(image)
@@ -83,26 +86,21 @@ class ContourExtractor:
 
     def extract_skeleton_contours(self, image: np.ndarray) -> tuple[BinaryContour, ...]:
         skeleton_mask = self._skeletonize(self._preprocess_skeleton_mask(image))
-        component_count, labels = cv2.connectedComponents(skeleton_mask)
+        traced_paths = self.skeleton_graph_tracer.trace_mask(skeleton_mask)
         extracted: list[BinaryContour] = []
 
-        for component in range(1, component_count):
-            ys, xs = np.where(labels == component)
-            if len(xs) == 0:
+        for index, traced_path in enumerate(traced_paths):
+            if not traced_path.pixels:
                 continue
 
-            # TODO: replace row-major point ordering with path/topology ordering
-            # before fitting/resampling tasks consume skeleton contours.
-            points = self._to_vector_points(
-                tuple((int(x), int(y)) for y, x in sorted(zip(ys.tolist(), xs.tolist()), key=lambda item: (item[0], item[1])))
-            )
+            points = self._to_vector_points(traced_path.pixels)
             extracted.append(
                 BinaryContour(
-                    contour_id=f"skeleton_contour_{component - 1}",
+                    contour_id=f"skeleton_contour_{index}",
                     source="skeleton_contour",
                     points=points,
                     coordinate_space="vector",
-                    closed=False,
+                    closed=traced_path.closed,
                     area=float(len(points)),
                     depth=0,
                     parent_contour=None,

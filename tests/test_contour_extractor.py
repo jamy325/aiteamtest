@@ -7,6 +7,18 @@ import numpy as np
 from services.contour_extractor import ContourExtractor
 
 
+def _chebyshev_distance(left: tuple[float, float], right: tuple[float, float]) -> float:
+    return max(abs(left[0] - right[0]), abs(left[1] - right[1]))
+
+
+def _assert_continuous_points(points: tuple[tuple[float, float], ...], *, closed: bool) -> None:
+    assert points
+    for left, right in zip(points, points[1:]):
+        assert _chebyshev_distance(left, right) <= 1.0
+    if closed and len(points) > 1:
+        assert _chebyshev_distance(points[-1], points[0]) <= 1.0
+
+
 def test_extract_binary_contours_preserves_hierarchy_and_fields() -> None:
     image = np.zeros((120, 120), dtype=np.uint8)
     cv2.rectangle(image, (10, 10), (110, 110), 255, thickness=-1)
@@ -73,7 +85,22 @@ def test_extract_skeleton_contours_from_thin_line_input() -> None:
     assert skeleton_contours[0].source == "skeleton_contour"
     assert skeleton_contours[0].closed is False
     assert len(skeleton_contours[0].points) >= 20
-    assert all(point[1] == 40 for point in skeleton_contours[0].points)
+    _assert_continuous_points(skeleton_contours[0].points, closed=False)
+    assert skeleton_contours[0].points[0] == (10.0, 40.0)
+    assert skeleton_contours[0].points[-1] == (70.0, 40.0)
+
+
+def test_extract_skeleton_contours_marks_closed_loops() -> None:
+    image = np.zeros((80, 80), dtype=np.uint8)
+    cv2.rectangle(image, (15, 15), (60, 55), 255, thickness=1)
+
+    skeleton_contours = ContourExtractor().extract_skeleton_contours(image)
+
+    assert len(skeleton_contours) == 1
+    assert skeleton_contours[0].source == "skeleton_contour"
+    assert skeleton_contours[0].closed is True
+    assert len(skeleton_contours[0].points) >= 20
+    _assert_continuous_points(skeleton_contours[0].points, closed=True)
 
 
 def test_contour_extractor_has_no_forbidden_dependencies() -> None:
