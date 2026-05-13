@@ -71,11 +71,11 @@ class SkeletonGraphTracer:
         for path_index, path in enumerate(traced_paths):
             if path.closed:
                 continue
-            
+
             start_p = path.pixels[0]
             if start_p in junction_pixels:
                 junction_endpoints[start_p].append(SkeletonEndpoint(path_index=path_index, is_start=True))
-                
+
             end_p = path.pixels[-1]
             if end_p in junction_pixels:
                 junction_endpoints[end_p].append(SkeletonEndpoint(path_index=path_index, is_start=False))
