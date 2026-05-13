@@ -73,6 +73,19 @@ def add_segment(document: VectorDocument, segment: Segment) -> VectorDocument:
     return updated(document, paths=paths, segments=document.segments + (segment,))
 
 
+def set_segment_locked(document: VectorDocument, segment_id: str, *, locked: bool = True) -> VectorDocument:
+    segment_index = _find_index(document.segments, "segment_id", segment_id)
+    if segment_index is None:
+        raise ValueError(f"unknown segment_id: {segment_id}")
+
+    segment = document.segments[segment_index]
+    if segment.locked is locked:
+        return document
+
+    segments = _replace_at(document.segments, segment_index, updated(segment, locked=locked))
+    return updated(document, segments=segments)
+
+
 def add_anchor(document: VectorDocument, anchor: Anchor) -> VectorDocument:
     _ensure_unique_ids(document.anchors, anchor.anchor_id, "anchor_id")
     if _find_index(document.paths, "path_id", anchor.path_id) is None:
@@ -284,5 +297,6 @@ __all__ = [
     "create_document",
     "from_dict",
     "from_json",
+    "set_segment_locked",
     "to_json",
 ]
