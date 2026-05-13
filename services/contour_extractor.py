@@ -7,6 +7,7 @@ import numpy as np
 
 from core.coordinate import CoordinateTransformer
 from core.types import CoordinateSystem
+from services.skeleton_graph import SkeletonGraphTracer
 
 
 Point = tuple[float, float]
@@ -38,11 +39,13 @@ class ContourExtractor:
         blur_kernel_size: int = 5,
         morphology_kernel_size: int = 3,
         coordinate_transformer: CoordinateTransformer | None = None,
+        skeleton_graph_tracer: SkeletonGraphTracer | None = None,
     ) -> None:
         self.threshold = threshold
         self.blur_kernel_size = blur_kernel_size
         self.morphology_kernel_size = morphology_kernel_size
         self.coordinate_transformer = coordinate_transformer or CoordinateTransformer(CoordinateSystem())
+        self.skeleton_graph_tracer = skeleton_graph_tracer or SkeletonGraphTracer()
 
     def extract_contours(self, image: np.ndarray) -> ExtractedContours:
         binary_contours = self.extract_binary_contours(image)
@@ -83,26 +86,21 @@ class ContourExtractor:
 
     def extract_skeleton_contours(self, image: np.ndarray) -> tuple[BinaryContour, ...]:
         skeleton_mask = self._skeletonize(self._preprocess_skeleton_mask(image))
-        component_count, labels = cv2.connectedComponents(skeleton_mask)
+        traced_paths = self.skeleton_graph_tracer.trace_mask(skeleton_mask)
         extracted: list[BinaryContour] = []
 
-        for component in range(1, component_count):
-            ys, xs = np.where(labels == component)
-            if len(xs) == 0:
+        for index, traced_path in enumerate(traced_paths):
+            if len(traced_path.pixels) < 2:
                 continue
 
-            # TODO: replace row-major point ordering with path/topology ordering
-            # before fitting/resampling tasks consume skeleton contours.
-            points = self._to_vector_points(
-                tuple((int(x), int(y)) for y, x in sorted(zip(ys.tolist(), xs.tolist()), key=lambda item: (item[0], item[1])))
-            )
+            points = self._to_vector_points(traced_path.pixels)
             extracted.append(
                 BinaryContour(
-                    contour_id=f"skeleton_contour_{component - 1}",
+                    contour_id=f"skeleton_contour_{index}",
                     source="skeleton_contour",
                     points=points,
                     coordinate_space="vector",
-                    closed=False,
+                    closed=traced_path.closed,
                     area=float(len(points)),
                     depth=0,
                     parent_contour=None,
@@ -138,20 +136,54 @@ class ContourExtractor:
 
     @staticmethod
     def _skeletonize(binary_mask: np.ndarray) -> np.ndarray:
-        skeleton = np.zeros_like(binary_mask)
-        element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        current = binary_mask.copy()
+        image = (binary_mask > 0).astype(np.uint8)
+        changed = True
 
-        while True:
-            eroded = cv2.erode(current, element)
-            opened = cv2.dilate(eroded, element)
-            residue = cv2.subtract(current, opened)
-            skeleton = cv2.bitwise_or(skeleton, residue)
-            current = eroded
-            if cv2.countNonZero(current) == 0:
-                break
+        while changed:
+            changed = False
+            for first_sub_iteration in (True, False):
+                removable: list[tuple[int, int]] = []
+                rows, cols = image.shape
+                for y in range(1, rows - 1):
+                    for x in range(1, cols - 1):
+                        if image[y, x] != 1:
+                            continue
 
-        return skeleton
+                        p2 = image[y - 1, x]
+                        p3 = image[y - 1, x + 1]
+                        p4 = image[y, x + 1]
+                        p5 = image[y + 1, x + 1]
+                        p6 = image[y + 1, x]
+                        p7 = image[y + 1, x - 1]
+                        p8 = image[y, x - 1]
+                        p9 = image[y - 1, x - 1]
+                        neighbors = [p2, p3, p4, p5, p6, p7, p8, p9]
+                        neighbor_count = sum(neighbors)
+                        if neighbor_count < 2 or neighbor_count > 6:
+                            continue
+
+                        transitions = sum(
+                            neighbors[index] == 0 and neighbors[(index + 1) % 8] == 1
+                            for index in range(8)
+                        )
+                        if transitions != 1:
+                            continue
+
+                        if first_sub_iteration:
+                            if p2 * p4 * p6 != 0 or p4 * p6 * p8 != 0:
+                                continue
+                        else:
+                            if p2 * p4 * p8 != 0 or p2 * p6 * p8 != 0:
+                                continue
+
+                        removable.append((y, x))
+
+                if removable:
+                    changed = True
+                    for y, x in removable:
+                        image[y, x] = 0
+
+        return (image * 255).astype(np.uint8)
 
     @staticmethod
     def _compute_depths(hierarchy: np.ndarray) -> tuple[int, ...]:
