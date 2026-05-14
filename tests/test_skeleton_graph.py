@@ -117,3 +117,105 @@ def test_skeleton_graph_has_no_forbidden_dependencies() -> None:
     forbidden_imports = {"openai", "anthropic", "PyQt5", "PyQt6", "ui", "core"}
 
     assert imports.isdisjoint(forbidden_imports)
+
+
+def test_skeleton_graph_trace_graph_exposes_t_junction() -> None:
+    image = np.zeros((40, 40), dtype=np.uint8)
+    # T junction
+    cv2.line(image, (10, 20), (30, 20), 255, thickness=1)
+    cv2.line(image, (20, 20), (20, 30), 255, thickness=1)
+
+    result = SkeletonGraphTracer().trace_graph(image)
+
+    assert len(result.paths) == 3
+    assert len(result.junctions) == 1
+
+    junction = result.junctions[0]
+    assert junction.pixel == (20, 20)
+    assert junction.degree == 3
+    assert len(junction.endpoints) == 3
+
+    path_indices = {ep.path_index for ep in junction.endpoints}
+    assert len(path_indices) == 3
+
+    for endpoint in junction.endpoints:
+        path = result.paths[endpoint.path_index]
+        if endpoint.is_start:
+            assert path.pixels[0] == junction.pixel
+        else:
+            assert path.pixels[-1] == junction.pixel
+
+
+def test_skeleton_graph_trace_graph_exposes_x_crossing() -> None:
+    image = np.zeros((40, 40), dtype=np.uint8)
+    # X crossing
+    cv2.line(image, (10, 10), (30, 30), 255, thickness=1)
+    cv2.line(image, (10, 30), (30, 10), 255, thickness=1)
+
+    result = SkeletonGraphTracer().trace_graph(image)
+
+    # Note: OpenCV line drawing might create a cluster of pixels at the center
+    # which could form multiple nearby junctions or a single degree 4 junction.
+    # We just need to verify that at least one junction exists and endpoints are properly mapped.
+    assert len(result.junctions) >= 1
+
+    mapped_endpoints = sum(len(j.endpoints) for j in result.junctions)
+    # An X crossing creates 4 outer branches, so there should be at least 4 endpoints connected to junctions
+    assert mapped_endpoints >= 4
+
+    for j in result.junctions:
+        assert j.degree >= 3
+        for endpoint in j.endpoints:
+            path = result.paths[endpoint.path_index]
+            pixel = path.pixels[0] if endpoint.is_start else path.pixels[-1]
+            assert pixel == j.pixel
+
+
+def test_skeleton_graph_trace_graph_no_junction_in_open_line() -> None:
+    image = np.zeros((24, 24), dtype=np.uint8)
+    cv2.line(image, (2, 10), (20, 10), 255, thickness=1)
+
+    result = SkeletonGraphTracer().trace_graph(image)
+    assert len(result.paths) == 1
+    assert len(result.junctions) == 0
+
+
+def test_skeleton_graph_trace_graph_no_junction_in_closed_loop() -> None:
+    image = np.zeros((48, 48), dtype=np.uint8)
+    cv2.rectangle(image, (10, 10), (36, 36), 255, thickness=1)
+
+    result = SkeletonGraphTracer().trace_graph(image)
+    assert len(result.paths) == 1
+    assert result.paths[0].closed is True
+    assert len(result.junctions) == 0
+
+
+def test_skeleton_graph_trace_graph_preserves_path_behavior() -> None:
+    # Multiple components, closed and open, with junctions
+    image = np.zeros((60, 60), dtype=np.uint8)
+    cv2.line(image, (10, 10), (20, 10), 255, thickness=1) # Open line
+    cv2.rectangle(image, (40, 10), (50, 20), 255, thickness=1) # Closed loop
+
+    # Y junction
+    cv2.line(image, (20, 40), (20, 50), 255, thickness=1)
+    cv2.line(image, (20, 40), (10, 30), 255, thickness=1)
+    cv2.line(image, (20, 40), (30, 30), 255, thickness=1)
+
+    result = SkeletonGraphTracer().trace_graph(image)
+
+    # Paths: 1 for open line, 1 for loop, 3 for Y junction branches
+    assert len(result.paths) == 5
+
+    # Exactly 1 junction
+    assert len(result.junctions) == 1
+    j = result.junctions[0]
+    assert j.pixel == (20, 40)
+    assert j.degree == 3
+    assert len(j.endpoints) == 3
+
+    # Closed loops should be marked closed
+    closed_paths = [p for p in result.paths if p.closed]
+    assert len(closed_paths) == 1
+
+    for path in result.paths:
+        _assert_path_is_continuous(path.pixels, closed=path.closed)

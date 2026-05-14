@@ -7,7 +7,7 @@ import numpy as np
 
 from core.coordinate import CoordinateTransformer
 from core.types import CoordinateSystem
-from services.skeleton_graph import SkeletonGraphTracer
+from services.skeleton_graph import SkeletonGraphTraceResult, SkeletonGraphTracer, SkeletonJunction
 
 
 Point = tuple[float, float]
@@ -30,6 +30,7 @@ class BinaryContour:
 class ExtractedContours:
     binary_contours: tuple[BinaryContour, ...]
     skeleton_contours: tuple[BinaryContour, ...]
+    skeleton_junctions: tuple[SkeletonJunction, ...] = ()
 
 
 class ContourExtractor:
@@ -49,8 +50,13 @@ class ContourExtractor:
 
     def extract_contours(self, image: np.ndarray) -> ExtractedContours:
         binary_contours = self.extract_binary_contours(image)
-        skeleton_contours = self.extract_skeleton_contours(image)
-        return ExtractedContours(binary_contours=binary_contours, skeleton_contours=skeleton_contours)
+        trace_result = self._trace_skeleton_graph(image)
+        skeleton_contours = self._extract_skeleton_contours_from_trace(trace_result)
+        return ExtractedContours(
+            binary_contours=binary_contours,
+            skeleton_contours=skeleton_contours,
+            skeleton_junctions=trace_result.junctions,
+        )
 
     def extract_binary_contours(self, image: np.ndarray) -> tuple[BinaryContour, ...]:
         closed = self._preprocess_binary_mask(image)
@@ -86,11 +92,16 @@ class ContourExtractor:
         return tuple(extracted)
 
     def extract_skeleton_contours(self, image: np.ndarray) -> tuple[BinaryContour, ...]:
-        skeleton_mask = self._skeletonize(self._preprocess_skeleton_mask(image))
-        traced_paths = self.skeleton_graph_tracer.trace_mask(skeleton_mask)
-        extracted: list[BinaryContour] = []
+        trace_result = self._trace_skeleton_graph(image)
+        return self._extract_skeleton_contours_from_trace(trace_result)
 
-        for index, traced_path in enumerate(traced_paths):
+    def _trace_skeleton_graph(self, image: np.ndarray) -> SkeletonGraphTraceResult:
+        skeleton_mask = self._skeletonize(self._preprocess_skeleton_mask(image))
+        return self.skeleton_graph_tracer.trace_graph(skeleton_mask)
+
+    def _extract_skeleton_contours_from_trace(self, trace_result: SkeletonGraphTraceResult) -> tuple[BinaryContour, ...]:
+        extracted: list[BinaryContour] = []
+        for index, traced_path in enumerate(trace_result.paths):
             if len(traced_path.pixels) < 2:
                 continue
 
