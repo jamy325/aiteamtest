@@ -35,6 +35,10 @@ SEGMENT_REPLACE_TOOL_TO_TYPE = {
     "propose_replace_segment_with_circle": "circle",
     "propose_replace_segment_with_ellipse": "ellipse",
 }
+PATH_REPLACE_TOOL_TO_TYPE = {
+    "propose_replace_path_with_circle": "circle",
+}
+REPLACE_TOOL_TO_TYPE = SEGMENT_REPLACE_TOOL_TO_TYPE | PATH_REPLACE_TOOL_TO_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +82,8 @@ class CommandExecutor:
         affected_path_id = self._command_path_id(command)
 
         try:
-            validation = validate_command(command, document)
+            execution_command, target_type = self._normalize_execution_command(command, document)
+            validation = validate_command(execution_command, document)
             if validation.tool == BATCH_TOOL:
                 raise ValueError("batch command execution is not supported")
             if validation.target_path_id is None or not validation.target_segment_ids:
@@ -88,8 +93,7 @@ class CommandExecutor:
             target_segments = tuple(self._segment_by_id(document, segment_id) for segment_id in validation.target_segment_ids)
             self._ensure_no_dangling_constraints(document, validation.target_segment_ids[1:])
             sampled_points = self._sample_segment_range(target_segments)
-            target_type = SEGMENT_REPLACE_TOOL_TO_TYPE[validation.tool]
-            fit_points = self._fit_points(sampled_points, target_type)
+            fit_points = self._fit_points_for_command(command, sampled_points, target_type)
             replacement_segment = self._replacement_segment(
                 command=command,
                 target_type=target_type,
@@ -235,6 +239,13 @@ class CommandExecutor:
             params["end"] = [last_point[0], last_point[1]]
             confidence = initial.inlier_ratio
             fit_error = refined.rmse
+            feedback = self._circle_refinement_feedback(
+                initial_inlier_ratio=initial.inlier_ratio,
+                initial_fit_error=initial.fit_error,
+                refined=refined,
+            )
+            if self._should_reject_circle_feedback(feedback.reason):
+                raise ValueError(feedback.reason or feedback.suggestion)
         elif target_type == "ellipse":
             ransac = RansacEllipseFitter(
                 RansacEllipseConfig(
@@ -345,6 +356,33 @@ class CommandExecutor:
             )
         )
 
+    def _circle_refinement_feedback(
+        self,
+        *,
+        initial_inlier_ratio: float,
+        initial_fit_error: float,
+        refined: object,
+    ) -> object:
+        radius = float(refined.params["r"])
+        confidence_result = self.fitting_confidence_metric.evaluate(
+            FittingConfidenceInputs(
+                segment_type="circle",
+                inlier_ratio=initial_inlier_ratio,
+                rmse=refined.rmse,
+                segment_length=math.tau * radius,
+                parameter_delta=refined.parameter_delta,
+                radial_error=initial_fit_error,
+            )
+        )
+        return self.refinement_feedback.evaluate(
+            RefinementFeedbackInputs(
+                segment_type="circle",
+                inlier_ratio=initial_inlier_ratio,
+                fit_error=refined.rmse,
+                confidence_result=confidence_result,
+            )
+        )
+
     def _should_reject_arc_feedback(self, reason: str | None, rmse: float, coverage: float) -> bool:
         if reason is None:
             return False
@@ -355,6 +393,9 @@ class CommandExecutor:
         ):
             return False
         return True
+
+    def _should_reject_circle_feedback(self, reason: str | None) -> bool:
+        return reason is not None
 
     def _arc_support_coverage(self, points: tuple[Point, ...], center: Point) -> float:
         if len(points) < 2:
@@ -407,6 +448,16 @@ class CommandExecutor:
         if len(candidate) < self._min_points(target_type):
             raise ValueError("optimized point range is too small for command execution")
         return candidate
+
+    def _fit_points_for_command(
+        self,
+        command: object,
+        sampled_points: tuple[Point, ...],
+        target_type: str,
+    ) -> tuple[Point, ...]:
+        if self._command_tool(command) in PATH_REPLACE_TOOL_TO_TYPE:
+            return self._dedupe_points(sampled_points)
+        return self._fit_points(sampled_points, target_type)
 
     def _sample_segment_range(self, segments: tuple[Segment, ...]) -> tuple[Point, ...]:
         sampled_points: list[Point] = []
@@ -550,6 +601,29 @@ class CommandExecutor:
         if isinstance(command, dict) and "tool" in command:
             return str(command["tool"])
         return "unknown_tool"
+
+    def _normalize_execution_command(self, command: object, document: VectorDocument) -> tuple[object, str]:
+        tool = self._command_tool(command)
+        if tool == "propose_replace_path_with_circle":
+            if not isinstance(command, dict):
+                raise ValueError("command must be a dictionary")
+            if "segment_range" in command:
+                raise ValueError("path circle replacement does not accept segment_range")
+            path_id = command.get("path_id")
+            if path_id is None:
+                raise ValueError("path_id is required for circle path replacement")
+            path = self._path_by_id(document, str(path_id))
+            if not path.closed:
+                raise ValueError(f"path must be closed for circle replacement: {path.path_id}")
+            if not path.segments:
+                raise ValueError(f"path has no segments for circle replacement: {path.path_id}")
+            normalized_command = dict(command)
+            normalized_command["tool"] = "propose_replace_segment_with_circle"
+            normalized_command["segment_range"] = [0, len(path.segments) - 1]
+            return normalized_command, "circle"
+        if tool in SEGMENT_REPLACE_TOOL_TO_TYPE:
+            return command, SEGMENT_REPLACE_TOOL_TO_TYPE[tool]
+        return command, REPLACE_TOOL_TO_TYPE.get(tool, "")
 
     def _coerce_point(self, value: object) -> Point:
         x, y = value  # type: ignore[misc]
