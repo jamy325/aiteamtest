@@ -135,6 +135,24 @@ def test_command_executor_rejects_open_path_ellipse_replacement() -> None:
     assert result.requires_rerender is False
 
 
+def test_command_executor_rejects_segment_id_for_path_ellipse_replacement() -> None:
+    document = _build_document_with_segments(
+        (_ellipse_points(cx=30.0, cy=20.0, rx=10.0, ry=6.0, rotation=0.3, count=24),),
+        path_id="strange_ellipse_path_999",
+    )
+    original_document = document
+    executor = CommandExecutor()
+    command = _command(path_id="strange_ellipse_path_999", command_id="ellipse_with_segment_id")
+    command["segment_id"] = "strange_ellipse_path_999_seg_1"
+
+    result = executor.execute(command, document)
+
+    assert result.success is False
+    assert "segment_id" in (result.reason or "")
+    assert result.document == original_document
+    assert result.requires_rerender is False
+
+
 def test_command_executor_rejects_locked_path_ellipse_replacement() -> None:
     document = _build_document_with_segments(
         (_ellipse_points(cx=30.0, cy=20.0, rx=10.0, ry=6.0, rotation=0.3, count=24),),

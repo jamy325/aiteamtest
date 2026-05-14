@@ -666,6 +666,8 @@ class CommandExecutor:
             raise ValueError("command must be a dictionary")
         if "segment_range" in command:
             raise ValueError(f"path {replacement_label} replacement does not accept segment_range")
+        if "segment_id" in command:
+            raise ValueError(f"path {replacement_label} replacement does not accept segment_id")
         path_id = command.get("path_id")
         if path_id is None:
             raise ValueError(f"path_id is required for {replacement_label} path replacement")
