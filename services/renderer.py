@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 import cv2
 import numpy as np
 
 from core.coordinate import CoordinateTransformer
 from core.types import Point, VectorDocument
+from services.segment_sampler import SegmentSampler, SegmentSamplerConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,11 +25,26 @@ class OverlayRenderOptions:
     anchor_radius: int = 3
     control_radius: int = 2
     bezier_samples: int = 24
+    max_chord_error: float = 0.25
+    min_segments_per_arc: int = 8
+    max_segments_per_arc: int = 128
+    circle_segments: int = 64
+    ellipse_segments: int = 64
 
 
 class Renderer:
     def __init__(self, options: OverlayRenderOptions | None = None) -> None:
         self.options = options or OverlayRenderOptions()
+        self.segment_sampler = SegmentSampler(
+            SegmentSamplerConfig(
+                max_chord_error=self.options.max_chord_error,
+                min_segments_per_arc=self.options.min_segments_per_arc,
+                max_segments_per_arc=self.options.max_segments_per_arc,
+                circle_segments=self.options.circle_segments,
+                ellipse_segments=self.options.ellipse_segments,
+                bezier_segments=self.options.bezier_samples,
+            )
+        )
 
     def render_overlay(self, document: VectorDocument, image: np.ndarray) -> np.ndarray:
         canvas = self._to_bgr_canvas(image)
@@ -84,30 +99,18 @@ class Renderer:
         transformer: CoordinateTransformer,
     ) -> None:
         for segment in document.segments:
-            if segment.type == "line":
-                start = self._point_to_pixel(transformer, segment.params["start"])
-                end = self._point_to_pixel(transformer, segment.params["end"])
-                cv2.line(canvas, start, end, self.options.line_color, self.options.segment_thickness, cv2.LINE_AA)
+            sampled_points = self.segment_sampler.sample_segment(segment)
+            if len(sampled_points) < 2:
                 continue
-
-            if segment.type == "bezier":
-                sampled = np.array(
-                    [
-                        self._point_to_pixel(
-                            transformer,
-                            self._sample_cubic_bezier(
-                                segment.params["start"],
-                                segment.params["control1"],
-                                segment.params["control2"],
-                                segment.params["end"],
-                                step / self.options.bezier_samples,
-                            ),
-                        )
-                        for step in range(self.options.bezier_samples + 1)
-                    ],
-                    dtype=np.int32,
-                )
-                cv2.polylines(canvas, [sampled], False, self.options.bezier_color, self.options.segment_thickness, cv2.LINE_AA)
+            sampled = np.array([self._point_to_pixel(transformer, point) for point in sampled_points], dtype=np.int32)
+            cv2.polylines(
+                canvas,
+                [sampled],
+                self.segment_sampler.is_closed(segment),
+                self._segment_color(segment.type),
+                self.options.segment_thickness,
+                cv2.LINE_AA,
+            )
 
     def _draw_controls(
         self,
@@ -151,32 +154,10 @@ class Renderer:
         pixel = raw if coordinate_space == "pixel" else transformer.vector_to_pixel(raw)
         return (int(round(pixel[0])), int(round(pixel[1])))
 
-    def _sample_cubic_bezier(
-        self,
-        start: Point | list[float],
-        control1: Point | list[float],
-        control2: Point | list[float],
-        end: Point | list[float],
-        t: float,
-    ) -> Point:
-        p0 = (float(start[0]), float(start[1]))
-        p1 = (float(control1[0]), float(control1[1]))
-        p2 = (float(control2[0]), float(control2[1]))
-        p3 = (float(end[0]), float(end[1]))
-        one_minus_t = 1.0 - t
-        x = (
-            (one_minus_t ** 3) * p0[0]
-            + 3.0 * (one_minus_t ** 2) * t * p1[0]
-            + 3.0 * one_minus_t * (t ** 2) * p2[0]
-            + (t ** 3) * p3[0]
-        )
-        y = (
-            (one_minus_t ** 3) * p0[1]
-            + 3.0 * (one_minus_t ** 2) * t * p1[1]
-            + 3.0 * one_minus_t * (t ** 2) * p2[1]
-            + (t ** 3) * p3[1]
-        )
-        return (x, y)
+    def _segment_color(self, segment_type: str) -> tuple[int, int, int]:
+        if segment_type == "bezier":
+            return self.options.bezier_color
+        return self.options.line_color
 
     def _to_bgr_canvas(self, image: np.ndarray) -> np.ndarray:
         if image.ndim == 2:
