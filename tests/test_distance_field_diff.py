@@ -1,4 +1,5 @@
 import ast
+import math
 from pathlib import Path
 
 import numpy as np
@@ -113,6 +114,51 @@ def _closed_source_rectangle_document() -> object:
     )
 
 
+def _arc_diff_document() -> object:
+    source_points = [
+        [
+            32.0 + 12.0 * math.cos(step * (math.pi / 10.0)),
+            24.0 + 12.0 * math.sin(step * (math.pi / 10.0)),
+        ]
+        for step in range(6)
+    ]
+    document = create_document(
+        document_id="doc_arc_diff",
+        width=64.0,
+        height=64.0,
+        coordinate_system=CoordinateSystem(
+            unit="px",
+            precision=4,
+            view_box=(0.0, 0.0, 64.0, 64.0),
+        ),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {
+                            "contour_id": "binary_arc",
+                            "points": source_points,
+                            "coordinate_space": "vector",
+                            "closed": False,
+                        }
+                    ],
+                    "skeleton_contours": [],
+                }
+            }
+        },
+    )
+    path = VectorPath(path_id="path_arc")
+    segment = Segment(
+        segment_id="segment_arc",
+        path_id="path_arc",
+        type="arc",
+        params={"cx": 32.0, "cy": 24.0, "r": 12.0, "start_angle": 0.0, "end_angle": math.pi / 2.0, "direction": "ccw"},
+    )
+    document = add_path(document, path)
+    document = add_segment(document, segment)
+    return document
+
+
 def test_distance_field_diff_renderer_generates_missing_and_overdraw_image() -> None:
     document = _diff_document()
     renderer = DistanceFieldDiffRenderer()
@@ -161,6 +207,18 @@ def test_distance_field_diff_renderer_preserves_closed_source_contour_edges() ->
     result = renderer.render_diff(document)
 
     assert result.image[20, 10, 2] > 0
+
+
+def test_distance_field_diff_renderer_samples_arc_segments() -> None:
+    document = _arc_diff_document()
+    renderer = DistanceFieldDiffRenderer()
+
+    result = renderer.render_diff(document)
+
+    assert result.vector_point_count > 0
+    assert result.vector_point_count > 2
+    assert result.source_point_count == 6
+    assert result.image[24, 44].sum() > 0 or result.image[25, 44].sum() > 0
 
 
 def test_distance_field_diff_renderer_does_not_mutate_document() -> None:

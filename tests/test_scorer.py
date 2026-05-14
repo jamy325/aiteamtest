@@ -1,10 +1,12 @@
 import ast
+import math
 from pathlib import Path
 
 import pytest
 
 from core.document import add_anchor, add_path, add_segment, create_document
 from core.types import Anchor, CoordinateSystem, Path as VectorPath, Segment
+from services.distance_field_diff import DistanceFieldDiffRenderer
 from services.edge_error import EdgeErrorResult
 from services.scorer import Scorer
 
@@ -180,6 +182,58 @@ def test_scorer_does_not_penalize_nested_vector_coordinate_space_metadata() -> N
     result = scorer.score_document(document)
 
     assert result.breakdown.coordinate_consistency_score == pytest.approx(0.0)
+
+
+def test_scorer_accepts_edge_error_from_arc_sampling_pipeline() -> None:
+    path = VectorPath(path_id="path_arc_score")
+    document = create_document(
+        document_id="doc_arc_score",
+        width=64.0,
+        height=64.0,
+        coordinate_system=CoordinateSystem(unit="px", precision=4, view_box=(0.0, 0.0, 64.0, 64.0)),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {
+                            "contour_id": "arc_source",
+                            "points": [
+                                [32.0 + 12.0 * math.cos(step * (math.pi / 10.0)), 24.0 + 12.0 * math.sin(step * (math.pi / 10.0))]
+                                for step in range(6)
+                            ],
+                            "coordinate_space": "vector",
+                            "closed": False,
+                        }
+                    ],
+                    "skeleton_contours": [],
+                }
+            }
+        },
+    )
+    document = add_path(document, path)
+    document = add_segment(
+        document,
+        Segment(
+            "seg_arc_score",
+            "path_arc_score",
+            "arc",
+            params={"cx": 32.0, "cy": 24.0, "r": 12.0, "start_angle": 0.0, "end_angle": math.pi / 2.0, "direction": "ccw"},
+        ),
+    )
+    diff = DistanceFieldDiffRenderer().render_diff(document)
+    edge_error = EdgeErrorResult(
+        diff.missing_edge_error,
+        diff.overdraw_error,
+        diff.chamfer_error,
+        diff.source_point_count,
+        diff.vector_point_count,
+    )
+    scorer = Scorer()
+
+    result = scorer.score_document(document, edge_error=edge_error)
+
+    assert diff.vector_point_count > 0
+    assert result.breakdown.edge_error_score == pytest.approx(diff.chamfer_error)
 
 
 def test_scorer_has_no_forbidden_dependencies() -> None:

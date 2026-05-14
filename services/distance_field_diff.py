@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 import cv2
 import numpy as np
@@ -9,11 +8,18 @@ import numpy as np
 from core.coordinate import CoordinateTransformer
 from core.types import Point, VectorDocument
 from services.edge_error import EdgeErrorCalculator, EdgeErrorResult
+from services.segment_sampler import SegmentSampler, SegmentSamplerConfig
 
 
 @dataclass(frozen=True, slots=True)
 class DistanceFieldDiffOptions:
     sample_step: float = 1.0
+    max_chord_error: float = 0.25
+    min_segments_per_arc: int = 8
+    max_segments_per_arc: int = 128
+    circle_segments: int = 64
+    ellipse_segments: int = 64
+    bezier_segments: int = 24
     missing_color: tuple[int, int, int] = (0, 0, 255)
     overdraw_color: tuple[int, int, int] = (255, 0, 0)
     overlap_color: tuple[int, int, int] = (80, 80, 80)
@@ -45,6 +51,17 @@ class DistanceFieldDiffRenderer:
     ) -> None:
         self.options = options or DistanceFieldDiffOptions()
         self.edge_error_calculator = edge_error_calculator or EdgeErrorCalculator()
+        self.segment_sampler = SegmentSampler(
+            SegmentSamplerConfig(
+                max_chord_error=self.options.max_chord_error,
+                min_segments_per_arc=self.options.min_segments_per_arc,
+                max_segments_per_arc=self.options.max_segments_per_arc,
+                circle_segments=self.options.circle_segments,
+                ellipse_segments=self.options.ellipse_segments,
+                bezier_segments=self.options.bezier_segments,
+                line_sample_step=self.options.sample_step,
+            )
+        )
 
     def render_diff(self, document: VectorDocument) -> DistanceFieldDiffResult:
         transformer = CoordinateTransformer(document.coordinate_system)
@@ -117,89 +134,18 @@ class DistanceFieldDiffRenderer:
         polylines: list[RasterPolyline] = []
 
         for segment in document.segments:
-            if segment.type == "line":
-                segment_points = self._sample_line(segment.params["start"], segment.params["end"])
-            elif segment.type == "bezier":
-                segment_points = self._sample_bezier(
-                    segment.params["start"],
-                    segment.params["control1"],
-                    segment.params["control2"],
-                    segment.params["end"],
-                )
-            else:
-                continue
-
+            segment_points = self.segment_sampler.sample_segment(segment)
             if len(segment_points) < 2:
                 continue
             sampled_points.extend(segment_points)
             polylines.append(
                 RasterPolyline(
                     points=np.array([self._point_to_pixel(transformer, point) for point in segment_points], dtype=np.int32),
-                    closed=False,
+                    closed=self.segment_sampler.is_closed(segment),
                 )
             )
 
         return (tuple(sampled_points), tuple(polylines))
-
-    def _sample_line(self, start: Point | list[float], end: Point | list[float]) -> tuple[Point, ...]:
-        p0 = self._coerce_point(start)
-        p1 = self._coerce_point(end)
-        length = math.dist(p0, p1)
-        sample_count = self._sample_count(length)
-        return tuple(
-            (
-                p0[0] + (p1[0] - p0[0]) * t,
-                p0[1] + (p1[1] - p0[1]) * t,
-            )
-            for t in self._parameter_steps(sample_count)
-        )
-
-    def _sample_bezier(
-        self,
-        start: Point | list[float],
-        control1: Point | list[float],
-        control2: Point | list[float],
-        end: Point | list[float],
-    ) -> tuple[Point, ...]:
-        p0 = self._coerce_point(start)
-        p1 = self._coerce_point(control1)
-        p2 = self._coerce_point(control2)
-        p3 = self._coerce_point(end)
-        control_polygon_length = math.dist(p0, p1) + math.dist(p1, p2) + math.dist(p2, p3)
-        sample_count = self._sample_count(control_polygon_length)
-        return tuple(self._cubic_bezier_point(p0, p1, p2, p3, t) for t in self._parameter_steps(sample_count))
-
-    def _sample_count(self, length: float) -> int:
-        step = max(float(self.options.sample_step), 1e-6)
-        return max(2, int(math.ceil(length / step)) + 1)
-
-    def _parameter_steps(self, sample_count: int) -> tuple[float, ...]:
-        if sample_count <= 1:
-            return (0.0,)
-        return tuple(index / (sample_count - 1) for index in range(sample_count))
-
-    def _cubic_bezier_point(
-        self,
-        p0: Point,
-        p1: Point,
-        p2: Point,
-        p3: Point,
-        t: float,
-    ) -> Point:
-        one_minus_t = 1.0 - t
-        x = (
-            (one_minus_t ** 3) * p0[0]
-            + 3.0 * (one_minus_t ** 2) * t * p1[0]
-            + 3.0 * one_minus_t * (t ** 2) * p2[0]
-            + (t ** 3) * p3[0]
-        )
-        y = (
-            (one_minus_t ** 3) * p0[1]
-            + 3.0 * (one_minus_t ** 2) * t * p1[1]
-            + 3.0 * one_minus_t * (t ** 2) * p2[1]
-            + (t ** 3) * p3[1]
-        )
-        return (x, y)
 
     def _rasterize_polylines(
         self,

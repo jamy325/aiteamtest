@@ -1,4 +1,5 @@
 import ast
+import math
 from pathlib import Path
 
 import cv2
@@ -7,6 +8,7 @@ import numpy as np
 from core.document import add_anchor, add_path, add_segment, create_document
 from core.types import Anchor, CoordinateSystem, Path as VectorPath, Segment
 from services.renderer import Renderer
+from services.segment_sampler import SegmentSampler
 
 
 def _renderer_document(y_axis: str = "down"):
@@ -78,6 +80,44 @@ def _renderer_document(y_axis: str = "down"):
     return document
 
 
+def _curved_renderer_document() -> object:
+    document = create_document(
+        document_id="doc_render_curves",
+        width=120.0,
+        height=120.0,
+        coordinate_system=CoordinateSystem(
+            y_axis="down",
+            unit="px",
+            precision=4,
+            view_box=(0.0, 0.0, 120.0, 120.0),
+        ),
+    )
+    path = VectorPath(path_id="path_curves")
+    document = add_path(document, path)
+    for segment in (
+        Segment(
+            segment_id="arc_seg",
+            path_id="path_curves",
+            type="arc",
+            params={"cx": 30.0, "cy": 30.0, "r": 12.0, "start_angle": 0.0, "end_angle": math.pi / 2.0, "direction": "ccw"},
+        ),
+        Segment(
+            segment_id="circle_seg",
+            path_id="path_curves",
+            type="circle",
+            params={"cx": 70.0, "cy": 75.0, "r": 10.0},
+        ),
+        Segment(
+            segment_id="ellipse_seg",
+            path_id="path_curves",
+            type="ellipse",
+            params={"cx": 90.0, "cy": 35.0, "rx": 14.0, "ry": 6.0, "rotation": math.pi / 6.0},
+        ),
+    ):
+        document = add_segment(document, segment)
+    return document
+
+
 def test_renderer_renders_overlay_with_source_contours_segments_and_controls() -> None:
     image = np.zeros((100, 100, 3), dtype=np.uint8)
     document = _renderer_document()
@@ -114,6 +154,21 @@ def test_renderer_does_not_mutate_document() -> None:
     _ = renderer.render_overlay(document, image)
 
     assert document == original_document
+
+
+def test_renderer_draws_arc_circle_and_ellipse_curves_not_just_anchors() -> None:
+    image = np.zeros((120, 120, 3), dtype=np.uint8)
+    document = _curved_renderer_document()
+    renderer = Renderer()
+    sampler = SegmentSampler()
+
+    overlay = renderer.render_overlay(document, image)
+
+    for segment in document.segments:
+        sampled_points = sampler.sample_segment(segment)
+        mid_point = sampled_points[len(sampled_points) // 2]
+        pixel = (int(round(mid_point[0])), int(round(mid_point[1])))
+        assert overlay[pixel[1], pixel[0]].sum() > 0
 
 
 def test_renderer_has_no_forbidden_dependencies() -> None:
