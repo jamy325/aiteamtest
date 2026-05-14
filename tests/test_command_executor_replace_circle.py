@@ -166,4 +166,3 @@ def test_command_executor_rejects_low_confidence_circle_replacement() -> None:
         or "fit_error" in (result.reason or "")
         or "inlier" in (result.reason or "")
     )
-
