@@ -3,6 +3,7 @@ from pathlib import Path
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment
 from services.batch_command_executor import BatchCommandExecutor
+from services.command_executor import CommandExecutionResult
 
 
 def _build_document_with_paths() -> object:
@@ -62,6 +63,39 @@ def _command(tool: str, *, path_id: str, command_id: str) -> dict[str, object]:
         "confidence": 0.8,
         "requires_user_confirmation": True,
     }
+
+
+class _InPlaceMutatingExecutor:
+    def execute(self, command: object, document: object) -> CommandExecutionResult:
+        if isinstance(command, dict) and command.get("command_id") == "mutate_then_fail":
+            return CommandExecutionResult(
+                success=False,
+                command_id="mutate_then_fail",
+                document=document,
+                affected_paths=("path_1",),
+                affected_segments=(),
+                old_score=1.0,
+                new_score=None,
+                topology_status="open",
+                self_intersection_count=0,
+                requires_rerender=False,
+                reason="forced failure",
+            )
+
+        document.segments[0].params["points"][0][0] = 999.0
+        return CommandExecutionResult(
+            success=True,
+            command_id="mutate_then_succeed",
+            document=document,
+            affected_paths=("path_1",),
+            affected_segments=("path_1_seg_1",),
+            old_score=1.0,
+            new_score=0.5,
+            topology_status="open",
+            self_intersection_count=0,
+            requires_rerender=True,
+            reason=None,
+        )
 
 
 def test_batch_command_executor_executes_all_successful_commands() -> None:
@@ -147,6 +181,56 @@ def test_batch_command_executor_rolls_back_after_failure_when_enabled() -> None:
         "cmd_failure",
     )
     assert result.document == original_document
+
+
+def test_batch_command_executor_rolls_back_to_deep_snapshot_after_in_place_mutation() -> None:
+    document = create_document(
+        document_id="doc_mutation",
+        width=100.0,
+        height=100.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_1", segments=("path_1_seg_1",)))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="path_1_seg_1",
+            path_id="path_1",
+            type="polyline",
+            params={"points": [[0.0, 0.0], [1.0, 0.0]]},
+        ),
+    )
+    executor = BatchCommandExecutor(command_executor=_InPlaceMutatingExecutor())
+    commands = [
+        {"command_id": "mutate_then_succeed"},
+        {"command_id": "mutate_then_fail"},
+    ]
+
+    result = executor.execute_batch(commands, document, rollback_batch_on_failure=True)
+
+    assert result.rolled_back is True
+    assert result.document.segments[0].params["points"] == [[0.0, 0.0], [1.0, 0.0]]
+    assert result.document is not document
+    assert result.success_count == 1
+    assert result.failure_count == 1
+    assert len(result.results) == 2
+
+
+def test_batch_command_executor_continues_after_non_dict_command_failure() -> None:
+    document = _build_document_with_paths()
+    executor = BatchCommandExecutor()
+    commands = [
+        None,
+        _command("propose_replace_segment_with_line", path_id="path_1", command_id="cmd_valid_after_none"),
+    ]
+
+    result = executor.execute_batch(commands, document, continue_on_failure=True)
+
+    assert result.success_count == 1
+    assert result.failure_count == 1
+    assert tuple(item.success for item in result.results) == (False, True)
+    assert "command must be a dictionary" in (result.results[0].reason or "")
+    assert next(segment for segment in result.document.segments if segment.path_id == "path_1").type == "line"
 
 
 def test_batch_command_executor_has_no_forbidden_dependencies() -> None:

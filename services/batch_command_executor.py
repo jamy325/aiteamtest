@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import uuid
 
@@ -44,7 +45,7 @@ class BatchCommandExecutor:
     ) -> BatchCommandExecutionResult:
         batch_id = f"batch_{uuid.uuid4().hex[:8]}"
         current_document = document
-        original_document = document
+        rollback_document = deepcopy(document) if rollback_batch_on_failure else document
         item_results: list[BatchCommandItemResult] = []
         failure_seen = False
 
@@ -58,13 +59,13 @@ class BatchCommandExecutor:
 
             failure_seen = True
             if rollback_batch_on_failure:
-                current_document = original_document
+                current_document = rollback_document
                 break
             if not continue_on_failure:
                 break
 
         if rollback_batch_on_failure and failure_seen:
-            current_document = original_document
+            current_document = rollback_document
 
         success_count = sum(1 for result in item_results if result.success)
         failure_count = len(item_results) - success_count
