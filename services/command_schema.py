@@ -47,6 +47,8 @@ class CommandValidationError(ValueError):
 
 
 def validate_command(command: dict[str, Any], document: VectorDocument | dict[str, Any]) -> CommandValidationResult:
+    if not isinstance(command, dict):
+        raise CommandValidationError("command must be a dictionary")
     vector_document = _coerce_document(document)
     _validate_coordinate_system(vector_document)
     _reject_precise_geometry(command)
@@ -81,6 +83,8 @@ def _validate_batch_command(command: dict[str, Any], document: VectorDocument) -
 
 
 def _validate_replace_segment_command(command: dict[str, Any], document: VectorDocument) -> CommandValidationResult:
+    if command.get("tool") not in SEGMENT_REPLACE_TOOLS:
+        raise CommandValidationError(f"unknown tool: {command.get('tool')}")
     _require_fields(command, ("path_id", "segment_range", "reason", "confidence", "requires_user_confirmation"))
     _validate_common_fields(command)
 
@@ -91,8 +95,10 @@ def _validate_replace_segment_command(command: dict[str, Any], document: VectorD
     segment_range = command["segment_range"]
     if not isinstance(segment_range, list) or len(segment_range) != 2:
         raise CommandValidationError("segment_range must contain exactly two indices")
-    start_index = int(segment_range[0])
-    end_index = int(segment_range[1])
+    if not all(isinstance(index, int) and not isinstance(index, bool) for index in segment_range):
+        raise CommandValidationError("segment_range indices must be integers")
+    start_index = segment_range[0]
+    end_index = segment_range[1]
     if start_index < 0 or end_index < start_index:
         raise CommandValidationError("segment_range is invalid")
     if end_index >= len(path.segments):
@@ -129,7 +135,7 @@ def _validate_replace_segment_command(command: dict[str, Any], document: VectorD
 
 def _validate_common_fields(command: dict[str, Any]) -> None:
     confidence = command["confidence"]
-    if not isinstance(confidence, (int, float)) or not (0.0 <= float(confidence) <= 1.0):
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not (0.0 <= float(confidence) <= 1.0):
         raise CommandValidationError("confidence must be within [0, 1]")
     if not isinstance(command["requires_user_confirmation"], bool):
         raise CommandValidationError("requires_user_confirmation must be boolean")

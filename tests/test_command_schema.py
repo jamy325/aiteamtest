@@ -221,6 +221,128 @@ def test_validate_command_accepts_batch_command() -> None:
     assert result.target_segment_ids == ("seg_a",)
 
 
+def test_validate_command_rejects_batch_nested_unknown_tool() -> None:
+    document = create_document(
+        document_id="doc_batch_bad_tool",
+        width=10.0,
+        height=10.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_batch", segments=("seg_a",)))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="seg_a",
+            path_id="path_batch",
+            type="line",
+            params={"start": [0.0, 0.0], "end": [1.0, 0.0]},
+        ),
+    )
+    command = {
+        "tool": "propose_batch_refinement",
+        "summary": "batch",
+        "commands": [
+            {
+                "tool": "propose_replace_segment_with_bezier",
+                "path_id": "path_batch",
+                "segment_range": [0, 0],
+                "reason": "intent only",
+                "confidence": 0.8,
+                "requires_user_confirmation": True,
+            }
+        ],
+        "confidence": 0.8,
+        "requires_user_confirmation": True,
+    }
+
+    with pytest.raises(CommandValidationError, match="unknown tool"):
+        validate_command(command, document)
+
+
+@pytest.mark.parametrize(
+    ("segment_range", "message"),
+    (
+        ([0.5, 0.5], "segment_range indices must be integers"),
+        (["0", "0"], "segment_range indices must be integers"),
+        ([True, False], "segment_range indices must be integers"),
+    ),
+)
+def test_validate_command_rejects_invalid_segment_range_types(segment_range: list[object], message: str) -> None:
+    document = create_document(
+        document_id="doc_bad_range",
+        width=10.0,
+        height=10.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_1", segments=("seg_1",)))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="seg_1",
+            path_id="path_1",
+            type="line",
+            params={"start": [0.0, 0.0], "end": [1.0, 0.0]},
+        ),
+    )
+
+    with pytest.raises(CommandValidationError, match=message):
+        validate_command(
+            {
+                "tool": "propose_replace_segment_with_line",
+                "path_id": "path_1",
+                "segment_range": segment_range,
+                "reason": "invalid range type",
+                "confidence": 0.8,
+                "requires_user_confirmation": True,
+            },
+            document,
+        )
+
+
+def test_validate_command_rejects_boolean_confidence() -> None:
+    document = create_document(
+        document_id="doc_bool_confidence",
+        width=10.0,
+        height=10.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_1", segments=("seg_1",)))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="seg_1",
+            path_id="path_1",
+            type="line",
+            params={"start": [0.0, 0.0], "end": [1.0, 0.0]},
+        ),
+    )
+
+    with pytest.raises(CommandValidationError, match="confidence must be within \\[0, 1\\]"):
+        validate_command(
+            {
+                "tool": "propose_replace_segment_with_line",
+                "path_id": "path_1",
+                "segment_range": [0, 0],
+                "reason": "bool confidence",
+                "confidence": True,
+                "requires_user_confirmation": True,
+            },
+            document,
+        )
+
+
+def test_validate_command_rejects_non_dict_command() -> None:
+    document = create_document(
+        document_id="doc_non_dict",
+        width=10.0,
+        height=10.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+
+    with pytest.raises(CommandValidationError, match="command must be a dictionary"):
+        validate_command([], document)
+
+
 def test_command_schema_service_has_no_forbidden_dependencies() -> None:
     source_path = Path("services/command_schema.py")
     source = source_path.read_text(encoding="utf-8")
