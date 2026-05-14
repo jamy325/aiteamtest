@@ -8,10 +8,12 @@ from core.precision import PrecisionUtility
 from core.types import Path, Point, Segment, VectorDocument, updated
 from services.breakpoint_optimizer import BreakPointOptimizer, BreakPointRequest
 from services.command_schema import BATCH_TOOL, CommandValidationError, validate_command
+from services.fitting_confidence import FittingConfidenceInputs, FittingConfidenceMetric
 from services.refiner import (
     PreciseArcFitter,
     PreciseCircleFitter,
     PreciseLineFitter,
+    PreciseLineResult,
     RansacArcConfig,
     RansacArcFitter,
     RansacCircleConfig,
@@ -21,6 +23,7 @@ from services.refiner import (
     RansacLineConfig,
     RansacLineFitter,
 )
+from services.refinement_feedback import RefinementFeedback, RefinementFeedbackInputs
 from services.scorer import Scorer
 from services.segment_sampler import SegmentSampler
 from services.self_intersection import SelfIntersectionDetector
@@ -58,12 +61,16 @@ class CommandExecutor:
         self_intersection_detector: SelfIntersectionDetector | None = None,
         scorer: Scorer | None = None,
         segment_sampler: SegmentSampler | None = None,
+        fitting_confidence_metric: FittingConfidenceMetric | None = None,
+        refinement_feedback: RefinementFeedback | None = None,
     ) -> None:
         self.breakpoint_optimizer = breakpoint_optimizer or BreakPointOptimizer()
         self.topology_engine = topology_engine or TopologyEngine()
         self.self_intersection_detector = self_intersection_detector or SelfIntersectionDetector()
         self.scorer = scorer or Scorer()
         self.segment_sampler = segment_sampler or SegmentSampler()
+        self.fitting_confidence_metric = fitting_confidence_metric or FittingConfidenceMetric()
+        self.refinement_feedback = refinement_feedback or RefinementFeedback()
 
     def execute(self, command: object, document: VectorDocument) -> CommandExecutionResult:
         command_id = self._command_id(command)
@@ -89,6 +96,7 @@ class CommandExecutor:
                 path_closed=path.closed,
                 segments=target_segments,
                 points=fit_points,
+                support_points=sampled_points,
             )
             replaced_document = self._replace_segment_range(
                 document,
@@ -141,6 +149,7 @@ class CommandExecutor:
         path_closed: bool,
         segments: tuple[Segment, ...],
         points: tuple[Point, ...],
+        support_points: tuple[Point, ...],
     ) -> Segment:
         primary_segment = segments[0]
         first_point = points[0]
@@ -166,9 +175,16 @@ class CommandExecutor:
             initial = ransac.fit(points)
             inlier_points = tuple(points[index] for index in initial.inlier_indexes)
             refined = PreciseLineFitter().fit(inlier_points, initial.params)
-            params = dict(refined.params)
+            params = self._line_params_covering_support_points(refined.params, support_points)
             confidence = initial.inlier_ratio
             fit_error = refined.rmse
+            feedback = self._line_refinement_feedback(
+                initial_inlier_ratio=initial.inlier_ratio,
+                refined=refined,
+                params=params,
+            )
+            if self._should_reject_line_feedback(feedback.reason, refined.rmse):
+                raise ValueError(feedback.reason or feedback.suggestion)
         elif target_type == "arc":
             ransac = RansacArcFitter(
                 RansacArcConfig(
@@ -245,6 +261,64 @@ class CommandExecutor:
             locked=primary_segment.locked,
             metadata=metadata,
         )
+
+    def _line_refinement_feedback(
+        self,
+        *,
+        initial_inlier_ratio: float,
+        refined: PreciseLineResult,
+        params: dict[str, object],
+    ) -> object:
+        start = self._coerce_point(params["start"])
+        end = self._coerce_point(params["end"])
+        segment_length = PrecisionUtility.distance_between_points(start, end)
+        confidence_result = self.fitting_confidence_metric.evaluate(
+            FittingConfidenceInputs(
+                segment_type="line",
+                inlier_ratio=initial_inlier_ratio,
+                rmse=refined.rmse,
+                segment_length=segment_length,
+                parameter_delta=refined.parameter_delta,
+            )
+        )
+        return self.refinement_feedback.evaluate(
+            RefinementFeedbackInputs(
+                segment_type="line",
+                inlier_ratio=initial_inlier_ratio,
+                fit_error=refined.rmse,
+                confidence_result=confidence_result,
+            )
+        )
+
+    def _should_reject_line_feedback(self, reason: str | None, rmse: float) -> bool:
+        if reason is None:
+            return False
+        # Short but otherwise stable line replacements can score below the generic
+        # confidence threshold; only treat that as fatal when residuals are also high.
+        if reason == "low_confidence" and rmse <= (self.refinement_feedback.config.max_fit_error * 0.6):
+            return False
+        return True
+
+    def _line_params_covering_support_points(
+        self,
+        refined_params: dict[str, object],
+        support_points: tuple[Point, ...],
+    ) -> dict[str, object]:
+        direction = self._coerce_point(refined_params["direction"])
+        origin = self._coerce_point(refined_params["start"])
+        offsets = tuple(
+            ((point[0] - origin[0]) * direction[0]) + ((point[1] - origin[1]) * direction[1])
+            for point in support_points
+        )
+        start_offset = min(offsets)
+        end_offset = max(offsets)
+        start = (origin[0] + (direction[0] * start_offset), origin[1] + (direction[1] * start_offset))
+        end = (origin[0] + (direction[0] * end_offset), origin[1] + (direction[1] * end_offset))
+
+        params = dict(refined_params)
+        params["start"] = [start[0], start[1]]
+        params["end"] = [end[0], end[1]]
+        return params
 
     def _fit_points(self, points: tuple[Point, ...], target_type: str) -> tuple[Point, ...]:
         if len(points) < self._min_points(target_type):
@@ -407,6 +481,10 @@ class CommandExecutor:
         if isinstance(command, dict) and "tool" in command:
             return str(command["tool"])
         return "unknown_tool"
+
+    def _coerce_point(self, value: object) -> Point:
+        x, y = value  # type: ignore[misc]
+        return (float(x), float(y))
 
 
 __all__ = [
