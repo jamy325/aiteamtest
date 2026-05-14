@@ -184,6 +184,65 @@ def test_history_manager_snapshots_are_isolated_from_later_mutation() -> None:
     assert restored_after.segments[0].params["end"] == [1.0, 0.0]
 
 
+def test_history_manager_record_return_value_mutation_does_not_pollute_internal_history() -> None:
+    before = _build_document(points=((0.0, 0.0), (1.0, 0.0)))
+    after = _replace_first_segment(
+        before,
+        segment_type="line",
+        params={"start": [0.0, 0.0], "end": [1.0, 0.0]},
+    )
+    manager = HistoryManager()
+
+    item = manager.record(
+        command={"command_id": "cmd_1", "tool": "propose_replace_segment_with_line"},
+        before_document=before,
+        after_document=after,
+    )
+    item.before["segments"][0]["params"]["points"][0][0] = 777.0
+    item.after["segments"][0]["params"]["end"][0] = 888.0
+    item.command["command_id"] = "mutated"
+
+    restored_before = manager.undo()
+    restored_after = manager.redo()
+
+    assert restored_before.segments[0].params["points"] == [[0.0, 0.0], [1.0, 0.0]]
+    assert restored_after.segments[0].params["end"] == [1.0, 0.0]
+    assert len(manager.get_by_command_id("cmd_1")) == 1
+    assert len(manager.get_by_command_id("mutated")) == 0
+
+
+def test_history_manager_items_and_query_results_are_defensive_copies() -> None:
+    before = _build_document(points=((0.0, 0.0), (1.0, 0.0)))
+    after = _replace_first_segment(
+        before,
+        segment_type="line",
+        params={"start": [0.0, 0.0], "end": [1.0, 0.0]},
+    )
+    manager = HistoryManager()
+    manager.record(
+        command={"command_id": "cmd_1", "tool": "propose_replace_segment_with_line"},
+        before_document=before,
+        after_document=after,
+    )
+
+    item_from_items = manager.items[0]
+    item_from_items.before["segments"][0]["params"]["points"][0][0] = 777.0
+    item_from_items.after["segments"][0]["params"]["end"][0] = 888.0
+    item_from_items.command["command_id"] = "mutated"
+
+    queried_item = manager.get_by_command_id("cmd_1")[0]
+    queried_item.command["command_id"] = "mutated_again"
+
+    restored_before = manager.undo()
+    restored_after = manager.redo()
+
+    assert restored_before.segments[0].params["points"] == [[0.0, 0.0], [1.0, 0.0]]
+    assert restored_after.segments[0].params["end"] == [1.0, 0.0]
+    assert len(manager.get_by_command_id("cmd_1")) == 1
+    assert len(manager.get_by_command_id("mutated")) == 0
+    assert len(manager.get_by_command_id("mutated_again")) == 0
+
+
 def test_history_manager_has_no_forbidden_dependencies() -> None:
     source = Path("services/history_manager.py").read_text(encoding="utf-8")
     assert "cv2" not in source

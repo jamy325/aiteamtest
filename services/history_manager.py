@@ -27,7 +27,7 @@ class HistoryManager:
 
     @property
     def items(self) -> tuple[HistoryItem, ...]:
-        return tuple(self._items)
+        return tuple(deepcopy(item) for item in self._items)
 
     @property
     def cursor(self) -> int:
@@ -57,7 +57,7 @@ class HistoryManager:
         )
         self._items.append(item)
         self._cursor = len(self._items) - 1
-        return item
+        return deepcopy(item)
 
     def undo(self) -> VectorDocument:
         if self._cursor < 0:
@@ -74,7 +74,11 @@ class HistoryManager:
         return from_dict(deepcopy(item.after))
 
     def get_by_command_id(self, command_id: str) -> tuple[HistoryItem, ...]:
-        return tuple(item for item in self._items if self._command_id(item.command) == command_id)
+        return tuple(
+            deepcopy(item)
+            for item in self._items
+            if self._command_id(item.command) == command_id
+        )
 
     def _command_id(self, command: object) -> str | None:
         if isinstance(command, dict) and "command_id" in command:
