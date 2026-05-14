@@ -9,6 +9,7 @@ from core.types import Path, Point, Segment, VectorDocument, updated
 from services.breakpoint_optimizer import BreakPointOptimizer, BreakPointRequest
 from services.command_schema import BATCH_TOOL, CommandValidationError, validate_command
 from services.fitting_confidence import FittingConfidenceInputs, FittingConfidenceMetric
+from services.fitting_confidence import FittingConfidenceResult
 from services.refiner import (
     PreciseArcFitter,
     PreciseCircleFitter,
@@ -37,6 +38,7 @@ SEGMENT_REPLACE_TOOL_TO_TYPE = {
 }
 PATH_REPLACE_TOOL_TO_TYPE = {
     "propose_replace_path_with_circle": "circle",
+    "propose_replace_path_with_ellipse": "ellipse",
 }
 REPLACE_TOOL_TO_TYPE = SEGMENT_REPLACE_TOOL_TO_TYPE | PATH_REPLACE_TOOL_TO_TYPE
 
@@ -268,6 +270,9 @@ class CommandExecutor:
             }
             confidence = refined.inlier_ratio
             fit_error = refined.fit_error
+            feedback = self._ellipse_refinement_feedback(refined=refined)
+            if self._should_reject_ellipse_feedback(feedback.reason):
+                raise ValueError(feedback.reason or feedback.suggestion)
         else:
             raise ValueError(f"unsupported command target type: {target_type}")
 
@@ -383,6 +388,20 @@ class CommandExecutor:
             )
         )
 
+    def _ellipse_refinement_feedback(self, *, refined: object) -> object:
+        confidence_result = FittingConfidenceResult(
+            confidence=self._ellipse_confidence(refined.inlier_ratio, refined.fit_error),
+            failure_reason=None,
+        )
+        return self.refinement_feedback.evaluate(
+            RefinementFeedbackInputs(
+                segment_type="ellipse",
+                inlier_ratio=refined.inlier_ratio,
+                fit_error=refined.fit_error,
+                confidence_result=confidence_result,
+            )
+        )
+
     def _should_reject_arc_feedback(self, reason: str | None, rmse: float, coverage: float) -> bool:
         if reason is None:
             return False
@@ -396,6 +415,19 @@ class CommandExecutor:
 
     def _should_reject_circle_feedback(self, reason: str | None) -> bool:
         return reason is not None
+
+    def _should_reject_ellipse_feedback(self, reason: str | None) -> bool:
+        return reason is not None
+
+    def _ellipse_confidence(self, inlier_ratio: float, fit_error: float) -> float:
+        if fit_error <= 0.0:
+            fit_score = 1.0
+        else:
+            fit_score = max(
+                0.0,
+                1.0 - (fit_error / (self.refinement_feedback.config.max_fit_error * 2.0)),
+            )
+        return max(0.0, min(1.0, min(inlier_ratio, fit_score)))
 
     def _arc_support_coverage(self, points: tuple[Point, ...], center: Point) -> float:
         if len(points) < 2:
@@ -605,25 +637,49 @@ class CommandExecutor:
     def _normalize_execution_command(self, command: object, document: VectorDocument) -> tuple[object, str]:
         tool = self._command_tool(command)
         if tool == "propose_replace_path_with_circle":
-            if not isinstance(command, dict):
-                raise ValueError("command must be a dictionary")
-            if "segment_range" in command:
-                raise ValueError("path circle replacement does not accept segment_range")
-            path_id = command.get("path_id")
-            if path_id is None:
-                raise ValueError("path_id is required for circle path replacement")
-            path = self._path_by_id(document, str(path_id))
-            if not path.closed:
-                raise ValueError(f"path must be closed for circle replacement: {path.path_id}")
-            if not path.segments:
-                raise ValueError(f"path has no segments for circle replacement: {path.path_id}")
-            normalized_command = dict(command)
-            normalized_command["tool"] = "propose_replace_segment_with_circle"
-            normalized_command["segment_range"] = [0, len(path.segments) - 1]
-            return normalized_command, "circle"
+            return self._normalize_path_replacement_command(
+                command,
+                document,
+                normalized_tool="propose_replace_segment_with_circle",
+                replacement_label="circle",
+            )
+        if tool == "propose_replace_path_with_ellipse":
+            return self._normalize_path_replacement_command(
+                command,
+                document,
+                normalized_tool="propose_replace_segment_with_ellipse",
+                replacement_label="ellipse",
+            )
         if tool in SEGMENT_REPLACE_TOOL_TO_TYPE:
             return command, SEGMENT_REPLACE_TOOL_TO_TYPE[tool]
         return command, REPLACE_TOOL_TO_TYPE.get(tool, "")
+
+    def _normalize_path_replacement_command(
+        self,
+        command: object,
+        document: VectorDocument,
+        *,
+        normalized_tool: str,
+        replacement_label: str,
+    ) -> tuple[object, str]:
+        if not isinstance(command, dict):
+            raise ValueError("command must be a dictionary")
+        if "segment_range" in command:
+            raise ValueError(f"path {replacement_label} replacement does not accept segment_range")
+        if "segment_id" in command:
+            raise ValueError(f"path {replacement_label} replacement does not accept segment_id")
+        path_id = command.get("path_id")
+        if path_id is None:
+            raise ValueError(f"path_id is required for {replacement_label} path replacement")
+        path = self._path_by_id(document, str(path_id))
+        if not path.closed:
+            raise ValueError(f"path must be closed for {replacement_label} replacement: {path.path_id}")
+        if not path.segments:
+            raise ValueError(f"path has no segments for {replacement_label} replacement: {path.path_id}")
+        normalized_command = dict(command)
+        normalized_command["tool"] = normalized_tool
+        normalized_command["segment_range"] = [0, len(path.segments) - 1]
+        return normalized_command, replacement_label
 
     def _coerce_point(self, value: object) -> Point:
         x, y = value  # type: ignore[misc]
