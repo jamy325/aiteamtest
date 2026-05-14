@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 from core.precision import PrecisionUtility
 from core.types import Path, Point, Segment, VectorDocument, updated
+from services.segment_sampler import SegmentSampler, SegmentSamplerConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,14 @@ class _EdgeFragment:
 class SelfIntersectionDetector:
     def __init__(self, config: SelfIntersectionConfig | None = None) -> None:
         self.config = config or SelfIntersectionConfig()
+        self._sampler = SegmentSampler(
+            SegmentSamplerConfig(
+                max_chord_error=self.config.max_chord_error,
+                min_segments_per_arc=self.config.min_segments_per_arc,
+                max_segments_per_arc=self.config.max_segments_per_arc,
+                bezier_segments=self.config.bezier_segments,
+            )
+        )
 
     def detect_path_self_intersections(self, document: VectorDocument, path_id: str) -> SelfIntersectionResult:
         path_index = self._find_path_index(document, path_id)
@@ -143,6 +151,8 @@ class SelfIntersectionDetector:
             return False
 
         if left.path_segment_index == right.path_segment_index:
+            if {left.fragment_index, right.fragment_index} == {0, left.fragment_count - 1}:
+                return True
             return abs(left.fragment_index - right.fragment_index) <= 1
 
         if left.path_segment_index + 1 == right.path_segment_index:
@@ -173,109 +183,7 @@ class SelfIntersectionDetector:
         return tuple(by_id[segment_id] for segment_id in path.segments)
 
     def _sample_segment(self, segment: Segment) -> tuple[Point, ...]:
-        if segment.type == "line":
-            return (
-                self._coerce_point(segment.params["start"]),
-                self._coerce_point(segment.params["end"]),
-            )
-        if segment.type == "polyline":
-            if "points" in segment.params:
-                return tuple(self._coerce_point(point) for point in segment.params["points"])
-            return (
-                self._coerce_point(segment.params["start"]),
-                self._coerce_point(segment.params["end"]),
-            )
-        if segment.type == "bezier":
-            return self._sample_bezier(segment)
-        if segment.type == "arc":
-            return self._sample_arc(segment)
-        raise ValueError(f"unsupported segment type for self intersection detection: {segment.type}")
-
-    def _sample_bezier(self, segment: Segment) -> tuple[Point, ...]:
-        start = self._coerce_point(segment.params["start"])
-        control1 = self._coerce_point(segment.params["control1"])
-        control2 = self._coerce_point(segment.params["control2"])
-        end = self._coerce_point(segment.params["end"])
-        segment_count = max(1, int(self.config.bezier_segments))
-        return tuple(
-            self._cubic_bezier_point(start, control1, control2, end, step / segment_count)
-            for step in range(segment_count + 1)
-        )
-
-    def _sample_arc(self, segment: Segment) -> tuple[Point, ...]:
-        center = (
-            float(segment.params["cx"]),
-            float(segment.params["cy"]),
-        )
-        radius = abs(float(segment.params["r"]))
-        if PrecisionUtility.near_zero(radius, epsilon=self.config.epsilon):
-            return (center, center)
-
-        start_angle = math.radians(float(segment.params["start_angle"]))
-        end_angle = math.radians(float(segment.params["end_angle"]))
-        direction = str(segment.params.get("direction", "ccw")).lower()
-        signed_sweep = self._signed_arc_sweep(start_angle, end_angle, direction)
-        sweep = abs(signed_sweep)
-
-        min_segments = max(1, int(self.config.min_segments_per_arc))
-        max_segments = max(min_segments, int(self.config.max_segments_per_arc))
-        error = max(float(self.config.max_chord_error), self.config.epsilon)
-        if error >= radius:
-            segment_count = max_segments
-        else:
-            max_angle = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - (error / radius))))
-            if PrecisionUtility.near_zero(max_angle, epsilon=self.config.epsilon):
-                segment_count = max_segments
-            else:
-                segment_count = int(math.ceil(sweep / max_angle))
-        segment_count = min(max(max(segment_count, min_segments), 1), max_segments)
-
-        return tuple(
-            (
-                center[0] + radius * math.cos(start_angle + signed_sweep * (step / segment_count)),
-                center[1] + radius * math.sin(start_angle + signed_sweep * (step / segment_count)),
-            )
-            for step in range(segment_count + 1)
-        )
-
-    def _signed_arc_sweep(self, start_angle: float, end_angle: float, direction: str) -> float:
-        tau = math.tau
-        if PrecisionUtility.almost_equal(start_angle, end_angle, epsilon=self.config.epsilon):
-            return -tau if direction == "cw" else tau
-
-        if direction == "cw":
-            sweep = end_angle - start_angle
-            if sweep >= 0.0:
-                sweep -= tau
-            return sweep
-
-        sweep = end_angle - start_angle
-        if sweep <= 0.0:
-            sweep += tau
-        return sweep
-
-    def _cubic_bezier_point(
-        self,
-        start: Point,
-        control1: Point,
-        control2: Point,
-        end: Point,
-        t: float,
-    ) -> Point:
-        one_minus_t = 1.0 - t
-        x = (
-            (one_minus_t ** 3) * start[0]
-            + 3.0 * (one_minus_t ** 2) * t * control1[0]
-            + 3.0 * one_minus_t * (t ** 2) * control2[0]
-            + (t ** 3) * end[0]
-        )
-        y = (
-            (one_minus_t ** 3) * start[1]
-            + 3.0 * (one_minus_t ** 2) * t * control1[1]
-            + 3.0 * one_minus_t * (t ** 2) * control2[1]
-            + (t ** 3) * end[1]
-        )
-        return (x, y)
+        return self._sampler.sample_segment(segment)
 
     def _line_line_intersection(self, p1: Point, p2: Point, q1: Point, q2: Point) -> Point | None:
         r = (p2[0] - p1[0], p2[1] - p1[1])
