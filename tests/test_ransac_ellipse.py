@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import math
 import random
+import warnings
 from pathlib import Path
 
 import pytest
@@ -217,6 +218,47 @@ def test_ransac_ellipse_fitter_rejects_near_circular_unstable_fit() -> None:
 
     with pytest.raises(ValueError, match="near-circular|unstable"):
         fitter.fit(points)
+
+
+def test_precise_ellipse_fitter_rejects_parabola_like_non_ellipse_conic() -> None:
+    points = tuple((float(x), float(x * x) / 10.0) for x in range(-8, 9))
+
+    with pytest.raises(ValueError, match="ellipse|conic|axis|center|degenerate|implausible"):
+        PreciseEllipseFitter().fit(points)
+
+
+def test_ransac_ellipse_fitter_rejects_parabola_like_non_ellipse_conic() -> None:
+    points = tuple((float(x), float(x * x) / 10.0) for x in range(-8, 9))
+    fitter = RansacEllipseFitter(
+        RansacEllipseConfig(
+            max_iterations=200,
+            max_error=0.2,
+            min_inlier_ratio=0.8,
+            random_seed=4,
+        )
+    )
+
+    with pytest.raises(ValueError, match="ellipse|conic|axis|center|degenerate|implausible|robust"):
+        fitter.fit(points)
+
+
+def test_ransac_ellipse_fitter_does_not_emit_complex_warning_on_non_ellipse_conic() -> None:
+    points = tuple((float(x), float(x * x) / 10.0) for x in range(-8, 9))
+    fitter = RansacEllipseFitter(
+        RansacEllipseConfig(
+            max_iterations=80,
+            max_error=0.2,
+            min_inlier_ratio=0.8,
+            random_seed=4,
+        )
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError):
+            fitter.fit(points)
+
+    assert not any(type(item.message).__name__ == "ComplexWarning" for item in caught)
 
 
 def test_refiner_exports_ellipse_fitters() -> None:

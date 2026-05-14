@@ -64,9 +64,19 @@ class RansacEllipseResult:
 
 
 class PreciseEllipseFitter:
-    def __init__(self, min_axis_ratio_delta: float = 0.05, duplicate_epsilon: float = 1e-9) -> None:
+    def __init__(
+        self,
+        min_axis_ratio_delta: float = 0.05,
+        duplicate_epsilon: float = 1e-9,
+        max_axis_to_bbox_ratio: float = 10.0,
+        max_center_offset_to_bbox_ratio: float = 10.0,
+        max_axis_ratio: float = 100.0,
+    ) -> None:
         self.min_axis_ratio_delta = float(min_axis_ratio_delta)
         self.duplicate_epsilon = float(duplicate_epsilon)
+        self.max_axis_to_bbox_ratio = float(max_axis_to_bbox_ratio)
+        self.max_center_offset_to_bbox_ratio = float(max_center_offset_to_bbox_ratio)
+        self.max_axis_ratio = float(max_axis_ratio)
 
     def fit(self, points: tuple[Point, ...] | list[Point]) -> PreciseEllipseResult:
         point_sequence = _coerce_points(points)
@@ -77,6 +87,17 @@ class PreciseEllipseFitter:
             conic,
             min_axis_ratio_delta=self.min_axis_ratio_delta,
             duplicate_epsilon=self.duplicate_epsilon,
+        )
+        _validate_ellipse_geometry(
+            point_sequence,
+            cx=cx,
+            cy=cy,
+            rx=rx,
+            ry=ry,
+            duplicate_epsilon=self.duplicate_epsilon,
+            max_axis_to_bbox_ratio=self.max_axis_to_bbox_ratio,
+            max_center_offset_to_bbox_ratio=self.max_center_offset_to_bbox_ratio,
+            max_axis_ratio=self.max_axis_ratio,
         )
         residuals = tuple(_ellipse_residual(point, cx, cy, rx, ry, rotation) for point in point_sequence)
         fit_error = sum(residuals) / len(residuals)
@@ -133,9 +154,7 @@ class RansacEllipseFitter:
             try:
                 self._precise_fitter.fit(point_sequence)
             except ValueError as exc:
-                message = str(exc)
-                if "near-circular" in message or "collinear" in message:
-                    raise
+                raise
             raise ValueError("unable to find a robust ellipse with sufficient inliers")
 
         inlier_indexes, refined = best
@@ -298,13 +317,19 @@ def _fit_conic(points: tuple[Point, ...]) -> np.ndarray:
 
     candidates: list[np.ndarray] = []
     for index in range(eigenvectors.shape[1]):
-        vector = np.real_if_close(eigenvectors[:, index]).astype(np.float64)
+        vector_candidate = np.real_if_close(eigenvectors[:, index], tol=1000)
+        if np.iscomplexobj(vector_candidate):
+            continue
+        vector = np.asarray(vector_candidate, dtype=np.float64)
         if not np.all(np.isfinite(vector)):
             continue
         a, b, c = vector
         if (4.0 * a * c) - (b * b) <= 0.0:
             continue
-        full_vector = np.concatenate((vector, transform @ vector))
+        linear_candidate = np.real_if_close(transform @ vector, tol=1000)
+        if np.iscomplexobj(linear_candidate):
+            continue
+        full_vector = np.concatenate((vector, np.asarray(linear_candidate, dtype=np.float64)))
         if np.all(np.isfinite(full_vector)):
             candidates.append(full_vector)
 
@@ -404,6 +429,40 @@ def _ellipse_residual(point: Point, cx: float, cy: float, rx: float, ry: float, 
     local_y = (-translated_x * sin_theta) + (translated_y * cos_theta)
     radial = math.sqrt(((local_x / rx) ** 2) + ((local_y / ry) ** 2))
     return abs(radial - 1.0) * ((rx + ry) / 2.0)
+
+
+def _validate_ellipse_geometry(
+    points: tuple[Point, ...],
+    *,
+    cx: float,
+    cy: float,
+    rx: float,
+    ry: float,
+    duplicate_epsilon: float,
+    max_axis_to_bbox_ratio: float,
+    max_center_offset_to_bbox_ratio: float,
+    max_axis_ratio: float,
+) -> None:
+    xs = tuple(point[0] for point in points)
+    ys = tuple(point[1] for point in points)
+    min_x = min(xs)
+    max_x = max(xs)
+    min_y = min(ys)
+    max_y = max(ys)
+    bbox_width = max_x - min_x
+    bbox_height = max_y - min_y
+    bbox_diag = math.hypot(bbox_width, bbox_height)
+    if bbox_diag <= duplicate_epsilon:
+        raise ValueError("degenerate point cloud for ellipse geometry")
+
+    cloud_center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+    center_offset = math.dist((cx, cy), cloud_center)
+    if max(rx, ry) / bbox_diag > max_axis_to_bbox_ratio:
+        raise ValueError("implausible ellipse axis relative to point cloud")
+    if center_offset / bbox_diag > max_center_offset_to_bbox_ratio:
+        raise ValueError("implausible ellipse center relative to point cloud")
+    if rx / ry > max_axis_ratio:
+        raise ValueError("implausible ellipse axis ratio")
 
 
 def _normalize_rotation(rotation: float) -> float:
