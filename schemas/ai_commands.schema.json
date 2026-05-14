@@ -4,11 +4,7 @@
   "title": "AI Review Proposed Commands",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "summary",
-    "issues",
-    "proposed_commands"
-  ],
+  "required": ["summary", "issues", "proposed_commands"],
   "properties": {
     "summary": {
       "type": "string",
@@ -31,109 +27,54 @@
     "issue": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "issue_id",
-        "category",
-        "severity",
-        "summary"
-      ],
+      "required": ["issue_id", "category", "severity", "summary"],
       "properties": {
-        "issue_id": {
-          "type": "string",
-          "minLength": 1
-        },
+        "issue_id": { "type": "string", "minLength": 1 },
         "category": {
           "type": "string",
-          "enum": [
-            "geometry",
-            "topology",
-            "self_intersection",
-            "alpha",
-            "color",
-            "style",
-            "constraint"
-          ]
+          "enum": ["geometry", "topology", "self_intersection", "alpha", "color", "style", "constraint"]
         },
         "severity": {
           "type": "string",
-          "enum": [
-            "low",
-            "medium",
-            "high"
-          ]
+          "enum": ["low", "medium", "high"]
         },
-        "summary": {
-          "type": "string",
-          "minLength": 1
-        },
-        "path_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "object_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
+        "summary": { "type": "string", "minLength": 1 },
+        "path_id": { "type": ["string", "null"] },
+        "object_id": { "type": ["string", "null"] },
         "segment_range": {
-          "$ref": "#/$defs/segment_range_or_null"
+          "oneOf": [
+            { "$ref": "#/$defs/segment_range" },
+            { "type": "null" }
+          ]
         },
-        "topology_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "self_intersection_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "alpha_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "color_hint": {
-          "$ref": "#/$defs/nullable_string"
-        }
+        "topology_hint": { "$ref": "#/$defs/nullable_string" },
+        "self_intersection_hint": { "$ref": "#/$defs/nullable_string" },
+        "alpha_hint": { "$ref": "#/$defs/nullable_string" },
+        "color_hint": { "$ref": "#/$defs/nullable_string" }
       }
     },
     "nullable_string": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "segment_range": {
       "type": "array",
       "minItems": 2,
       "maxItems": 2,
-      "items": {
-        "type": "integer",
-        "minimum": 0
-      }
+      "items": { "type": "integer", "minimum": 0 }
     },
-    "segment_range_or_null": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/segment_range"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "base_command": {
+    "replace_segment_command": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "command_type",
-        "path_id",
-        "segment_range",
-        "reason",
-        "confidence",
-        "requires_user_confirmation"
-      ],
+      "required": ["tool", "path_id", "segment_range", "reason", "confidence", "requires_user_confirmation"],
       "properties": {
-        "command_type": {
-          "type": "string"
+        "tool": {
+          "type": "string",
+          "enum": [
+            "propose_replace_segment_with_line",
+            "propose_replace_segment_with_arc",
+            "propose_replace_segment_with_circle",
+            "propose_replace_segment_with_ellipse"
+          ]
         },
         "path_id": {
           "type": "string",
@@ -160,88 +101,18 @@
             "type": "string"
           }
         },
-        "topology_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "self_intersection_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "alpha_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "color_hint": {
-          "$ref": "#/$defs/nullable_string"
-        }
+        "topology_hint": { "$ref": "#/$defs/nullable_string" },
+        "self_intersection_hint": { "$ref": "#/$defs/nullable_string" },
+        "alpha_hint": { "$ref": "#/$defs/nullable_string" },
+        "color_hint": { "$ref": "#/$defs/nullable_string" }
       }
-    },
-    "line_command": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/base_command"
-        },
-        {
-          "properties": {
-            "command_type": {
-              "const": "propose_replace_segment_with_line"
-            }
-          }
-        }
-      ]
-    },
-    "arc_command": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/base_command"
-        },
-        {
-          "properties": {
-            "command_type": {
-              "const": "propose_replace_segment_with_arc"
-            }
-          }
-        }
-      ]
-    },
-    "circle_command": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/base_command"
-        },
-        {
-          "properties": {
-            "command_type": {
-              "const": "propose_replace_segment_with_circle"
-            }
-          }
-        }
-      ]
-    },
-    "ellipse_command": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/base_command"
-        },
-        {
-          "properties": {
-            "command_type": {
-              "const": "propose_replace_segment_with_ellipse"
-            }
-          }
-        }
-      ]
     },
     "batch_command": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "command_type",
-        "summary",
-        "commands",
-        "confidence",
-        "requires_user_confirmation"
-      ],
+      "required": ["tool", "summary", "commands", "confidence", "requires_user_confirmation"],
       "properties": {
-        "command_type": {
+        "tool": {
           "const": "propose_batch_refinement"
         },
         "summary": {
@@ -252,20 +123,7 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "oneOf": [
-              {
-                "$ref": "#/$defs/line_command"
-              },
-              {
-                "$ref": "#/$defs/arc_command"
-              },
-              {
-                "$ref": "#/$defs/circle_command"
-              },
-              {
-                "$ref": "#/$defs/ellipse_command"
-              }
-            ]
+            "$ref": "#/$defs/replace_segment_command"
           }
         },
         "confidence": {
@@ -276,37 +134,16 @@
         "requires_user_confirmation": {
           "type": "boolean"
         },
-        "topology_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "self_intersection_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "alpha_hint": {
-          "$ref": "#/$defs/nullable_string"
-        },
-        "color_hint": {
-          "$ref": "#/$defs/nullable_string"
-        }
+        "topology_hint": { "$ref": "#/$defs/nullable_string" },
+        "self_intersection_hint": { "$ref": "#/$defs/nullable_string" },
+        "alpha_hint": { "$ref": "#/$defs/nullable_string" },
+        "color_hint": { "$ref": "#/$defs/nullable_string" }
       }
     },
     "command": {
       "oneOf": [
-        {
-          "$ref": "#/$defs/line_command"
-        },
-        {
-          "$ref": "#/$defs/arc_command"
-        },
-        {
-          "$ref": "#/$defs/circle_command"
-        },
-        {
-          "$ref": "#/$defs/ellipse_command"
-        },
-        {
-          "$ref": "#/$defs/batch_command"
-        }
+        { "$ref": "#/$defs/replace_segment_command" },
+        { "$ref": "#/$defs/batch_command" }
       ]
     }
   }

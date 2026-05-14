@@ -46,6 +46,7 @@ When describing issues or commands:
 - include self_intersection guidance when paths cross or overlap incorrectly
 - include alpha guidance when transparency or matte pollution affects interpretation
 - include color guidance when style or color grouping appears wrong
+- use the `tool` field for proposed commands, not `command_type`
 
 Return JSON only and ensure it validates against the proposed_commands schema.
 """
@@ -90,9 +91,25 @@ def load_ai_command_schema() -> dict[str, Any]:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
+def normalize_ai_review_response(response: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(response)
+    normalized["issues"] = [dict(issue) for issue in response.get("issues", ())]
+    normalized["proposed_commands"] = [_normalize_command(dict(command)) for command in response.get("proposed_commands", ())]
+    return normalized
+
+
 def validate_ai_review_response(response: dict[str, Any]) -> None:
     validator = Draft202012Validator(load_ai_command_schema())
-    validator.validate(response)
+    validator.validate(normalize_ai_review_response(response))
+
+
+def _normalize_command(command: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(command)
+    if "tool" not in normalized and "command_type" in normalized:
+        normalized["tool"] = normalized.pop("command_type")
+    if normalized.get("tool") == "propose_batch_refinement":
+        normalized["commands"] = [_normalize_command(dict(item)) for item in normalized.get("commands", ())]
+    return normalized
 
 
 class AIReviewService:
@@ -107,7 +124,7 @@ class AIReviewService:
             raise RuntimeError("AI review responder is not configured")
 
         prompt = build_review_prompt(review_input)
-        response = self.responder(prompt, review_input)
+        response = normalize_ai_review_response(self.responder(prompt, review_input))
         validate_ai_review_response(response)
         return AIReviewOutput(
             summary=str(response["summary"]),
@@ -127,5 +144,6 @@ __all__ = [
     "SCHEMA_PATH",
     "build_review_prompt",
     "load_ai_command_schema",
+    "normalize_ai_review_response",
     "validate_ai_review_response",
 ]

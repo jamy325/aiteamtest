@@ -36,135 +36,68 @@ def test_ai_review_prompt_enforces_intent_only_output() -> None:
     assert "only output modification intent" in prompt
     assert "Do not output precise geometry parameters" in prompt
     assert "Do not mutate the VectorDocument directly" in prompt
+    assert "use the `tool` field" in prompt
     assert "original_image" in prompt
-    assert "overlay_image" in prompt
-    assert "distance_field_diff_image" in prompt
-    assert "vector_document_json" in prompt
-    assert "self_intersection_count" in prompt
     assert "available_tools" in prompt
     assert AI_REVIEW_PROMPT in prompt
 
 
-def test_ai_command_schema_accepts_line_command_and_issue_hints() -> None:
+def test_ai_command_schema_accepts_valid_replace_command_and_batch() -> None:
     response = {
-        "summary": "Line segment looks bowed and should be simplified.",
+        "summary": "Several primitive replacements should be reviewed.",
         "issues": [
             {
-                "issue_id": "issue_topology_1",
+                "issue_id": "issue_1",
                 "category": "topology",
                 "severity": "medium",
-                "summary": "Closing continuity looks fragile near the replacement range.",
+                "summary": "Closure may drift after replacement.",
                 "path_id": "path_1",
                 "object_id": "object_1",
-                "segment_range": [3, 6],
-                "topology_hint": "Preserve closure after replacement.",
+                "segment_range": [0, 2],
+                "topology_hint": "Check closure after replacement.",
                 "self_intersection_hint": None,
-                "alpha_hint": "Ignore matte fringe near the source edge.",
-                "color_hint": "Keep original stroke grouping."
+                "alpha_hint": None,
+                "color_hint": None
             }
         ],
         "proposed_commands": [
             {
-                "command_type": "propose_replace_segment_with_line",
+                "tool": "propose_replace_segment_with_arc",
                 "path_id": "path_1",
-                "segment_range": [3, 6],
-                "reason": "This region reads as a clean straight edge.",
-                "confidence": 0.86,
+                "segment_range": [0, 2],
+                "reason": "This region reads as a circular arc.",
+                "confidence": 0.8,
                 "requires_user_confirmation": True,
-                "locked_anchor_ids": ["anchor_10"],
-                "topology_hint": "Re-check closure at both endpoints.",
-                "self_intersection_hint": None,
-                "alpha_hint": "Do not chase transparent fringe pixels.",
-                "color_hint": "Keep the current stroke family."
-            }
-        ]
-    }
-
-    validate_ai_review_response(response)
-
-
-def test_ai_command_schema_accepts_arc_circle_ellipse_and_batch_commands() -> None:
-    response = {
-        "summary": "Multiple regions appear to need primitive replacement.",
-        "issues": [
-            {
-                "issue_id": "issue_self_intersection_1",
-                "category": "self_intersection",
-                "severity": "high",
-                "summary": "One overlap likely comes from the current arc region.",
-                "path_id": "path_2",
-                "object_id": None,
-                "segment_range": [5, 8],
+                "locked_anchor_ids": ["anchor_1"],
                 "topology_hint": None,
-                "self_intersection_hint": "Prefer the simpler arc replacement first.",
+                "self_intersection_hint": None,
                 "alpha_hint": None,
                 "color_hint": None
             },
             {
-                "issue_id": "issue_color_1",
-                "category": "color",
-                "severity": "low",
-                "summary": "The fill edge may be grouped with the wrong style family.",
-                "path_id": None,
-                "object_id": "object_7",
-                "segment_range": None,
+                "tool": "propose_batch_refinement",
+                "summary": "Review both primitive replacements together.",
+                "commands": [
+                    {
+                        "tool": "propose_replace_segment_with_line",
+                        "path_id": "path_2",
+                        "segment_range": [1, 3],
+                        "reason": "This edge should be straight.",
+                        "confidence": 0.77,
+                        "requires_user_confirmation": True,
+                        "locked_anchor_ids": [],
+                        "topology_hint": None,
+                        "self_intersection_hint": None,
+                        "alpha_hint": None,
+                        "color_hint": None
+                    }
+                ],
+                "confidence": 0.75,
+                "requires_user_confirmation": True,
                 "topology_hint": None,
                 "self_intersection_hint": None,
                 "alpha_hint": None,
-                "color_hint": "Consider separating highlight from body contour."
-            }
-        ],
-        "proposed_commands": [
-            {
-                "command_type": "propose_batch_refinement",
-                "summary": "Replace the noisy primitive regions as a coordinated batch.",
-                "commands": [
-                    {
-                        "command_type": "propose_replace_segment_with_arc",
-                        "path_id": "path_2",
-                        "segment_range": [5, 8],
-                        "reason": "The curvature appears circular but partial.",
-                        "confidence": 0.74,
-                        "requires_user_confirmation": True,
-                        "locked_anchor_ids": [],
-                        "topology_hint": "Keep endpoint continuity stable.",
-                        "self_intersection_hint": "Check overlap after replacement.",
-                        "alpha_hint": None,
-                        "color_hint": None
-                    },
-                    {
-                        "command_type": "propose_replace_segment_with_circle",
-                        "path_id": "path_3",
-                        "segment_range": [0, 11],
-                        "reason": "The region appears to be a full circular feature.",
-                        "confidence": 0.9,
-                        "requires_user_confirmation": True,
-                        "locked_anchor_ids": [],
-                        "topology_hint": None,
-                        "self_intersection_hint": None,
-                        "alpha_hint": None,
-                        "color_hint": None
-                    },
-                    {
-                        "command_type": "propose_replace_segment_with_ellipse",
-                        "path_id": "path_4",
-                        "segment_range": [2, 15],
-                        "reason": "The outline looks elongated rather than circular.",
-                        "confidence": 0.68,
-                        "requires_user_confirmation": True,
-                        "locked_anchor_ids": [],
-                        "topology_hint": None,
-                        "self_intersection_hint": None,
-                        "alpha_hint": "Do not overfit semi-transparent edge bloom.",
-                        "color_hint": "Preserve distinct interior highlight."
-                    }
-                ],
-                "confidence": 0.72,
-                "requires_user_confirmation": True,
-                "topology_hint": "Review topology after the batch.",
-                "self_intersection_hint": "Re-check all crossings after replacement.",
-                "alpha_hint": "Keep alpha-related judgments conservative.",
-                "color_hint": "Maintain style grouping consistency."
+                "color_hint": None
             }
         ]
     }
@@ -178,7 +111,7 @@ def test_ai_command_schema_rejects_precise_geometry_parameters() -> None:
         "issues": [],
         "proposed_commands": [
             {
-                "command_type": "propose_replace_segment_with_circle",
+                "tool": "propose_replace_segment_with_circle",
                 "path_id": "path_9",
                 "segment_range": [1, 4],
                 "reason": "The region appears to be a circle.",
@@ -198,12 +131,12 @@ def test_ai_command_schema_rejects_precise_geometry_parameters() -> None:
         validate_ai_review_response(response)
 
 
-def test_ai_command_schema_rejects_missing_summary_and_unknown_command_type() -> None:
+def test_ai_command_schema_rejects_missing_summary_and_unknown_tool() -> None:
     response = {
         "issues": [],
         "proposed_commands": [
             {
-                "command_type": "propose_replace_segment_with_bezier",
+                "tool": "propose_replace_segment_with_bezier",
                 "path_id": "path_1",
                 "segment_range": [0, 2],
                 "reason": "Unsupported command type for this schema.",
