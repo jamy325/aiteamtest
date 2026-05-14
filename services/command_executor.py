@@ -200,8 +200,24 @@ class CommandExecutor:
             inlier_points = tuple(points[index] for index in initial.inlier_indexes)
             refined = PreciseArcFitter().fit(inlier_points, initial.params)
             params = dict(refined.params)
+            arc_coverage = self._arc_support_coverage(
+                support_points,
+                (float(params["cx"]), float(params["cy"])),
+            )
             confidence = initial.inlier_ratio
             fit_error = refined.rmse
+            feedback = self._arc_refinement_feedback(
+                initial_inlier_ratio=initial.inlier_ratio,
+                initial_fit_error=initial.fit_error,
+                refined=refined,
+                support_coverage=arc_coverage,
+            )
+            if self._should_reject_arc_feedback(
+                feedback.reason,
+                refined.rmse,
+                arc_coverage,
+            ):
+                raise ValueError(feedback.reason or feedback.suggestion)
         elif target_type == "circle":
             ransac = RansacCircleFitter(
                 RansacCircleConfig(
@@ -298,6 +314,57 @@ class CommandExecutor:
         if reason == "low_confidence" and rmse <= (self.refinement_feedback.config.max_fit_error * 0.6):
             return False
         return True
+
+    def _arc_refinement_feedback(
+        self,
+        *,
+        initial_inlier_ratio: float,
+        initial_fit_error: float,
+        refined: object,
+        support_coverage: float,
+    ) -> object:
+        params = refined.params
+        segment_length = support_coverage * float(params["r"])
+        confidence_result = self.fitting_confidence_metric.evaluate(
+            FittingConfidenceInputs(
+                segment_type="arc",
+                inlier_ratio=initial_inlier_ratio,
+                rmse=refined.rmse,
+                segment_length=segment_length,
+                parameter_delta=refined.parameter_delta,
+                radial_error=initial_fit_error,
+                arc_angle_coverage=support_coverage,
+            )
+        )
+        return self.refinement_feedback.evaluate(
+            RefinementFeedbackInputs(
+                segment_type="arc",
+                inlier_ratio=initial_inlier_ratio,
+                fit_error=refined.rmse,
+                confidence_result=confidence_result,
+            )
+        )
+
+    def _should_reject_arc_feedback(self, reason: str | None, rmse: float, coverage: float) -> bool:
+        if reason is None:
+            return False
+        if (
+            reason == "low_confidence"
+            and rmse <= (self.refinement_feedback.config.max_fit_error * 0.6)
+            and coverage >= self.fitting_confidence_metric.config.min_arc_angle_coverage
+        ):
+            return False
+        return True
+
+    def _arc_support_coverage(self, points: tuple[Point, ...], center: Point) -> float:
+        if len(points) < 2:
+            return 0.0
+        raw_angles = tuple(math.atan2(point[1] - center[1], point[0] - center[0]) for point in points)
+        unwrapped = [raw_angles[0]]
+        for angle in raw_angles[1:]:
+            delta = (angle - raw_angles[len(unwrapped) - 1] + math.pi) % (2.0 * math.pi) - math.pi
+            unwrapped.append(unwrapped[-1] + delta)
+        return abs(unwrapped[-1] - unwrapped[0])
 
     def _line_params_covering_support_points(
         self,
