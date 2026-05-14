@@ -14,6 +14,7 @@ def _build_document_with_segments(
     path_id: str = "path_1",
     closed: bool = False,
     segment_locked: tuple[bool, ...] | None = None,
+    segment_anchors: tuple[tuple[str, ...], ...] | None = None,
 ) -> object:
     document = create_document(
         document_id=f"doc_{path_id}",
@@ -24,6 +25,7 @@ def _build_document_with_segments(
     segment_ids = tuple(f"{path_id}_seg_{index + 1}" for index in range(len(segment_point_sets)))
     document = add_path(document, VectorPath(path_id=path_id, closed=closed, segments=segment_ids))
     locked_flags = segment_locked or tuple(False for _ in segment_point_sets)
+    anchor_sets = segment_anchors or tuple(() for _ in segment_point_sets)
 
     for index, points in enumerate(segment_point_sets):
         document = add_segment(
@@ -34,6 +36,7 @@ def _build_document_with_segments(
                 type="polyline",
                 params={"points": [[float(x), float(y)] for x, y in points]},
                 locked=locked_flags[index],
+                anchors=anchor_sets[index],
             ),
         )
     return document
@@ -168,18 +171,22 @@ def test_command_executor_replaces_segment_range_with_arc_and_keeps_path_consist
         cy=10.0,
         radius=6.0,
         start_angle=0.25,
-        end_angle=0.8,
+        end_angle=0.75,
         count=6,
     )
     second = _arc_points(
         cx=20.0,
         cy=10.0,
         radius=6.0,
-        start_angle=0.8,
+        start_angle=0.75,
         end_angle=1.4,
         count=6,
     )
-    document = _build_document_with_segments((first, second))
+    document = _build_document_with_segments(
+        (first, second),
+        segment_anchors=(("anchor_0", "anchor_1"), ("anchor_1", "anchor_2")),
+    )
+    original_document = document
     executor = CommandExecutor()
 
     result = executor.execute(_command(segment_range=(0, 1), command_id="range_arc"), document)
@@ -189,4 +196,10 @@ def test_command_executor_replaces_segment_range_with_arc_and_keeps_path_consist
     assert result.affected_segments == ("path_1_seg_1", "path_1_seg_2")
     assert result.document.paths[0].segments == ("path_1_seg_1",)
     assert len(result.document.segments) == 1
-    assert result.document.segments[0].type == "arc"
+    replacement = result.document.segments[0]
+    assert replacement.type == "arc"
+    assert replacement.params["cx"] == pytest.approx(20.0, abs=0.3)
+    assert replacement.params["cy"] == pytest.approx(10.0, abs=0.3)
+    assert replacement.params["r"] == pytest.approx(6.0, abs=0.3)
+    assert replacement.anchors == ("anchor_0", "anchor_2")
+    assert document == original_document

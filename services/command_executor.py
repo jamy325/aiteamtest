@@ -400,6 +400,8 @@ class CommandExecutor:
         )
         start_index, end_index = optimized.optimized_range
         candidate = self._dedupe_points(points[start_index : end_index + 1])
+        if target_type == "arc" and len(candidate) < min(len(points), 5):
+            candidate = self._dedupe_points(points)
         if len(candidate) < self._min_points(target_type):
             candidate = self._dedupe_points(points)
         if len(candidate) < self._min_points(target_type):
