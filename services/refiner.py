@@ -6,6 +6,13 @@ from dataclasses import dataclass
 
 from core.precision import PrecisionUtility
 from core.types import Point
+from services.ellipse_fitter import (
+    PreciseEllipseFitter,
+    PreciseEllipseResult,
+    RansacEllipseConfig,
+    RansacEllipseFitter,
+    RansacEllipseResult,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -712,6 +719,8 @@ __all__ = [
     "PreciseArcResult",
     "PreciseCircleFitter",
     "PreciseCircleResult",
+    "PreciseEllipseFitter",
+    "PreciseEllipseResult",
     "PreciseLineFitter",
     "PreciseLineResult",
     "RansacArcConfig",
@@ -720,6 +729,9 @@ __all__ = [
     "RansacCircleConfig",
     "RansacCircleFitter",
     "RansacCircleResult",
+    "RansacEllipseConfig",
+    "RansacEllipseFitter",
+    "RansacEllipseResult",
     "RansacLineConfig",
     "RansacLineFitter",
     "RansacLineResult",
