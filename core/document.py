@@ -113,6 +113,10 @@ def to_json(document: VectorDocument) -> str:
     return json.dumps(asdict(document), sort_keys=True)
 
 
+def to_dict(document: VectorDocument) -> dict[str, Any]:
+    return json.loads(to_json(document))
+
+
 def from_json(payload: str) -> VectorDocument:
     return from_dict(json.loads(payload))
 
@@ -298,5 +302,6 @@ __all__ = [
     "from_dict",
     "from_json",
     "set_segment_locked",
+    "to_dict",
     "to_json",
 ]
