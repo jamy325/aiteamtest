@@ -79,8 +79,8 @@ class SegmentSampler:
         if PrecisionUtility.near_zero(radius, epsilon=self.config.epsilon):
             raise ValueError("arc radius must be positive for sampling")
 
-        start_angle = float(segment.params["start_angle"])
-        end_angle = float(segment.params["end_angle"])
+        start_angle = self._angle_value(segment, "start_angle")
+        end_angle = self._angle_value(segment, "end_angle")
         direction = str(segment.params.get("direction", "ccw")).lower()
         signed_sweep = self._signed_arc_sweep(start_angle, end_angle, direction)
         sweep = abs(signed_sweep)
@@ -125,7 +125,7 @@ class SegmentSampler:
         cy = float(segment.params["cy"])
         rx = abs(float(segment.params["rx"]))
         ry = abs(float(segment.params["ry"]))
-        rotation = float(segment.params.get("rotation", 0.0))
+        rotation = self._angle_value(segment, "rotation", default=0.0)
         if PrecisionUtility.near_zero(rx, epsilon=self.config.epsilon) or PrecisionUtility.near_zero(
             ry,
             epsilon=self.config.epsilon,
@@ -184,6 +184,25 @@ class SegmentSampler:
 
     def _coerce_point(self, value: Point | list[float]) -> Point:
         return (float(value[0]), float(value[1]))
+
+    def _angle_value(self, segment: Segment, key: str, *, default: float | None = None) -> float:
+        if key not in segment.params:
+            if default is None:
+                raise KeyError(key)
+            return float(default)
+        raw_value = float(segment.params[key])
+        unit = self._angle_unit(segment)
+        if unit == "degree":
+            return math.radians(raw_value)
+        return raw_value
+
+    def _angle_unit(self, segment: Segment) -> str:
+        raw_unit = str(segment.params.get("angle_unit", "radian")).strip().lower()
+        if raw_unit in {"radian", "radians", "rad"}:
+            return "radian"
+        if raw_unit in {"degree", "degrees", "deg"}:
+            return "degree"
+        raise ValueError(f"unsupported angle_unit for sampling: {raw_unit}")
 
 
 __all__ = ["SegmentSampler", "SegmentSamplerConfig"]

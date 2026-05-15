@@ -10,6 +10,12 @@ from services.segment_sampler import SegmentSampler
 
 @dataclass(frozen=True, slots=True)
 class DxfExporter:
+    """Export VectorDocument to ASCII DXF.
+
+    Internal segment angles stay in radians. DXF ARC entities require degrees,
+    so conversion only occurs during export.
+    """
+
     _segment_sampler: SegmentSampler = field(init=False, repr=False)
 
     def __post_init__(self) -> None:

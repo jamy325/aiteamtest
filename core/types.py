@@ -88,6 +88,18 @@ class Anchor:
 
 @dataclass(frozen=True, slots=True)
 class Segment:
+    """Pure data segment.
+
+    Angle-bearing params use radians internally:
+    - arc.start_angle
+    - arc.end_angle
+    - ellipse.rotation
+
+    External degree-based imports must convert explicitly before core algorithms
+    consume the segment, or carry an explicit adapter hint such as
+    ``angle_unit='degree'`` for importer-facing utilities.
+    """
+
     segment_id: str
     path_id: str
     type: SegmentType

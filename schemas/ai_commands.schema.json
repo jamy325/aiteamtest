@@ -63,6 +63,7 @@
       "items": { "type": "integer", "minimum": 0 }
     },
     "replace_segment_command": {
+      "description": "Intent-only command. Precise geometry parameters such as start_angle, end_angle, rotation, cx, cy, r, rx, and ry are intentionally not part of this schema.",
       "type": "object",
       "additionalProperties": false,
       "required": ["tool", "path_id", "segment_range", "reason", "confidence", "requires_user_confirmation"],

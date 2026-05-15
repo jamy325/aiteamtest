@@ -625,6 +625,17 @@ unknown
 6. bspline
 7. polyline
 
+内部角度单位约定：
+
+```text
+arc.start_angle   -> radians
+arc.end_angle     -> radians
+ellipse.rotation  -> radians
+```
+
+如果外部输入是 degree，必须通过显式导入适配或 `angle_unit='degree'`
+转换，核心算法默认不会猜测角度单位。
+
 ```json
 {
   "segment_id": "seg_001",
@@ -634,8 +645,8 @@ unknown
     "cx": 300.0,
     "cy": 220.0,
     "r": 55.0,
-    "start_angle": 20.0,
-    "end_angle": 150.0,
+    "start_angle": 0.3491,
+    "end_angle": 2.618,
     "direction": "ccw"
   },
   "anchors": ["anchor_001", "anchor_002"],
