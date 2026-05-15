@@ -97,6 +97,71 @@ def test_segment_sampler_samples_bezier_arc_circle_and_ellipse_in_vector_space()
     assert max(point[1] for point in ellipse_points) > min(point[1] for point in ellipse_points)
 
 
+def test_segment_sampler_samples_half_circle_when_arc_angles_are_radians() -> None:
+    sampler = SegmentSampler(SegmentSamplerConfig(min_segments_per_arc=8, max_segments_per_arc=64))
+    segment = Segment(
+        segment_id="arc_half_circle",
+        path_id="path_1",
+        type="arc",
+        params={
+            "cx": 5.0,
+            "cy": 5.0,
+            "r": 3.0,
+            "start_angle": 0.0,
+            "end_angle": math.pi,
+            "direction": "ccw",
+        },
+    )
+
+    points = sampler.sample_segment(segment)
+
+    assert points[0] == pytest.approx((8.0, 5.0))
+    assert points[-1] == pytest.approx((2.0, 5.0), abs=1e-6)
+
+
+def test_segment_sampler_does_not_implicitly_treat_180_as_degrees() -> None:
+    sampler = SegmentSampler(SegmentSamplerConfig(min_segments_per_arc=8, max_segments_per_arc=64))
+    segment = Segment(
+        segment_id="arc_180_raw",
+        path_id="path_1",
+        type="arc",
+        params={
+            "cx": 5.0,
+            "cy": 5.0,
+            "r": 3.0,
+            "start_angle": 0.0,
+            "end_angle": 180.0,
+            "direction": "ccw",
+        },
+    )
+
+    points = sampler.sample_segment(segment)
+
+    assert points[-1] != pytest.approx((2.0, 5.0), abs=1e-3)
+
+
+def test_segment_sampler_supports_explicit_degree_angle_unit_for_import_adapters() -> None:
+    sampler = SegmentSampler(SegmentSamplerConfig(min_segments_per_arc=8, max_segments_per_arc=64))
+    segment = Segment(
+        segment_id="arc_180_degree",
+        path_id="path_1",
+        type="arc",
+        params={
+            "cx": 5.0,
+            "cy": 5.0,
+            "r": 3.0,
+            "start_angle": 0.0,
+            "end_angle": 180.0,
+            "direction": "ccw",
+            "angle_unit": "degree",
+        },
+    )
+
+    points = sampler.sample_segment(segment)
+
+    assert points[-1] == pytest.approx((2.0, 5.0), abs=1e-6)
+
+
 def test_segment_sampler_rejects_unknown_segment_type() -> None:
     sampler = SegmentSampler()
     segment = Segment(

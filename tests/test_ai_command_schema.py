@@ -131,6 +131,40 @@ def test_ai_command_schema_rejects_precise_geometry_parameters() -> None:
         validate_ai_review_response(response)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    (
+        ("start_angle", 1.57079632679),
+        ("end_angle", 3.14159265359),
+        ("rotation", 0.78539816339),
+    ),
+)
+def test_ai_command_schema_rejects_precise_angle_parameters(field_name: str, field_value: float) -> None:
+    response = {
+        "summary": "This region looks like a primitive.",
+        "issues": [],
+        "proposed_commands": [
+            {
+                "tool": "propose_replace_segment_with_arc",
+                "path_id": "path_9",
+                "segment_range": [1, 4],
+                "reason": "The region appears to be an arc.",
+                "confidence": 0.88,
+                "requires_user_confirmation": True,
+                "locked_anchor_ids": [],
+                "topology_hint": None,
+                "self_intersection_hint": None,
+                "alpha_hint": None,
+                "color_hint": None,
+                field_name: field_value,
+            }
+        ],
+    }
+
+    with pytest.raises(ValidationError):
+        validate_ai_review_response(response)
+
+
 def test_ai_command_schema_rejects_missing_summary_and_unknown_tool() -> None:
     response = {
         "issues": [],

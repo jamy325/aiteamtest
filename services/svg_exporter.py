@@ -15,6 +15,13 @@ ET.register_namespace("", SVG_NS)
 
 @dataclass(frozen=True, slots=True)
 class SvgExporter:
+    """Export VectorDocument to SVG.
+
+    Internal segment angles stay in radians. SVG-specific degree conversion only
+    happens at export boundaries where the target format requires it, such as
+    ellipse ``rotate(...)`` transforms.
+    """
+
     pretty: bool = False
     _segment_sampler: SegmentSampler = field(init=False, repr=False)
 
