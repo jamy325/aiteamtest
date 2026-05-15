@@ -89,9 +89,36 @@ class SharedTangentOptimizer:
             return self._failure(segment_a, segment_b, "low confidence constraint", constraint=constraint)
 
         pair_types = {segment_a.type, segment_b.type}
-        if pair_types != {"line", "arc"}:
-            return self._failure(segment_a, segment_b, "unsupported segment pair", constraint=constraint)
+        if pair_types == {"line", "arc"}:
+            return self._optimize_line_arc_pair(
+                segment_a,
+                segment_b,
+                anchor,
+                tuple(points),
+                confidence_hint=confidence_hint,
+                constraint=constraint,
+            )
+        if pair_types == {"arc", "bezier"}:
+            return self._optimize_arc_bezier_pair(
+                segment_a,
+                segment_b,
+                anchor,
+                tuple(points),
+                confidence_hint=confidence_hint,
+                constraint=constraint,
+            )
+        return self._failure(segment_a, segment_b, "unsupported segment pair", constraint=constraint)
 
+    def _optimize_line_arc_pair(
+        self,
+        segment_a: Segment,
+        segment_b: Segment,
+        anchor: Anchor,
+        points: tuple[Point, ...],
+        *,
+        confidence_hint: float,
+        constraint: Constraint | None = None,
+    ) -> SharedTangentOptimizationResult:
         if segment_a.type == "line":
             line_segment = segment_a
             arc_segment = segment_b
@@ -127,7 +154,7 @@ class SharedTangentOptimizer:
 
         tangent_mismatch = self._tangent_mismatch(optimized_line_outward, optimized_arc_outward)
         movement_penalty = PrecisionUtility.distance_between_points(shared_point, optimized_point)
-        fit_error = self._fit_error(tuple(points), optimized_line, optimized_arc)
+        fit_error = self._fit_error(points, optimized_line, optimized_arc)
         violation = tangent_mismatch + (movement_penalty * 0.05)
         confidence = self._score_confidence(
             confidence_hint=confidence_hint,
@@ -161,6 +188,86 @@ class SharedTangentOptimizer:
             segment_a=segment_a_result,
             segment_b=segment_b_result,
             shared_tangent=desired_arc_outward,
+            violation=violation,
+            confidence=confidence,
+            fit_error=fit_error,
+            tangent_mismatch=tangent_mismatch,
+            movement_penalty=movement_penalty,
+            reason="optimized shared tangent",
+            constraint_id=constraint.constraint_id if constraint is not None else None,
+        )
+
+    def _optimize_arc_bezier_pair(
+        self,
+        segment_a: Segment,
+        segment_b: Segment,
+        anchor: Anchor,
+        points: tuple[Point, ...],
+        *,
+        confidence_hint: float,
+        constraint: Constraint | None = None,
+    ) -> SharedTangentOptimizationResult:
+        if segment_a.type == "arc":
+            arc_segment = segment_a
+            bezier_segment = segment_b
+            arc_is_first = True
+        else:
+            arc_segment = segment_b
+            bezier_segment = segment_a
+            arc_is_first = False
+
+        current_arc_outward = self._arc_outward_tangent(arc_segment, anchor)
+        current_bezier_outward = self._bezier_outward_tangent(bezier_segment, anchor)
+        if current_arc_outward is None or current_bezier_outward is None:
+            return self._failure(segment_a, segment_b, "invalid bezier or arc tangent", constraint=constraint)
+
+        desired_bezier_outward = PrecisionUtility.normalize_vector((-current_arc_outward[0], -current_arc_outward[1]))
+        if desired_bezier_outward is None:
+            return self._failure(segment_a, segment_b, "invalid desired bezier tangent", constraint=constraint)
+
+        optimized_bezier = self._updated_bezier(bezier_segment, anchor, desired_bezier_outward)
+        optimized_arc = arc_segment
+        optimized_bezier_outward = self._bezier_outward_tangent(optimized_bezier, anchor)
+        optimized_arc_outward = self._arc_outward_tangent(optimized_arc, anchor)
+        if optimized_bezier_outward is None or optimized_arc_outward is None:
+            return self._failure(segment_a, segment_b, "optimized tangents are invalid", constraint=constraint)
+
+        tangent_mismatch = self._tangent_mismatch(optimized_bezier_outward, optimized_arc_outward)
+        movement_penalty = self._bezier_handle_movement_penalty(bezier_segment, optimized_bezier, anchor)
+        fit_error = self._fit_error(points, optimized_arc, optimized_bezier)
+        violation = tangent_mismatch + (movement_penalty * 0.05)
+        confidence = self._score_confidence(
+            confidence_hint=confidence_hint,
+            tangent_mismatch=tangent_mismatch,
+            movement_penalty=movement_penalty,
+            fit_error=fit_error,
+        )
+
+        if tangent_mismatch > self.max_tangent_mismatch or confidence < self.min_confidence:
+            return self._failure(
+                segment_a,
+                segment_b,
+                "low confidence optimization",
+                constraint=constraint,
+                violation=violation,
+                confidence=confidence,
+                fit_error=fit_error,
+                tangent_mismatch=tangent_mismatch,
+                movement_penalty=movement_penalty,
+            )
+
+        if arc_is_first:
+            segment_a_result = optimized_arc
+            segment_b_result = optimized_bezier
+        else:
+            segment_a_result = optimized_bezier
+            segment_b_result = optimized_arc
+
+        return SharedTangentOptimizationResult(
+            success=True,
+            segment_a=segment_a_result,
+            segment_b=segment_b_result,
+            shared_tangent=desired_bezier_outward,
             violation=violation,
             confidence=confidence,
             fit_error=fit_error,
@@ -236,6 +343,20 @@ class SharedTangentOptimizer:
         if at_start:
             return (math.sin(angle), -math.cos(angle)) if direction == "cw" else (-math.sin(angle), math.cos(angle))
         return (-math.sin(angle), math.cos(angle)) if direction == "cw" else (math.sin(angle), -math.cos(angle))
+
+    def _bezier_outward_tangent(self, segment: Segment, anchor: Anchor) -> Point | None:
+        start = self._coerce_point(segment.params.get("start"))
+        end = self._coerce_point(segment.params.get("end"))
+        control1 = self._coerce_point(segment.params.get("control1"))
+        control2 = self._coerce_point(segment.params.get("control2"))
+        if start is None or end is None or control1 is None or control2 is None:
+            return None
+
+        if segment.anchors and segment.anchors[0] == anchor.anchor_id:
+            return (control1[0] - start[0], control1[1] - start[1])
+        if segment.anchors and segment.anchors[-1] == anchor.anchor_id:
+            return (control2[0] - end[0], control2[1] - end[1])
+        return None
 
     def _shared_anchor_point(self, line_segment: Segment, arc_segment: Segment, anchor: Anchor) -> Point | None:
         line_point = self._segment_anchor_point(line_segment, anchor)
@@ -316,6 +437,43 @@ class SharedTangentOptimizer:
             params["end"] = [shared_point[0], shared_point[1]]
         return updated(segment, params=params)
 
+    def _updated_bezier(self, segment: Segment, anchor: Anchor, desired_outward: Point) -> Segment:
+        params = dict(segment.params)
+        start = self._coerce_point(params.get("start"))
+        end = self._coerce_point(params.get("end"))
+        control1 = self._coerce_point(params.get("control1"))
+        control2 = self._coerce_point(params.get("control2"))
+        if start is None or end is None or control1 is None or control2 is None:
+            return segment
+
+        desired_unit = PrecisionUtility.normalize_vector(desired_outward)
+        if desired_unit is None:
+            return segment
+
+        if segment.anchors and segment.anchors[0] == anchor.anchor_id:
+            handle_length = PrecisionUtility.distance_between_points(start, control1)
+            if PrecisionUtility.near_zero(handle_length):
+                handle_length = max(
+                    PrecisionUtility.distance_between_points(start, end) * 0.25,
+                    1.0,
+                )
+            params["control1"] = [
+                start[0] + (desired_unit[0] * handle_length),
+                start[1] + (desired_unit[1] * handle_length),
+            ]
+        elif segment.anchors and segment.anchors[-1] == anchor.anchor_id:
+            handle_length = PrecisionUtility.distance_between_points(end, control2)
+            if PrecisionUtility.near_zero(handle_length):
+                handle_length = max(
+                    PrecisionUtility.distance_between_points(start, end) * 0.25,
+                    1.0,
+                )
+            params["control2"] = [
+                end[0] + (desired_unit[0] * handle_length),
+                end[1] + (desired_unit[1] * handle_length),
+            ]
+        return updated(segment, params=params)
+
     def _tangent_mismatch(self, line_outward: Point, arc_outward: Point) -> float:
         line_unit = PrecisionUtility.normalize_vector(line_outward)
         arc_unit = PrecisionUtility.normalize_vector(arc_outward)
@@ -326,20 +484,42 @@ class SharedTangentOptimizer:
         delta = (line_angle - arc_angle + math.pi) % (2.0 * math.pi) - math.pi
         return abs(delta)
 
-    def _fit_error(self, points: tuple[Point, ...], line_segment: Segment, arc_segment: Segment) -> float:
+    def _bezier_handle_movement_penalty(self, before: Segment, after: Segment, anchor: Anchor) -> float:
+        if before.anchors and before.anchors[0] == anchor.anchor_id:
+            anchor_point = self._coerce_point(before.params.get("start"))
+            opposite_point = self._coerce_point(before.params.get("end"))
+            old_handle = self._coerce_point(before.params.get("control1"))
+            new_handle = self._coerce_point(after.params.get("control1"))
+        else:
+            anchor_point = self._coerce_point(before.params.get("end"))
+            opposite_point = self._coerce_point(before.params.get("start"))
+            old_handle = self._coerce_point(before.params.get("control2"))
+            new_handle = self._coerce_point(after.params.get("control2"))
+        if old_handle is None or new_handle is None or anchor_point is None or opposite_point is None:
+            return math.inf
+
+        handle_move = PrecisionUtility.distance_between_points(old_handle, new_handle)
+        chord_length = PrecisionUtility.distance_between_points(anchor_point, opposite_point)
+        if PrecisionUtility.near_zero(chord_length):
+            return handle_move
+        return handle_move / chord_length
+
+    def _fit_error(self, points: tuple[Point, ...], first_segment: Segment, second_segment: Segment) -> float:
         if not points:
             return 0.0
 
-        line = self._line_coefficients(line_segment)
-        circle = self._circle_params(arc_segment)
-        if line is None or circle is None:
+        samplers = (self._sample_segment(first_segment), self._sample_segment(second_segment))
+        if samplers[0] is None or samplers[1] is None:
             return math.inf
 
         errors = []
         for point in points:
-            line_error = abs((line[0] * point[0]) + (line[1] * point[1]) + line[2])
-            circle_error = abs(math.hypot(point[0] - circle[0], point[1] - circle[1]) - circle[2])
-            errors.append(min(line_error, circle_error))
+            errors.append(
+                min(
+                    self._point_to_polyline_distance(point, samplers[0]),
+                    self._point_to_polyline_distance(point, samplers[1]),
+                )
+            )
         return sum(errors) / len(errors)
 
     def _score_confidence(
@@ -377,6 +557,82 @@ class SharedTangentOptimizer:
         if center_x is None or center_y is None or radius is None:
             return None
         return (center_x, center_y, radius)
+
+    def _sample_segment(self, segment: Segment) -> tuple[Point, ...] | None:
+        if segment.type == "line":
+            start = self._coerce_point(segment.params.get("start"))
+            end = self._coerce_point(segment.params.get("end"))
+            if start is None or end is None:
+                return None
+            return (start, end)
+        if segment.type == "arc":
+            center = self._circle_params(segment)
+            start_angle = self._coerce_float(segment.params.get("start_angle"))
+            end_angle = self._coerce_float(segment.params.get("end_angle"))
+            direction = str(segment.params.get("direction", "ccw")).lower()
+            if center is None or start_angle is None or end_angle is None:
+                return None
+            span = (end_angle - start_angle) % (2.0 * math.pi)
+            if direction == "cw":
+                span = -((start_angle - end_angle) % (2.0 * math.pi))
+            steps = 12
+            samples = []
+            for index in range(steps + 1):
+                t = index / steps
+                angle = start_angle + (span * t)
+                samples.append(
+                    (
+                        center[0] + (center[2] * math.cos(angle)),
+                        center[1] + (center[2] * math.sin(angle)),
+                    )
+                )
+            return tuple(samples)
+        if segment.type == "bezier":
+            start = self._coerce_point(segment.params.get("start"))
+            control1 = self._coerce_point(segment.params.get("control1"))
+            control2 = self._coerce_point(segment.params.get("control2"))
+            end = self._coerce_point(segment.params.get("end"))
+            if start is None or control1 is None or control2 is None or end is None:
+                return None
+            samples = []
+            steps = 12
+            for index in range(steps + 1):
+                t = index / steps
+                one_minus_t = 1.0 - t
+                x = (
+                    (one_minus_t ** 3) * start[0]
+                    + 3.0 * (one_minus_t ** 2) * t * control1[0]
+                    + 3.0 * one_minus_t * (t ** 2) * control2[0]
+                    + (t ** 3) * end[0]
+                )
+                y = (
+                    (one_minus_t ** 3) * start[1]
+                    + 3.0 * (one_minus_t ** 2) * t * control1[1]
+                    + 3.0 * one_minus_t * (t ** 2) * control2[1]
+                    + (t ** 3) * end[1]
+                )
+                samples.append((x, y))
+            return tuple(samples)
+        return None
+
+    def _point_to_polyline_distance(self, point: Point, polyline: tuple[Point, ...]) -> float:
+        if len(polyline) < 2:
+            return math.inf
+        return min(
+            self._point_to_segment_distance(point, polyline[index - 1], polyline[index])
+            for index in range(1, len(polyline))
+        )
+
+    def _point_to_segment_distance(self, point: Point, start: Point, end: Point) -> float:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        segment_length_sq = (dx * dx) + (dy * dy)
+        if PrecisionUtility.near_zero(segment_length_sq):
+            return PrecisionUtility.distance_between_points(point, start)
+        projection = (((point[0] - start[0]) * dx) + ((point[1] - start[1]) * dy)) / segment_length_sq
+        clamped = max(0.0, min(1.0, projection))
+        projected_point = (start[0] + (clamped * dx), start[1] + (clamped * dy))
+        return PrecisionUtility.distance_between_points(point, projected_point)
 
     def _coerce_point(self, value: object) -> Point | None:
         if not isinstance(value, (list, tuple)) or len(value) < 2:
