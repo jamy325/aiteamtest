@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from core.document import add_anchor, add_path, add_segment, create_document
-from core.types import Anchor, CoordinateSystem, Path as VectorPath, Segment
+from core.document import add_anchor, add_constraint, add_path, add_segment, create_document
+from core.types import Anchor, Constraint, CoordinateSystem, Path as VectorPath, Segment
 from services.distance_field_diff import DistanceFieldDiffRenderer
 from services.edge_error import EdgeErrorResult
 from services.scorer import Scorer
@@ -95,6 +95,7 @@ def test_scorer_penalizes_topology_errors_and_self_intersections() -> None:
         + result.breakdown.geometry_complexity_score
         + result.breakdown.topology_error_score
         + result.breakdown.self_intersection_score
+        + result.breakdown.shared_tangent_violation_score
         + result.breakdown.coordinate_consistency_score
     )
 
@@ -182,6 +183,40 @@ def test_scorer_does_not_penalize_nested_vector_coordinate_space_metadata() -> N
     result = scorer.score_document(document)
 
     assert result.breakdown.coordinate_consistency_score == pytest.approx(0.0)
+
+
+def test_scorer_accumulates_shared_tangent_violation_score() -> None:
+    path = VectorPath(path_id="path_shared", segments=("seg_1", "seg_2"))
+    anchors = (
+        Anchor(anchor_id="a1", path_id="path_shared", position=(10.0, 0.0), shared_tangent=(1.0, 0.0)),
+    )
+    segments = (
+        Segment("seg_1", "path_shared", "line", params={"start": [0.0, 0.0], "end": [10.0, 0.0]}, anchors=("a0", "a1")),
+        Segment("seg_2", "path_shared", "line", params={"start": [10.0, 0.0], "end": [20.0, 5.0]}, anchors=("a1", "a2")),
+    )
+    document = _build_document(path=path, anchors=anchors, segments=segments)
+    document = add_constraint(
+        document,
+        Constraint(
+            constraint_id="g1_1",
+            type="shared_tangent",
+            targets=("seg_1", "seg_2", "a1"),
+            locked=False,
+        ),
+    )
+    scorer = Scorer()
+
+    result = scorer.score_document(document)
+
+    assert result.breakdown.shared_tangent_violation_score > 0.0
+    assert result.total_score == pytest.approx(
+        result.breakdown.edge_error_score
+        + result.breakdown.geometry_complexity_score
+        + result.breakdown.topology_error_score
+        + result.breakdown.self_intersection_score
+        + result.breakdown.shared_tangent_violation_score
+        + result.breakdown.coordinate_consistency_score
+    )
 
 
 def test_scorer_accepts_edge_error_from_arc_sampling_pipeline() -> None:
