@@ -90,6 +90,8 @@ def test_style_analyzer_samples_pure_solid_color_from_closed_circle() -> None:
     assert style.fill_alpha == pytest.approx(1.0)
     assert style.color_confidence is not None and style.color_confidence > 0.95
     assert style.color_variance == pytest.approx(0.0)
+    assert style.alpha_variance == pytest.approx(0.0)
+    assert style.paint_type == "solid"
 
 
 def test_style_analyzer_handles_transparent_background_and_reports_fill_alpha() -> None:
@@ -102,6 +104,7 @@ def test_style_analyzer_handles_transparent_background_and_reports_fill_alpha() 
     assert style.fill_color == (40, 200, 25)
     assert style.fill_alpha == pytest.approx(128.0 / 255.0, abs=0.01)
     assert style.color_confidence is not None and style.color_confidence > 0.85
+    assert style.paint_type == "solid"
 
 
 def test_style_analyzer_avoids_antialiased_edge_contamination() -> None:
@@ -122,6 +125,7 @@ def test_style_analyzer_avoids_antialiased_edge_contamination() -> None:
     assert red < 40
     assert blue < 60
     assert style.color_confidence is not None and style.color_confidence > 0.85
+    assert style.paint_type == "solid"
 
 
 def test_style_analyzer_supports_images_without_alpha_channel() -> None:
@@ -135,6 +139,50 @@ def test_style_analyzer_supports_images_without_alpha_channel() -> None:
     assert style.fill_color == (15, 150, 90)
     assert style.fill_alpha == pytest.approx(1.0)
     assert style.color_confidence is not None and style.color_confidence > 0.95
+    assert style.paint_type == "solid"
+
+
+def test_style_analyzer_marks_high_color_variance_as_gradient_candidate() -> None:
+    document = _rectangle_document()
+    image = np.zeros((80, 80, 3), dtype=np.uint8)
+    image[:] = (10, 10, 10)
+    image[20:61, 20:41] = (0, 0, 255)
+    image[20:61, 41:61] = (255, 0, 0)
+
+    style = AlphaAwareStyleAnalyzer().analyze_path_style(document, "rect", image)
+
+    assert style.color_variance is not None and style.color_variance > 28.0
+    assert style.alpha_variance == pytest.approx(0.0)
+    assert style.paint_type == "gradient_candidate"
+
+
+def test_style_analyzer_marks_high_alpha_variance_as_transparency_candidate() -> None:
+    document = _rectangle_document()
+    image = np.zeros((80, 80, 4), dtype=np.uint8)
+    image[20:61, 20:61, :3] = (40, 160, 60)
+    image[20:61, 20:41, 3] = 255
+    image[20:61, 41:61, 3] = 64
+
+    style = AlphaAwareStyleAnalyzer().analyze_path_style(document, "rect", image)
+
+    assert style.color_variance is not None and style.color_variance < 8.0
+    assert style.alpha_variance is not None and style.alpha_variance > 0.12
+    assert style.paint_type == "transparency_candidate"
+
+
+def test_style_analyzer_marks_intermediate_variance_as_unknown() -> None:
+    document = _rectangle_document()
+    image = np.zeros((80, 80, 3), dtype=np.uint8)
+    image[:] = (0, 0, 0)
+    image[20:61, 20:41] = (90, 120, 60)
+    image[20:61, 41:61] = (100, 130, 70)
+
+    style = AlphaAwareStyleAnalyzer().analyze_path_style(document, "rect", image)
+
+    assert style.color_variance is not None
+    assert 8.0 < style.color_variance < 28.0
+    assert style.alpha_variance == pytest.approx(0.0)
+    assert style.paint_type == "unknown"
 
 
 def test_style_analyzer_has_no_forbidden_dependencies() -> None:

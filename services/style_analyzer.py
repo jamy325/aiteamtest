@@ -16,6 +16,10 @@ class AlphaAwareStyleAnalyzerConfig:
     alpha_threshold: int = 8
     erosion_kernel_size: int = 3
     min_eroded_pixels: int = 9
+    solid_color_variance_threshold: float = 8.0
+    solid_alpha_variance_threshold: float = 0.03
+    gradient_color_variance_threshold: float = 28.0
+    transparency_alpha_variance_threshold: float = 0.12
     line_sample_step: float = 1.0
     bezier_segments: int = 48
     circle_segments: int = 96
@@ -74,6 +78,7 @@ class AlphaAwareStyleAnalyzer:
             color_confidence=color_confidence,
             color_variance=color_variance,
             alpha_variance=alpha_variance,
+            paint_type=self._paint_type(color_variance=color_variance, alpha_variance=alpha_variance),
             metadata={
                 "sample_pixel_count": int(np.count_nonzero(sample_mask)),
                 "mask_pixel_count": int(np.count_nonzero(mask)),
@@ -176,6 +181,18 @@ class AlphaAwareStyleAnalyzer:
         alpha_term = max(0.0, 1.0 - (float(alpha_variance) / 0.25))
         ratio_term = max(0.0, min(1.0, float(sample_ratio)))
         return max(0.0, min(1.0, (0.6 * color_term) + (0.2 * alpha_term) + (0.2 * ratio_term)))
+
+    def _paint_type(self, *, color_variance: float, alpha_variance: float) -> str:
+        if alpha_variance >= float(self.config.transparency_alpha_variance_threshold):
+            return "transparency_candidate"
+        if (
+            color_variance <= float(self.config.solid_color_variance_threshold)
+            and alpha_variance <= float(self.config.solid_alpha_variance_threshold)
+        ):
+            return "solid"
+        if color_variance >= float(self.config.gradient_color_variance_threshold):
+            return "gradient_candidate"
+        return "unknown"
 
     @staticmethod
     def _points_close(left: Point, right: Point) -> bool:
