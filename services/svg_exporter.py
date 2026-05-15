@@ -265,8 +265,13 @@ class SvgExporter:
     def _view_box(self, document: VectorDocument, transformer: CoordinateTransformer) -> str:
         if document.coordinate_system.view_box is not None:
             x, y, width, height = document.coordinate_system.view_box
-            origin = transformer.vector_to_svg((float(x), float(y)))
-            return f"{self._fmt(origin[0])} {self._fmt(origin[1])} {self._fmt(width)} {self._fmt(height)}"
+            p0 = transformer.vector_to_svg((float(x), float(y)))
+            p1 = transformer.vector_to_svg((float(x) + float(width), float(y) + float(height)))
+            min_x = min(p0[0], p1[0])
+            min_y = min(p0[1], p1[1])
+            view_width = abs(p1[0] - p0[0])
+            view_height = abs(p1[1] - p0[1])
+            return f"{self._fmt(min_x)} {self._fmt(min_y)} {self._fmt(view_width)} {self._fmt(view_height)}"
         return f"0 0 {self._fmt(document.width)} {self._fmt(document.height)}"
 
     def _qualified(self, name: str) -> str:

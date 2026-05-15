@@ -22,6 +22,20 @@ def _document() -> object:
     )
 
 
+def _document_y_up() -> object:
+    return create_document(
+        document_id="doc_svg_up",
+        width=100.0,
+        height=100.0,
+        coordinate_system=CoordinateSystem(
+            y_axis="up",
+            unit="px",
+            precision=4,
+            view_box=(0.0, 0.0, 100.0, 100.0),
+        ),
+    )
+
+
 def test_svg_exporter_outputs_valid_svg_with_basic_line_and_bezier_path() -> None:
     document = _document()
     path = VectorPath(
@@ -136,6 +150,26 @@ def test_svg_exporter_supports_circle_arc_ellipse_and_closed_path_commands() -> 
     assert "A 12 12 0 0 1" in arc_path_element.attrib["d"]
     assert arc_path_element.attrib["stroke"] == "rgb(0,0,0)"
     assert arc_path_element.attrib["fill"] == "none"
+
+
+def test_svg_exporter_keeps_viewbox_visible_when_y_axis_is_up() -> None:
+    document = _document_y_up()
+    path = VectorPath(
+        path_id="up_path",
+        closed=False,
+        segments=("up_line",),
+        style=Style(stroke_color=(0, 0, 0), stroke_width=1.0, fill_color=None),
+    )
+    document = add_path(document, path)
+    document = add_segment(document, Segment("up_line", "up_path", "line", {"start": [0.0, 0.0], "end": [0.0, 10.0]}))
+
+    svg = SvgExporter().export_document(document)
+    root = ET.fromstring(svg)
+    path_element = root.find("{http://www.w3.org/2000/svg}path")
+
+    assert root.attrib["viewBox"] == "0 0 100 100"
+    assert path_element is not None
+    assert path_element.attrib["d"].startswith("M 0 100 L 0 90")
 
 
 def test_svg_exporter_has_no_forbidden_dependencies() -> None:
