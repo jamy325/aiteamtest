@@ -9,6 +9,7 @@ import pytest
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment
 from services.dxf_exporter import DxfExporter
+from tests.snapshot_utils import assert_text_snapshot
 
 
 def _parse_entities(payload: str) -> list[dict[str, list[str]]]:
@@ -47,6 +48,28 @@ def _document(*, unit: str = "px", y_axis: str = "down", px_to_mm: float = 0.5) 
             scale={"px_to_mm": px_to_mm},
         ),
     )
+
+
+def _snapshot_dxf_document() -> object:
+    document = _document(unit="px", y_axis="down", px_to_mm=0.5)
+    document = add_path(document, VectorPath(path_id="p_line", segments=("s_line",)))
+    document = add_path(document, VectorPath(path_id="p_arc", segments=("s_arc",)))
+    document = add_path(document, VectorPath(path_id="p_circle", segments=("s_circle",)))
+    document = add_path(document, VectorPath(path_id="p_ellipse", segments=("s_ellipse",)))
+    document = add_segment(document, Segment("s_line", "p_line", "line", {"start": [10.0, 20.0], "end": [30.0, 20.0]}))
+    document = add_segment(document, Segment("s_arc", "p_arc", "arc", {"cx": 50.0, "cy": 50.0, "r": 10.0, "start_angle": 0.0, "end_angle": math.pi / 2.0, "direction": "ccw"}))
+    document = add_segment(document, Segment("s_circle", "p_circle", "circle", {"cx": 30.0, "cy": 18.0, "r": 7.0}))
+    document = add_segment(document, Segment("s_ellipse", "p_ellipse", "ellipse", {"cx": 40.0, "cy": 25.0, "rx": 10.0, "ry": 4.0, "rotation": 0.25}))
+    return document
+
+
+def _snapshot_dxf_document_y_up() -> object:
+    document = _document(unit="mm", y_axis="up", px_to_mm=1.0)
+    document = add_path(document, VectorPath(path_id="p_arc", segments=("s_arc",)))
+    document = add_path(document, VectorPath(path_id="p_circle", segments=("s_circle",)))
+    document = add_segment(document, Segment("s_arc", "p_arc", "arc", {"cx": 10.0, "cy": 12.0, "r": 5.0, "start_angle": 0.0, "end_angle": 1.57079632679, "direction": "ccw"}))
+    document = add_segment(document, Segment("s_circle", "p_circle", "circle", {"cx": 30.0, "cy": 18.0, "r": 7.0}))
+    return document
 
 
 def test_dxf_exporter_outputs_valid_ascii_structure() -> None:
@@ -176,6 +199,19 @@ def test_dxf_exporter_can_derive_flip_span_from_document_dimensions() -> None:
     assert line["20"] == ["40"]
     assert line["11"] == ["0"]
     assert line["21"] == ["35"]
+
+
+def test_dxf_exporter_matches_golden_snapshots() -> None:
+    exporter = DxfExporter()
+
+    assert_text_snapshot(
+        actual=exporter.export_document(_snapshot_dxf_document()),
+        snapshot_path=Path("tests/golden/dxf/mixed_geometry_y_down_scaled.dxf"),
+    )
+    assert_text_snapshot(
+        actual=exporter.export_document(_snapshot_dxf_document_y_up()),
+        snapshot_path=Path("tests/golden/dxf/basic_arc_circle_y_up.dxf"),
+    )
 
 
 def test_dxf_exporter_has_no_forbidden_dependencies() -> None:
