@@ -8,6 +8,41 @@ from core.precision import PrecisionUtility
 from core.types import Anchor, Constraint, Point, Segment, VectorDocument, updated
 
 
+def segment_outward_tangent(segment: Segment, anchor: Anchor) -> Point | None:
+    if segment.type == "line":
+        return _line_outward_tangent(segment, anchor)
+    if segment.type == "arc":
+        return _arc_outward_tangent(segment, anchor)
+    if segment.type == "bezier":
+        return _bezier_outward_tangent(segment, anchor)
+    return None
+
+
+def shared_tangent_violation(
+    segment_a: Segment,
+    segment_b: Segment,
+    anchor: Anchor,
+    *,
+    shared_tangent: Point | None = None,
+) -> float | None:
+    tangent_a = segment_outward_tangent(segment_a, anchor)
+    tangent_b = segment_outward_tangent(segment_b, anchor)
+    if tangent_a is None or tangent_b is None:
+        return None
+
+    pair_mismatch = _tangent_mismatch(tangent_a, tangent_b)
+    if shared_tangent is None:
+        return pair_mismatch
+
+    shared_unit = PrecisionUtility.normalize_vector(shared_tangent)
+    if shared_unit is None:
+        return pair_mismatch
+
+    error_a = _vector_to_shared_tangent_error(tangent_a, shared_unit)
+    error_b = _vector_to_shared_tangent_error(tangent_b, shared_unit)
+    return max(pair_mismatch, (error_a + error_b) / 2.0)
+
+
 @dataclass(frozen=True, slots=True)
 class SharedTangentOptimizationResult:
     success: bool
@@ -312,51 +347,13 @@ class SharedTangentOptimizer:
         )
 
     def _line_outward_tangent(self, segment: Segment, anchor: Anchor) -> Point | None:
-        start = self._coerce_point(segment.params.get("start"))
-        end = self._coerce_point(segment.params.get("end"))
-        if start is None or end is None:
-            return None
-
-        if segment.anchors and segment.anchors[0] == anchor.anchor_id:
-            return (end[0] - start[0], end[1] - start[1])
-        if segment.anchors and segment.anchors[-1] == anchor.anchor_id:
-            return (start[0] - end[0], start[1] - end[1])
-        return None
+        return _line_outward_tangent(segment, anchor)
 
     def _arc_outward_tangent(self, segment: Segment, anchor: Anchor) -> Point | None:
-        direction = str(segment.params.get("direction", "ccw")).lower()
-        angle_value = None
-        if segment.anchors and segment.anchors[0] == anchor.anchor_id:
-            angle_value = segment.params.get("start_angle")
-            at_start = True
-        elif segment.anchors and segment.anchors[-1] == anchor.anchor_id:
-            angle_value = segment.params.get("end_angle")
-            at_start = False
-        else:
-            return None
-
-        angle = self._coerce_float(angle_value)
-        radius = self._coerce_positive_float(segment.params.get("r"))
-        if angle is None or radius is None:
-            return None
-
-        if at_start:
-            return (math.sin(angle), -math.cos(angle)) if direction == "cw" else (-math.sin(angle), math.cos(angle))
-        return (-math.sin(angle), math.cos(angle)) if direction == "cw" else (math.sin(angle), -math.cos(angle))
+        return _arc_outward_tangent(segment, anchor)
 
     def _bezier_outward_tangent(self, segment: Segment, anchor: Anchor) -> Point | None:
-        start = self._coerce_point(segment.params.get("start"))
-        end = self._coerce_point(segment.params.get("end"))
-        control1 = self._coerce_point(segment.params.get("control1"))
-        control2 = self._coerce_point(segment.params.get("control2"))
-        if start is None or end is None or control1 is None or control2 is None:
-            return None
-
-        if segment.anchors and segment.anchors[0] == anchor.anchor_id:
-            return (control1[0] - start[0], control1[1] - start[1])
-        if segment.anchors and segment.anchors[-1] == anchor.anchor_id:
-            return (control2[0] - end[0], control2[1] - end[1])
-        return None
+        return _bezier_outward_tangent(segment, anchor)
 
     def _shared_anchor_point(self, line_segment: Segment, arc_segment: Segment, anchor: Anchor) -> Point | None:
         line_point = self._segment_anchor_point(line_segment, anchor)
@@ -475,14 +472,7 @@ class SharedTangentOptimizer:
         return updated(segment, params=params)
 
     def _tangent_mismatch(self, line_outward: Point, arc_outward: Point) -> float:
-        line_unit = PrecisionUtility.normalize_vector(line_outward)
-        arc_unit = PrecisionUtility.normalize_vector(arc_outward)
-        if line_unit is None or arc_unit is None:
-            return math.inf
-        line_angle = math.atan2(line_unit[1], line_unit[0])
-        arc_angle = math.atan2(arc_unit[1], arc_unit[0]) + math.pi
-        delta = (line_angle - arc_angle + math.pi) % (2.0 * math.pi) - math.pi
-        return abs(delta)
+        return _tangent_mismatch(line_outward, arc_outward)
 
     def _bezier_handle_movement_penalty(self, before: Segment, after: Segment, anchor: Anchor) -> float:
         if before.anchors and before.anchors[0] == anchor.anchor_id:
@@ -661,4 +651,106 @@ class SharedTangentOptimizer:
         return (-vector[1], vector[0])
 
 
-__all__ = ["SharedTangentOptimizationResult", "SharedTangentOptimizer"]
+def _line_outward_tangent(segment: Segment, anchor: Anchor) -> Point | None:
+    start = _coerce_point(segment.params.get("start"))
+    end = _coerce_point(segment.params.get("end"))
+    if start is None or end is None:
+        return None
+
+    if segment.anchors and segment.anchors[0] == anchor.anchor_id:
+        return (end[0] - start[0], end[1] - start[1])
+    if segment.anchors and segment.anchors[-1] == anchor.anchor_id:
+        return (start[0] - end[0], start[1] - end[1])
+    return None
+
+
+def _arc_outward_tangent(segment: Segment, anchor: Anchor) -> Point | None:
+    direction = str(segment.params.get("direction", "ccw")).lower()
+    angle_value = None
+    if segment.anchors and segment.anchors[0] == anchor.anchor_id:
+        angle_value = segment.params.get("start_angle")
+        at_start = True
+    elif segment.anchors and segment.anchors[-1] == anchor.anchor_id:
+        angle_value = segment.params.get("end_angle")
+        at_start = False
+    else:
+        return None
+
+    angle = _coerce_float(angle_value)
+    radius = _coerce_positive_float(segment.params.get("r"))
+    if angle is None or radius is None:
+        return None
+
+    if at_start:
+        return (math.sin(angle), -math.cos(angle)) if direction == "cw" else (-math.sin(angle), math.cos(angle))
+    return (-math.sin(angle), math.cos(angle)) if direction == "cw" else (math.sin(angle), -math.cos(angle))
+
+
+def _bezier_outward_tangent(segment: Segment, anchor: Anchor) -> Point | None:
+    start = _coerce_point(segment.params.get("start"))
+    end = _coerce_point(segment.params.get("end"))
+    control1 = _coerce_point(segment.params.get("control1"))
+    control2 = _coerce_point(segment.params.get("control2"))
+    if start is None or end is None or control1 is None or control2 is None:
+        return None
+
+    if segment.anchors and segment.anchors[0] == anchor.anchor_id:
+        return (control1[0] - start[0], control1[1] - start[1])
+    if segment.anchors and segment.anchors[-1] == anchor.anchor_id:
+        return (control2[0] - end[0], control2[1] - end[1])
+    return None
+
+
+def _tangent_mismatch(first_outward: Point, second_outward: Point) -> float:
+    first_unit = PrecisionUtility.normalize_vector(first_outward)
+    second_unit = PrecisionUtility.normalize_vector(second_outward)
+    if first_unit is None or second_unit is None:
+        return math.inf
+    first_angle = math.atan2(first_unit[1], first_unit[0])
+    second_angle = math.atan2(second_unit[1], second_unit[0]) + math.pi
+    delta = (first_angle - second_angle + math.pi) % (2.0 * math.pi) - math.pi
+    return abs(delta)
+
+
+def _vector_to_shared_tangent_error(vector: Point, shared_tangent: Point) -> float:
+    vector_unit = PrecisionUtility.normalize_vector(vector)
+    if vector_unit is None:
+        return math.inf
+
+    vector_angle = math.atan2(vector_unit[1], vector_unit[0])
+    shared_angle = math.atan2(shared_tangent[1], shared_tangent[0])
+    opposite_angle = shared_angle + math.pi
+    delta_direct = abs((vector_angle - shared_angle + math.pi) % (2.0 * math.pi) - math.pi)
+    delta_opposite = abs((vector_angle - opposite_angle + math.pi) % (2.0 * math.pi) - math.pi)
+    return min(delta_direct, delta_opposite)
+
+
+def _coerce_point(value: object) -> Point | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        return (float(value[0]), float(value[1]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_positive_float(value: object) -> float | None:
+    result = _coerce_float(value)
+    if result is None or result <= 0.0:
+        return None
+    return result
+
+
+__all__ = [
+    "SharedTangentOptimizationResult",
+    "SharedTangentOptimizer",
+    "segment_outward_tangent",
+    "shared_tangent_violation",
+]

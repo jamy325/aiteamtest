@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from core.types import Anchor, Path, Segment, VectorDocument
 from services.edge_error import EdgeErrorResult
+from services.shared_tangent import shared_tangent_violation
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +22,7 @@ class ScorerConfig:
     topology_error_penalty: float = 25.0
     max_gap_weight: float = 1.0
     self_intersection_penalty: float = 20.0
+    shared_tangent_violation_weight: float = 10.0
     coordinate_space_penalty: float = 10.0
     non_vector_metadata_penalty: float = 2.0
 
@@ -30,6 +33,7 @@ class ScoreBreakdown:
     geometry_complexity_score: float
     topology_error_score: float
     self_intersection_score: float
+    shared_tangent_violation_score: float
     coordinate_consistency_score: float
 
 
@@ -53,6 +57,7 @@ class Scorer:
         geometry_complexity_score = self._geometry_complexity_score(document)
         topology_error_score = self._topology_error_score(document)
         self_intersection_score = self._self_intersection_score(document)
+        shared_tangent_violation_score = self._shared_tangent_violation_score(document)
         coordinate_consistency_score = self._coordinate_consistency_score(document)
 
         breakdown = ScoreBreakdown(
@@ -60,6 +65,7 @@ class Scorer:
             geometry_complexity_score=geometry_complexity_score,
             topology_error_score=topology_error_score,
             self_intersection_score=self_intersection_score,
+            shared_tangent_violation_score=shared_tangent_violation_score,
             coordinate_consistency_score=coordinate_consistency_score,
         )
         total_score = (
@@ -67,6 +73,7 @@ class Scorer:
             + breakdown.geometry_complexity_score
             + breakdown.topology_error_score
             + breakdown.self_intersection_score
+            + breakdown.shared_tangent_violation_score
             + breakdown.coordinate_consistency_score
         )
         return ScoreResult(total_score=total_score, breakdown=breakdown)
@@ -111,6 +118,35 @@ class Scorer:
 
     def _self_intersection_score(self, document: VectorDocument) -> float:
         return sum(max(0, int(path.self_intersection_count)) * self.config.self_intersection_penalty for path in document.paths)
+
+    def _shared_tangent_violation_score(self, document: VectorDocument) -> float:
+        segment_by_id = {segment.segment_id: segment for segment in document.segments}
+        anchor_by_id = {anchor.anchor_id: anchor for anchor in document.anchors}
+        total_violation = 0.0
+
+        for constraint in document.constraints:
+            if constraint.type not in {"shared_tangent", "g1_continuity"}:
+                continue
+            if len(constraint.targets) < 3:
+                continue
+
+            segment_a = segment_by_id.get(constraint.targets[0])
+            segment_b = segment_by_id.get(constraint.targets[1])
+            anchor = anchor_by_id.get(constraint.targets[2])
+            if segment_a is None or segment_b is None or anchor is None:
+                continue
+
+            violation = shared_tangent_violation(
+                segment_a,
+                segment_b,
+                anchor,
+                shared_tangent=anchor.shared_tangent,
+            )
+            if violation is None or math.isinf(violation):
+                continue
+            total_violation += violation * self.config.shared_tangent_violation_weight
+
+        return total_violation
 
     def _coordinate_consistency_score(self, document: VectorDocument) -> float:
         score = 0.0
