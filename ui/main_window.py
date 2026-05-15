@@ -12,6 +12,7 @@ from core.types import VectorDocument
 from services.ai_agent import AIReviewInput, AIReviewOutput, AIReviewService
 from services.minimal_pipeline import MinimalPipeline, MinimalPipelineResult
 from ui.canvas_widget import CanvasWidget
+from ui.canvas_widget import AISuggestionOverlay
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +20,7 @@ class AIReviewDisplayState:
     summary: str = ""
     issues: tuple[dict[str, Any], ...] = ()
     proposed_commands: tuple[dict[str, Any], ...] = ()
+    suggestion_overlays: tuple[AISuggestionOverlay, ...] = ()
 
 
 class MainWindow:
@@ -191,15 +193,16 @@ class MainWindow:
         review_output = self.ai_review_service.run_review(review_input)
         self.last_review_input = review_input
         self.last_review_output = review_output
-        self.review_display_state = AIReviewDisplayState(
+        suggestion_overlays = self.canvas_widget.set_review_display(
             summary=review_output.summary,
             issues=review_output.issues,
             proposed_commands=review_output.proposed_commands,
         )
-        self.canvas_widget.set_review_display(
+        self.review_display_state = AIReviewDisplayState(
             summary=review_output.summary,
             issues=review_output.issues,
             proposed_commands=review_output.proposed_commands,
+            suggestion_overlays=suggestion_overlays,
         )
         return self.review_display_state
 
