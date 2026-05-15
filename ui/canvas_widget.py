@@ -71,12 +71,14 @@ class CanvasWidget:
 
     def set_locked_ids(self, locked_ids: tuple[str, ...] | list[str]) -> None:
         self._locked_ids = tuple(str(item) for item in locked_ids)
+        self._suggestion_overlays = self._build_suggestion_overlays()
 
     def set_image_path(self, image_path: str | None) -> None:
         self._image_path = None if image_path is None else str(image_path)
 
     def set_document(self, document: VectorDocument | None) -> None:
         self._document = document
+        self._suggestion_overlays = self._build_suggestion_overlays()
 
     def set_review_display(
         self,
@@ -95,17 +97,50 @@ class CanvasWidget:
         if item_id in self._locked_ids:
             return
         self._locked_ids = self._locked_ids + (str(item_id),)
+        self._suggestion_overlays = self._build_suggestion_overlays()
 
     def unlock_id(self, item_id: str) -> None:
         self._locked_ids = tuple(existing for existing in self._locked_ids if existing != item_id)
+        self._suggestion_overlays = self._build_suggestion_overlays()
 
     def _build_suggestion_overlays(self) -> tuple[AISuggestionOverlay, ...]:
         overlays: list[AISuggestionOverlay] = []
         for index, issue in enumerate(self._review_issues):
             overlays.append(self._overlay_from_item(source_type="issue", item=issue, index=index))
         for index, command in enumerate(self._review_commands):
-            overlays.append(self._overlay_from_item(source_type="command", item=command, index=index))
+            overlays.extend(self._overlays_from_command_item(command, index))
         return tuple(overlays)
+
+    def _overlays_from_command_item(self, item: dict[str, Any], index: int) -> tuple[AISuggestionOverlay, ...]:
+        if item.get("tool") != "propose_batch_refinement":
+            return (self._overlay_from_item(source_type="command", item=item, index=index),)
+
+        nested_commands = item.get("commands")
+        if not isinstance(nested_commands, list):
+            return (self._overlay_from_item(source_type="command", item=item, index=index),)
+
+        overlays: list[AISuggestionOverlay] = []
+        batch_summary = str(item.get("summary", ""))
+        batch_confidence = self._coerce_optional_float(item.get("confidence"))
+
+        for nested_index, nested_command in enumerate(nested_commands):
+            if not isinstance(nested_command, dict):
+                continue
+            nested_overlay = self._overlay_from_item(
+                source_type="command",
+                item={
+                    **nested_command,
+                    "confidence": nested_command.get("confidence", batch_confidence),
+                    "reason": nested_command.get("reason", batch_summary),
+                    "_overlay_id_suffix": f"{index}:{nested_index}",
+                },
+                index=nested_index,
+            )
+            overlays.append(nested_overlay)
+
+        if overlays:
+            return tuple(overlays)
+        return (self._overlay_from_item(source_type="command", item=item, index=index),)
 
     def _overlay_from_item(self, *, source_type: str, item: dict[str, Any], index: int) -> AISuggestionOverlay:
         path_id = self._coerce_optional_string(item.get("path_id"))
@@ -251,6 +286,9 @@ class CanvasWidget:
 
     @staticmethod
     def _overlay_id(source_type: str, item: dict[str, Any], index: int) -> str:
+        suffix = item.get("_overlay_id_suffix")
+        if suffix is not None:
+            return f"{source_type}:{item.get('tool', index)}:{suffix}"
         key_name = "issue_id" if source_type == "issue" else "tool"
         key_value = item.get(key_name, index)
         return f"{source_type}:{key_value}"

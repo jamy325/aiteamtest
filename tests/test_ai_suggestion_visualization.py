@@ -120,6 +120,59 @@ def test_canvas_widget_marks_locked_targets_in_suggestion_overlay() -> None:
     assert overlay.locked_target_ids == ("path_1", "seg_2", "anchor_7")
 
 
+def test_canvas_widget_visualizes_batch_refinement_nested_command_targets() -> None:
+    canvas = CanvasWidget(locked_ids=("seg_2", "anchor_9"))
+    canvas.set_document(_document())
+
+    overlays = canvas.set_review_display(
+        summary="overlay",
+        issues=(),
+        proposed_commands=(
+            {
+                "tool": "propose_batch_refinement",
+                "summary": "batch refinement",
+                "confidence": 0.9,
+                "requires_user_confirmation": True,
+                "commands": [
+                    {
+                        "tool": "propose_replace_segment_with_line",
+                        "path_id": "path_1",
+                        "segment_range": [0, 1],
+                        "reason": "line candidate",
+                        "confidence": 0.8,
+                        "requires_user_confirmation": True,
+                    },
+                    {
+                        "tool": "propose_replace_segment_with_arc",
+                        "path_id": "missing_path",
+                        "segment_range": [1, 1],
+                        "reason": "arc candidate",
+                        "confidence": 0.7,
+                        "requires_user_confirmation": True,
+                        "locked_anchor_ids": ["anchor_9"],
+                    },
+                ],
+            },
+        ),
+    )
+
+    assert len(overlays) == 2
+    first_overlay, second_overlay = overlays
+    assert first_overlay.tool == "propose_replace_segment_with_line"
+    assert first_overlay.confidence == 0.8
+    assert first_overlay.detail == "line candidate"
+    assert first_overlay.path_id == "path_1"
+    assert first_overlay.segment_ids == ("seg_1", "seg_2")
+    assert first_overlay.locked_target_ids == ("seg_2",)
+    assert second_overlay.tool == "propose_replace_segment_with_arc"
+    assert second_overlay.confidence == 0.7
+    assert second_overlay.detail == "arc candidate"
+    assert second_overlay.path_id == "missing_path"
+    assert second_overlay.segment_ids == ()
+    assert second_overlay.unknown_target_ids == ("missing_path",)
+    assert second_overlay.locked_target_ids == ("anchor_9",)
+
+
 def test_canvas_widget_tolerates_unknown_targets_without_crashing() -> None:
     canvas = CanvasWidget()
     canvas.set_document(_document())
@@ -142,6 +195,34 @@ def test_canvas_widget_tolerates_unknown_targets_without_crashing() -> None:
     overlay = overlays[0]
     assert overlay.unknown_target_ids == ("missing_path", "missing_seg")
     assert [target.exists for target in overlay.targets if target.target_id in {"missing_path", "missing_seg"}] == [False, False]
+
+
+def test_canvas_widget_refreshes_overlay_locked_markers_after_lock_change() -> None:
+    canvas = CanvasWidget()
+    canvas.set_document(_document())
+
+    overlays = canvas.set_review_display(
+        summary="overlay",
+        issues=(),
+        proposed_commands=(
+            {
+                "tool": "propose_replace_segment_with_line",
+                "path_id": "path_1",
+                "segment_range": [1, 1],
+                "reason": "replace segment",
+                "confidence": 0.9,
+                "requires_user_confirmation": True,
+            },
+        ),
+    )
+
+    assert overlays[0].locked_target_ids == ()
+
+    canvas.lock_id("seg_2")
+    assert canvas.suggestion_overlays[0].locked_target_ids == ("seg_2",)
+
+    canvas.unlock_id("seg_2")
+    assert canvas.suggestion_overlays[0].locked_target_ids == ()
 
 
 def test_main_window_exposes_suggestion_overlays_without_command_execution() -> None:
