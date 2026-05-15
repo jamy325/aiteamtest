@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,48 @@ def test_dxf_exporter_supports_arc_and_circle_entities() -> None:
     assert circle["10"] == ["30"]
     assert circle["20"] == ["18"]
     assert circle["40"] == ["7"]
+
+
+def test_dxf_exporter_preserves_ccw_quarter_arc_after_y_down_flip() -> None:
+    document = _document(unit="px", y_axis="down", px_to_mm=1.0)
+    path = VectorPath(path_id="p_arc_down_ccw", segments=("s_arc_down_ccw",))
+    document = add_path(document, path)
+    document = add_segment(
+        document,
+        Segment(
+            "s_arc_down_ccw",
+            "p_arc_down_ccw",
+            "arc",
+            {"cx": 50.0, "cy": 50.0, "r": 10.0, "start_angle": 0.0, "end_angle": math.pi / 2.0, "direction": "ccw"},
+        ),
+    )
+
+    entities = _parse_entities(DxfExporter().export_document(document))
+    arc = entities[0]
+
+    assert arc["50"] == ["270"]
+    assert arc["51"] == ["0"]
+
+
+def test_dxf_exporter_preserves_cw_arc_after_y_down_flip() -> None:
+    document = _document(unit="px", y_axis="down", px_to_mm=1.0)
+    path = VectorPath(path_id="p_arc_down_cw", segments=("s_arc_down_cw",))
+    document = add_path(document, path)
+    document = add_segment(
+        document,
+        Segment(
+            "s_arc_down_cw",
+            "p_arc_down_cw",
+            "arc",
+            {"cx": 50.0, "cy": 50.0, "r": 10.0, "start_angle": math.pi, "end_angle": math.pi / 2.0, "direction": "cw"},
+        ),
+    )
+
+    entities = _parse_entities(DxfExporter().export_document(document))
+    arc = entities[0]
+
+    assert arc["50"] == ["180"]
+    assert arc["51"] == ["270"]
 
 
 def test_dxf_exporter_uses_polyline_fallback_for_ellipse() -> None:

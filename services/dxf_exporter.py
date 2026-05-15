@@ -93,12 +93,15 @@ class DxfExporter:
         radius = abs(float(segment.params["r"]))
         start_angle = float(segment.params["start_angle"])
         end_angle = float(segment.params["end_angle"])
+        direction = str(segment.params.get("direction", "ccw")).lower()
         center = transformer.vector_to_dxf((cx, cy))
         start_point = transformer.vector_to_dxf((cx + (radius * math.cos(start_angle)), cy + (radius * math.sin(start_angle))))
         end_point = transformer.vector_to_dxf((cx + (radius * math.cos(end_angle)), cy + (radius * math.sin(end_angle))))
         dxf_radius = math.dist(center, start_point)
         start_degrees = self._angle_degrees(center, start_point)
         end_degrees = self._angle_degrees(center, end_point)
+        if self._swap_arc_angles(direction=direction, transformer=transformer):
+            start_degrees, end_degrees = end_degrees, start_degrees
         return [
             "0",
             "ARC",
@@ -172,6 +175,11 @@ class DxfExporter:
         if angle < 0.0:
             angle += 360.0
         return angle
+
+    @staticmethod
+    def _swap_arc_angles(*, direction: str, transformer: CoordinateTransformer) -> bool:
+        y_flip_reverses_orientation = transformer.coordinate_system.y_axis != "up"
+        return (direction == "cw") != y_flip_reverses_orientation
 
     @staticmethod
     def _fmt(value: float) -> str:
