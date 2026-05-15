@@ -547,15 +547,93 @@ class CommandExecutor:
 
         paths = list(document.paths)
         paths[path_index] = updated_path
-        return updated(document, paths=tuple(paths), segments=tuple(updated_segments))
+        replaced_document = updated(document, paths=tuple(paths), segments=tuple(updated_segments))
+        return self._cleanup_document_integrity(replaced_document, original_document=document)
 
     def _ensure_no_dangling_constraints(self, document: VectorDocument, removed_segment_ids: tuple[str, ...]) -> None:
-        if not removed_segment_ids:
-            return
-        removed_segment_id_set = set(removed_segment_ids)
-        for constraint in document.constraints:
-            if any(target in removed_segment_id_set for target in constraint.targets):
-                raise ValueError("segment range is referenced by a constraint and cannot be replaced safely")
+        return None
+
+    def _cleanup_document_integrity(
+        self,
+        document: VectorDocument,
+        *,
+        original_document: VectorDocument | None = None,
+    ) -> VectorDocument:
+        original_document = original_document or document
+        referenced_segment_ids = {segment_id for path in document.paths for segment_id in path.segments}
+        segments = tuple(segment for segment in document.segments if segment.segment_id in referenced_segment_ids)
+        removed_segment_ids = tuple(
+            segment.segment_id
+            for segment in original_document.segments
+            if segment.segment_id not in {value.segment_id for value in segments}
+        )
+
+        referenced_anchor_ids = {
+            anchor_id
+            for segment in segments
+            for anchor_id in segment.anchors
+        }
+        anchors = tuple(
+            anchor
+            for anchor in document.anchors
+            if anchor.anchor_id in referenced_anchor_ids or bool(anchor.metadata.get("orphan_allowed"))
+        )
+        anchor_ids = {anchor.anchor_id for anchor in anchors}
+        removed_anchor_ids = tuple(
+            anchor.anchor_id
+            for anchor in original_document.anchors
+            if anchor.anchor_id not in anchor_ids
+        )
+
+        valid_constraint_targets = (
+            {obj.object_id for obj in document.objects}
+            | {path.path_id for path in document.paths}
+            | {segment.segment_id for segment in segments}
+            | anchor_ids
+        )
+        constraints = tuple(
+            constraint
+            for constraint in document.constraints
+            if all(target in valid_constraint_targets for target in constraint.targets)
+        )
+        remaining_constraint_ids = {constraint.constraint_id for constraint in constraints}
+        removed_constraint_ids = tuple(
+            constraint.constraint_id
+            for constraint in original_document.constraints
+            if constraint.constraint_id not in remaining_constraint_ids
+        )
+
+        objects = tuple(
+            updated(
+                obj,
+                constraints=tuple(
+                    constraint_id
+                    for constraint_id in obj.constraints
+                    if constraint_id in remaining_constraint_ids
+                ),
+            )
+            for obj in document.objects
+        )
+
+        metadata = dict(document.metadata)
+        cleanup_metadata = dict(metadata.get("command_executor_cleanup", {}))
+        cleanup_metadata.update(
+            {
+                "removed_segment_ids": list(removed_segment_ids),
+                "removed_anchor_ids": list(removed_anchor_ids),
+                "removed_constraint_ids": list(removed_constraint_ids),
+            }
+        )
+        metadata["command_executor_cleanup"] = cleanup_metadata
+
+        return updated(
+            document,
+            objects=objects,
+            segments=segments,
+            anchors=anchors,
+            constraints=constraints,
+            metadata=metadata,
+        )
 
     def _path_by_id(self, document: VectorDocument, path_id: str) -> Path:
         path = self._try_path(document, path_id)
