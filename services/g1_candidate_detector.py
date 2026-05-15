@@ -109,39 +109,76 @@ class G1CandidateDetector:
 
         if segment.anchors[0] == anchor_id:
             if segment.type == "line":
-                p1 = segment.params["start"]
-                p2 = segment.params["end"]
+                p1 = self._coerce_point(segment.params.get("start"))
+                p2 = self._coerce_point(segment.params.get("end"))
+                if p1 is None or p2 is None:
+                    return None
                 return (p2[0] - p1[0], p2[1] - p1[1])
             elif segment.type == "bezier":
-                p1 = segment.params["start"]
-                p2 = segment.params["control1"]
+                p1 = self._coerce_point(segment.params.get("start"))
+                p2 = self._coerce_point(segment.params.get("control1"))
+                if p1 is None or p2 is None:
+                    return None
                 return (p2[0] - p1[0], p2[1] - p1[1])
             elif segment.type == "arc":
+                arc_angle = self._coerce_arc_angle(segment.params.get("start_angle"))
                 direction = str(segment.params.get("direction", "ccw")).lower()
-                a = float(segment.params["start_angle"])
+                radius = self._coerce_positive_float(segment.params.get("r"))
+                if arc_angle is None or radius is None:
+                    return None
                 if direction == "cw":
-                    return (math.sin(a), -math.cos(a))
+                    return (math.sin(arc_angle), -math.cos(arc_angle))
                 else:
-                    return (-math.sin(a), math.cos(a))
+                    return (-math.sin(arc_angle), math.cos(arc_angle))
 
         elif segment.anchors[-1] == anchor_id:
             if segment.type == "line":
-                p1 = segment.params["end"]
-                p2 = segment.params["start"]
+                p1 = self._coerce_point(segment.params.get("end"))
+                p2 = self._coerce_point(segment.params.get("start"))
+                if p1 is None or p2 is None:
+                    return None
                 return (p2[0] - p1[0], p2[1] - p1[1])
             elif segment.type == "bezier":
-                p1 = segment.params["end"]
-                p2 = segment.params["control2"]
+                p1 = self._coerce_point(segment.params.get("end"))
+                p2 = self._coerce_point(segment.params.get("control2"))
+                if p1 is None or p2 is None:
+                    return None
                 return (p2[0] - p1[0], p2[1] - p1[1])
             elif segment.type == "arc":
+                arc_angle = self._coerce_arc_angle(segment.params.get("end_angle"))
                 direction = str(segment.params.get("direction", "ccw")).lower()
-                a = float(segment.params["end_angle"])
+                radius = self._coerce_positive_float(segment.params.get("r"))
+                if arc_angle is None or radius is None:
+                    return None
                 if direction == "cw":
-                    return (-math.sin(a), math.cos(a))
+                    return (-math.sin(arc_angle), math.cos(arc_angle))
                 else:
-                    return (math.sin(a), -math.cos(a))
+                    return (math.sin(arc_angle), -math.cos(arc_angle))
 
         return None
+
+    def _coerce_point(self, value: object) -> tuple[float, float] | None:
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return None
+        try:
+            return (float(value[0]), float(value[1]))
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_arc_angle(self, value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_positive_float(self, value: object) -> float | None:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        if result <= 0.0:
+            return None
+        return result
 
     def generate_constraints(
         self, document: VectorDocument, candidates: Sequence[G1Candidate]

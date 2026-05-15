@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import pytest
 
 from core.document import add_constraint, add_path, add_segment, create_document
 from core.types import Constraint, CoordinateSystem, Path as VectorPath, Segment
@@ -166,3 +167,47 @@ def test_misjudged_filtered() -> None:
     detector = G1CandidateDetector(angle_tolerance=0.1)
     candidates = detector.detect_candidates(doc)
     assert len(candidates) == 0
+
+
+@pytest.mark.parametrize(
+    ("bad_segment", "good_segment"),
+    (
+        (
+            Segment("bad", "p1", "line", {"start": [0.0, 0.0]}, anchors=("a0", "a1")),
+            Segment("good", "p1", "line", {"start": [0.0, 0.0], "end": [1.0, 0.0]}, anchors=("a1", "a2")),
+        ),
+        (
+            Segment(
+                "bad",
+                "p1",
+                "bezier",
+                {"start": [0.0, 0.0], "control1": [0.5, 0.0], "end": [1.0, 0.0]},
+                anchors=("a0", "a1"),
+            ),
+            Segment("good", "p1", "line", {"start": [1.0, 0.0], "end": [2.0, 0.0]}, anchors=("a1", "a2")),
+        ),
+        (
+            Segment(
+                "bad",
+                "p1",
+                "arc",
+                {"cx": 0.0, "cy": 1.0, "start_angle": "-1.57079632679", "end_angle": "oops", "direction": "ccw"},
+                anchors=("a0", "a1"),
+            ),
+            Segment("good", "p1", "line", {"start": [0.0, 0.0], "end": [1.0, 0.0]}, anchors=("a1", "a2")),
+        ),
+    ),
+)
+def test_detector_skips_malformed_segment_without_crashing(
+    bad_segment: Segment,
+    good_segment: Segment,
+) -> None:
+    doc = create_document("doc", 100.0, 100.0, CoordinateSystem())
+    doc = add_path(doc, VectorPath("p1", segments=(bad_segment.segment_id, good_segment.segment_id)))
+    doc = add_segment(doc, bad_segment)
+    doc = add_segment(doc, good_segment)
+
+    detector = G1CandidateDetector(angle_tolerance=0.1)
+    candidates = detector.detect_candidates(doc)
+
+    assert candidates == ()
