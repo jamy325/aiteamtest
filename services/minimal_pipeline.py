@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import cv2
@@ -11,6 +12,7 @@ from core.coordinate import CoordinateTransformer
 from core.document import add_anchor, add_path, add_segment, create_document, to_json
 from core.types import CoordinateSystem, VectorDocument, updated
 from services.contour_extractor import BinaryContour, ContourExtractor, ExtractedContours
+from services.debug_artifacts import DebugArtifactExportResult, DebugArtifactExporter
 from services.distance_field_diff import DistanceFieldDiffRenderer
 from services.json_exporter import JsonExporter
 from services.renderer import Renderer
@@ -25,6 +27,7 @@ class MinimalPipelineResult:
     json_payload: str
     extracted_contours: ExtractedContours
     source_image: np.ndarray | None = None
+    debug_artifacts: DebugArtifactExportResult | None = None
 
 
 class MinimalPipeline:
@@ -49,8 +52,21 @@ class MinimalPipeline:
         self.renderer = renderer or Renderer()
         self.distance_field_diff_renderer = distance_field_diff_renderer or DistanceFieldDiffRenderer()
 
-    def run(self, image: np.ndarray, *, document_id: str = "document_1") -> MinimalPipelineResult:
-        extracted_contours = self.contour_extractor.extract_contours(image)
+    def run(
+        self,
+        image: np.ndarray,
+        *,
+        document_id: str = "document_1",
+        debug: bool = False,
+        debug_output_dir: str | Path | None = None,
+        debug_stages: tuple[str, ...] | list[str] | None = None,
+    ) -> MinimalPipelineResult:
+        debug_enabled = bool(debug or debug_output_dir is not None)
+        if debug_enabled:
+            extracted_contours, contour_debug = self.contour_extractor.extract_contours_with_debug(image)
+        else:
+            extracted_contours = self.contour_extractor.extract_contours(image)
+            contour_debug = None
         height, width = image.shape[:2]
         document = create_document(
             document_id=document_id,
@@ -59,8 +75,10 @@ class MinimalPipeline:
             coordinate_system=self.coordinate_system,
         )
 
+        resample_start = perf_counter()
         resampled_binary = tuple(self._resample_contour(contour) for contour in extracted_contours.binary_contours)
         resampled_skeleton = tuple(self._resample_contour(contour) for contour in extracted_contours.skeleton_contours)
+        resample_elapsed_ms = (perf_counter() - resample_start) * 1000.0
 
         document = updated(
             document,
@@ -93,6 +111,9 @@ class MinimalPipeline:
         )
 
         vectorizer = SimpleVectorizer(segment_type=self.segment_type)
+        skipped_binary_count = 0
+        skipped_skeleton_count = 0
+        vectorize_start = perf_counter()
         for prefix, contours, resampled in (
             ("binary", extracted_contours.binary_contours, dict(resampled_binary)),
             ("skeleton", extracted_contours.skeleton_contours, dict(resampled_skeleton)),
@@ -101,6 +122,10 @@ class MinimalPipeline:
                 resampled_points = resampled[contour.contour_id]
                 minimum_points = 3 if contour.closed else 2
                 if len(resampled_points) < minimum_points:
+                    if prefix == "binary":
+                        skipped_binary_count += 1
+                    else:
+                        skipped_skeleton_count += 1
                     continue
 
                 vectorized = vectorizer.vectorize_contour(
@@ -114,20 +139,74 @@ class MinimalPipeline:
                     document = add_anchor(document, anchor)
                 for segment in vectorized.segments:
                     document = add_segment(document, segment)
+        vectorize_elapsed_ms = (perf_counter() - vectorize_start) * 1000.0
+
+        debug_artifacts: DebugArtifactExportResult | None = None
+        if debug_enabled and contour_debug is not None:
+            timings_ms = dict(contour_debug.timings_ms)
+            timings_ms["resampling"] = resample_elapsed_ms
+            timings_ms["vectorization"] = vectorize_elapsed_ms
+            contour_debug = type(contour_debug)(
+                grayscale=contour_debug.grayscale,
+                alpha=contour_debug.alpha,
+                alpha_mask=contour_debug.alpha_mask,
+                threshold_binary=contour_debug.threshold_binary,
+                denoised=contour_debug.denoised,
+                morphology_closed=contour_debug.morphology_closed,
+                binary_contours_overlay=contour_debug.binary_contours_overlay,
+                binary_contours_hierarchy=contour_debug.binary_contours_hierarchy,
+                skeleton_mask=contour_debug.skeleton_mask,
+                skeleton_contours_overlay=contour_debug.skeleton_contours_overlay,
+                binary_contours=contour_debug.binary_contours,
+                skeleton_contours=contour_debug.skeleton_contours,
+                timings_ms=timings_ms,
+                threshold_polarity=contour_debug.threshold_polarity,
+            )
+            debug_artifacts = DebugArtifactExporter(
+                output_root=debug_output_dir,
+                debug_stages=debug_stages,
+                renderer=self.renderer,
+            ).export_pipeline_debug(
+                document_id=document_id,
+                source_image=image,
+                document=document,
+                contour_debug=contour_debug,
+                resampled_binary=resampled_binary,
+                resampled_skeleton=resampled_skeleton,
+                skipped_binary_count=skipped_binary_count,
+                skipped_skeleton_count=skipped_skeleton_count,
+                vectorized_path_count=len(document.paths),
+                vectorized_segment_count=len(document.segments),
+            )
 
         return MinimalPipelineResult(
             document=document,
             json_payload=to_json(document),
             extracted_contours=extracted_contours,
             source_image=image.copy(),
+            debug_artifacts=debug_artifacts,
         )
 
-    def run_from_file(self, image_path: str | Path, *, document_id: str = "document_1") -> MinimalPipelineResult:
+    def run_from_file(
+        self,
+        image_path: str | Path,
+        *,
+        document_id: str = "document_1",
+        debug: bool = False,
+        debug_output_dir: str | Path | None = None,
+        debug_stages: tuple[str, ...] | list[str] | None = None,
+    ) -> MinimalPipelineResult:
         image = self.load_image(image_path)
-        return self.run(image, document_id=document_id)
+        return self.run(
+            image,
+            document_id=document_id,
+            debug=debug,
+            debug_output_dir=debug_output_dir,
+            debug_stages=debug_stages,
+        )
 
     def load_image(self, image_path: str | Path) -> np.ndarray:
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
         if image is None:
             raise ValueError(f"unable to load image: {image_path}")
         return image
