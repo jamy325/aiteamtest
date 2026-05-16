@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 
-from core.document import add_anchor, add_constraint, add_path, add_segment, create_document
-from core.types import Anchor, Constraint, CoordinateSystem, Path as VectorPath, Segment
+from core.document import add_anchor, add_constraint, add_object, add_path, add_segment, create_document
+from core.types import Anchor, Constraint, CoordinateSystem, Object, Path as VectorPath, Segment, updated
 from services.command_executor import CommandExecutor
+from services.document_integrity import DocumentIntegrityValidator
 
 
 def _build_document(
@@ -216,3 +217,239 @@ def test_replace_segment_range_cleans_removed_segment_anchor_and_constraint_targ
     assert result.document.metadata["command_executor_cleanup"]["removed_segment_ids"] == ["line_seg_3"]
     assert result.document.metadata["command_executor_cleanup"]["removed_anchor_ids"] == ["a2"]
     assert result.document.metadata["command_executor_cleanup"]["removed_constraint_ids"] == ["c_drop"]
+
+
+def test_document_integrity_validator_accepts_normal_document() -> None:
+    segments = (
+        Segment("line_seg_1", "normal_path", "line", {"start": [0.0, 0.0], "end": [4.0, 0.0]}, anchors=("a0", "a1")),
+        Segment("line_seg_2", "normal_path", "line", {"start": [4.0, 0.0], "end": [8.0, 0.0]}, anchors=("a1", "a2")),
+    )
+    anchors = (
+        Anchor("a0", "normal_path", (0.0, 0.0)),
+        Anchor("a1", "normal_path", (4.0, 0.0)),
+        Anchor("a2", "normal_path", (8.0, 0.0)),
+    )
+    document = _build_document(path_id="normal_path", closed=False, segments=segments, anchors=anchors)
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is True
+    assert report.errors == ()
+    assert report.warnings == ()
+    assert report.affected_ids == ()
+
+
+def test_document_integrity_validator_reports_dangling_segment() -> None:
+    document = create_document(
+        document_id="doc_dangling_segment",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_ok", closed=False, segments=("seg_used",)))
+    document = add_segment(document, Segment("seg_used", "path_ok", "line", {"start": [0.0, 0.0], "end": [1.0, 0.0]}))
+    document = updated(
+        document,
+        segments=document.segments
+        + (Segment("seg_dangling", "path_ok", "line", {"start": [1.0, 0.0], "end": [2.0, 0.0]}),),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "DANGLING_SEGMENT" for issue in report.errors)
+    assert "seg_dangling" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_dangling_anchor() -> None:
+    document = create_document(
+        document_id="doc_dangling_anchor",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_ok", closed=False, segments=("seg_used",)))
+    document = add_segment(document, Segment("seg_used", "path_ok", "line", {"start": [0.0, 0.0], "end": [1.0, 0.0]}, anchors=("a0",)))
+    document = add_anchor(document, Anchor("a0", "path_ok", (0.0, 0.0)))
+    document = add_anchor(document, Anchor("a_orphan", "path_ok", (3.0, 0.0)))
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "DANGLING_ANCHOR" for issue in report.errors)
+    assert "a_orphan" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_dangling_constraint_target() -> None:
+    document = create_document(
+        document_id="doc_dangling_constraint",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_ok", closed=False, segments=("seg_used",)))
+    document = add_segment(document, Segment("seg_used", "path_ok", "line", {"start": [0.0, 0.0], "end": [1.0, 0.0]}))
+    document = add_constraint(document, Constraint("c_bad", "coincident", targets=("missing_seg",)))
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "DANGLING_CONSTRAINT_TARGET" for issue in report.errors)
+    assert "c_bad" in report.affected_ids
+    assert "missing_seg" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_missing_object_path_reference() -> None:
+    document = create_document(
+        document_id="doc_missing_object_path",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_object(
+        document,
+        Object(
+            "obj_missing_path",
+            "shape",
+            paths=("missing_path",),
+        ),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "MISSING_OBJECT_PATH_REFERENCE" for issue in report.errors)
+    assert "obj_missing_path" in report.affected_ids
+    assert "missing_path" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_missing_object_constraint_reference() -> None:
+    document = create_document(
+        document_id="doc_missing_object_constraint",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_object(
+        document,
+        Object(
+            "obj_missing_constraint",
+            "shape",
+            constraints=("missing_constraint",),
+        ),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "MISSING_OBJECT_CONSTRAINT_REFERENCE" for issue in report.errors)
+    assert "obj_missing_constraint" in report.affected_ids
+    assert "missing_constraint" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_missing_path_object_reference() -> None:
+    document = create_document(
+        document_id="doc_missing_path_object",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = updated(
+        document,
+        paths=document.paths
+        + (
+            VectorPath(
+                path_id="path_missing_object",
+                object_id="missing_object",
+                closed=False,
+                segments=(),
+            ),
+        ),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "MISSING_PATH_OBJECT_REFERENCE" for issue in report.errors)
+    assert "path_missing_object" in report.affected_ids
+    assert "missing_object" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_non_vector_coordinate_space() -> None:
+    document = create_document(
+        document_id="doc_non_vector",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="pixel"),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "NON_VECTOR_COORDINATE_SPACE" for issue in report.errors)
+
+
+def test_document_integrity_validator_reports_closed_path_gap_mismatch() -> None:
+    segments = (
+        Segment("line_seg_1", "closed_gap_path", "line", {"start": [0.0, 0.0], "end": [4.0, 0.0]}),
+        Segment("line_seg_2", "closed_gap_path", "line", {"start": [4.0, 0.0], "end": [4.0, 4.0]}),
+        Segment("line_seg_3", "closed_gap_path", "line", {"start": [4.0, 4.0], "end": [0.0, 4.0]}),
+        Segment("line_seg_4", "closed_gap_path", "line", {"start": [0.0, 4.0], "end": [0.5, 0.5]}),
+    )
+    document = _build_document(path_id="closed_gap_path", closed=True, segments=segments)
+    document = add_path(
+        create_document(
+            document_id="doc_closed_gap",
+            width=200.0,
+            height=200.0,
+            coordinate_system=CoordinateSystem(internal_space="vector"),
+        ),
+        VectorPath(
+            path_id="closed_gap_path",
+            closed=True,
+            topology_status="closed",
+            max_gap=0.0,
+            segments=tuple(segment.segment_id for segment in segments),
+        ),
+    )
+    for segment in segments:
+        document = add_segment(document, segment)
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "CLOSED_PATH_GAP_MISMATCH" for issue in report.errors)
+    assert "closed_gap_path" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_degree_angle_contract_violation() -> None:
+    document = create_document(
+        document_id="doc_degree_arc",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="arc_path", closed=False, segments=("arc_seg",)))
+    document = add_segment(
+        document,
+        Segment(
+            "arc_seg",
+            "arc_path",
+            "arc",
+            {
+                "cx": 10.0,
+                "cy": 10.0,
+                "r": 5.0,
+                "start_angle": 0.0,
+                "end_angle": 90.0,
+                "direction": "ccw",
+                "angle_unit": "degree",
+            },
+        ),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "ANGLE_UNIT_NOT_RADIANS" for issue in report.errors)
+    assert "arc_seg" in report.affected_ids
