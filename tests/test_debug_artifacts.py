@@ -123,6 +123,32 @@ def test_minimal_pipeline_debug_stage_filter_limits_output_files(tmp_path: Path)
     assert produced == {"binary_contours_hierarchy.json", "debug_summary.json"}
 
 
+def test_minimal_pipeline_debug_stage_filter_supports_binary_and_contours_aliases(tmp_path: Path) -> None:
+    pipeline = MinimalPipeline(coordinate_system=CoordinateSystem(view_box=(0.0, 0.0, 120.0, 120.0)))
+
+    result = pipeline.run_from_file(
+        FIXTURE_ROOT / "black_square_on_white.png",
+        document_id="category_filter",
+        debug=True,
+        debug_output_dir=tmp_path,
+        debug_stages=("binary", "contours"),
+    )
+
+    assert result.debug_artifacts is not None
+    output_dir = _artifact_dir(tmp_path)
+    produced = {path.name for path in output_dir.iterdir()}
+    assert {
+        "threshold_binary.png",
+        "denoised.png",
+        "morphology_closed.png",
+        "binary_contours_overlay.png",
+        "binary_contours_hierarchy.json",
+        "skeleton_contours_overlay.png",
+    }.issubset(produced)
+    assert "vector_overlay_debug.png" not in produced
+    assert "resampled_contours_overlay.png" not in produced
+
+
 def test_minimal_pipeline_debug_false_has_no_file_side_effects(tmp_path: Path) -> None:
     pipeline = MinimalPipeline(coordinate_system=CoordinateSystem(view_box=(0.0, 0.0, 120.0, 120.0)))
 

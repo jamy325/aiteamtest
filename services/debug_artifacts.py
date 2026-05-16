@@ -26,6 +26,22 @@ class DebugArtifactExportResult:
 
 
 class DebugArtifactExporter:
+    _STAGE_ALIASES = {
+        "original": {"original"},
+        "grayscale": {"grayscale"},
+        "alpha": {"alpha", "alpha_mask"},
+        "binary": {"threshold_binary", "denoised", "morphology_closed"},
+        "contours": {
+            "binary_contours_overlay",
+            "binary_contours_hierarchy",
+            "skeleton_contours_overlay",
+        },
+        "skeleton": {"skeleton_mask", "skeleton_contours_overlay"},
+        "resampling": {"resampled_contours_overlay"},
+        "vector": {"vector_overlay_debug"},
+        "summary": {"debug_summary"},
+    }
+
     def __init__(
         self,
         output_root: str | Path | None = None,
@@ -36,7 +52,7 @@ class DebugArtifactExporter:
         if output_root is None:
             output_root = Path(tempfile.gettempdir()) / "curve_fitting_ai_agent_debug"
         self.output_root = Path(output_root)
-        self.debug_stages = {str(stage) for stage in debug_stages} if debug_stages is not None else None
+        self.debug_stages = self._normalize_debug_stages(debug_stages)
         self.renderer = renderer or Renderer()
 
     def export_pipeline_debug(
@@ -139,6 +155,16 @@ class DebugArtifactExporter:
 
     def _should_export(self, stage_name: str) -> bool:
         return self.debug_stages is None or stage_name in self.debug_stages
+
+    def _normalize_debug_stages(self, debug_stages: Iterable[str] | None) -> set[str] | None:
+        if debug_stages is None:
+            return None
+        normalized: set[str] = set()
+        for stage in debug_stages:
+            stage_name = str(stage)
+            normalized.add(stage_name)
+            normalized.update(self._STAGE_ALIASES.get(stage_name, ()))
+        return normalized
 
     def _maybe_write_image(
         self,
