@@ -63,7 +63,11 @@ def test_minimal_pipeline_debug_exports_black_square_fixture_artifacts(tmp_path:
     assert set(summary["timings_ms"]).issuperset(
         {"grayscale", "binary_preprocess", "binary_contours", "skeleton", "resampling", "vectorization"}
     )
-    assert summary["threshold_polarity"] == "foreground_white"
+    assert summary["threshold_polarity"] == "dark_on_light"
+    assert summary["foreground_mode"] == "dark_on_light"
+    assert "border_foreground_ratio" in summary["foreground_reason"]
+    assert "filtered_binary_contours" in summary
+    assert "filtered_skeleton_contours" in summary
 
 
 def test_minimal_pipeline_debug_exports_blue_circle_fixture_hierarchy_metadata(tmp_path: Path) -> None:
@@ -81,7 +85,18 @@ def test_minimal_pipeline_debug_exports_blue_circle_fixture_hierarchy_metadata(t
     hierarchy = json.loads((output_dir / "binary_contours_hierarchy.json").read_text(encoding="utf-8"))
 
     assert hierarchy
-    required_fields = {"contour_id", "area", "bbox", "depth", "parent", "children", "touches_border", "bbox_coverage"}
+    required_fields = {
+        "contour_id",
+        "area",
+        "bbox",
+        "depth",
+        "parent",
+        "children",
+        "touches_border",
+        "bbox_coverage",
+        "filtered",
+        "filter_reason",
+    }
     assert all(required_fields.issubset(item) for item in hierarchy)
     assert (output_dir / "binary_contours_overlay.png").exists()
     assert (output_dir / "skeleton_contours_overlay.png").exists()

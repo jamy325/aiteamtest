@@ -9,11 +9,23 @@ from core.types import CoordinateSystem
 from services.minimal_pipeline import MinimalPipeline
 
 
+FIXTURE_ROOT = Path("tests/fixtures/debug_artifacts")
+
+
 def _test_image() -> np.ndarray:
     image = np.zeros((120, 140), dtype=np.uint8)
     cv2.rectangle(image, (10, 10), (70, 90), 255, thickness=-1)
     cv2.line(image, (85, 20), (125, 60), 255, thickness=1)
     return image
+
+
+def _path_touches_page_border(points: tuple[tuple[float, float], ...], image_size: tuple[int, int]) -> bool:
+    height, width = image_size
+    if not points:
+        return False
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs) <= 0.0 or min(ys) <= 0.0 or max(xs) >= float(width - 1) or max(ys) >= float(height - 1)
 
 
 def test_minimal_pipeline_runs_end_to_end_from_image_file(tmp_path: Path) -> None:
@@ -82,3 +94,44 @@ def test_minimal_pipeline_has_no_ui_or_ai_dependencies() -> None:
 
     assert imports.isdisjoint(forbidden_imports)
     assert "_json_ready_value" not in source
+
+
+def test_minimal_pipeline_black_square_fixture_avoids_page_border_paths() -> None:
+    pipeline = MinimalPipeline(
+        coordinate_system=CoordinateSystem(
+            view_box=(0.0, 0.0, 120.0, 120.0),
+            precision=4,
+        )
+    )
+
+    result = pipeline.run_from_file(
+        FIXTURE_ROOT / "black_square_on_white.png",
+        document_id="doc_black_square",
+        debug=True,
+    )
+
+    assert len(result.document.segments) <= 32
+    assert result.debug_artifacts is not None
+    assert result.debug_artifacts.summary["foreground_mode"] == "dark_on_light"
+    assert all(not _path_touches_page_border(segment.points, (120, 120)) for segment in result.extracted_contours.binary_contours)
+    assert all(not _path_touches_page_border(segment.points, (120, 120)) for segment in result.extracted_contours.skeleton_contours)
+
+
+def test_minimal_pipeline_blue_circle_fixture_avoids_page_border_paths() -> None:
+    pipeline = MinimalPipeline(
+        coordinate_system=CoordinateSystem(
+            view_box=(0.0, 0.0, 128.0, 128.0),
+            precision=4,
+        )
+    )
+
+    result = pipeline.run_from_file(
+        FIXTURE_ROOT / "blue_circle_on_white.png",
+        document_id="doc_blue_circle",
+        debug=True,
+    )
+
+    assert result.debug_artifacts is not None
+    assert result.debug_artifacts.summary["foreground_mode"] == "dark_on_light"
+    assert all(not _path_touches_page_border(segment.points, (128, 128)) for segment in result.extracted_contours.binary_contours)
+    assert all(not _path_touches_page_border(segment.points, (128, 128)) for segment in result.extracted_contours.skeleton_contours)
