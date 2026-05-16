@@ -164,7 +164,9 @@ class Renderer:
             return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         if image.ndim == 3 and image.shape[2] == 3:
             return image.copy()
-        raise ValueError("image must be grayscale or BGR")
+        if image.ndim == 3 and image.shape[2] == 4:
+            return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        raise ValueError("image must be grayscale, BGR, or BGRA")
 
 
 __all__ = ["OverlayRenderOptions", "Renderer"]
