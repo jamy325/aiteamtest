@@ -4,8 +4,8 @@ import ast
 import math
 from pathlib import Path
 
-from core.document import add_path, add_segment, create_document
-from core.types import CoordinateSystem, Path as VectorPath, Segment
+from core.document import add_anchor, add_constraint, add_path, add_segment, create_document
+from core.types import Anchor, Constraint, CoordinateSystem, Path as VectorPath, Segment
 from services.command_preview import CommandPreviewService
 
 
@@ -63,6 +63,18 @@ def _arc_points(
         )
         for index in range(count)
     )
+
+
+def _circle_points(*, cx: float, cy: float, radius: float, count: int) -> tuple[tuple[float, float], ...]:
+    points = [
+        (
+            cx + radius * math.cos(math.tau * index / count),
+            cy + radius * math.sin(math.tau * index / count),
+        )
+        for index in range(count)
+    ]
+    points.append(points[0])
+    return tuple(points)
 
 
 def test_command_preview_returns_success_summary_without_mutating_document() -> None:
@@ -177,6 +189,113 @@ def test_command_preview_batch_handles_dirty_command_without_crashing() -> None:
     assert result.failure_count == 1
     assert tuple(item.success for item in result.previews) == (False, True)
     assert "command must be a dictionary" in (result.previews[0].reason or "")
+    assert document == original_document
+
+
+def test_command_preview_reports_removed_constraint_ids_and_type_delta() -> None:
+    full_points = _circle_points(cx=30.0, cy=25.0, radius=8.0, count=12)
+    first_half = full_points[:7]
+    second_half = full_points[6:]
+    document = create_document(
+        document_id="doc_circle_preview",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="circle_path",
+            closed=True,
+            segments=("circle_seg_1", "circle_seg_2"),
+        ),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            "circle_seg_1",
+            "circle_path",
+            "polyline",
+            {"points": [[x, y] for x, y in first_half]},
+            anchors=("a0", "a1"),
+        ),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            "circle_seg_2",
+            "circle_path",
+            "polyline",
+            {"points": [[x, y] for x, y in second_half]},
+            anchors=("a1", "a0"),
+        ),
+    )
+    document = add_anchor(document, Anchor("a0", "circle_path", first_half[0]))
+    document = add_anchor(document, Anchor("a1", "circle_path", first_half[-1]))
+    document = add_constraint(document, Constraint("c_drop", "coincident", targets=("circle_seg_2", "a1")))
+    original_document = document
+
+    preview = CommandPreviewService().preview(
+        {
+            "command_id": "replace_circle",
+            "tool": "propose_replace_path_with_circle",
+            "path_id": "circle_path",
+            "reason": "intent only",
+            "confidence": 0.85,
+            "requires_user_confirmation": True,
+        },
+        document,
+    )
+
+    assert preview.success is True
+    assert preview.constraint_change_summary.before["coincident"] == 1
+    assert preview.constraint_change_summary.after.get("coincident", 0) == 0
+    assert preview.constraint_change_summary.delta["coincident"] == -1
+    assert preview.constraint_change_summary.removed_constraint_ids == ("c_drop",)
+    assert preview.constraint_change_summary.added_constraint_ids == ()
+    assert preview.constraint_change_summary.changed_constraint_ids == ()
+    assert document == original_document
+
+
+def test_command_preview_failure_keeps_constraint_summary_unchanged() -> None:
+    document = create_document(
+        document_id="doc_locked_constraint_preview",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(
+        document,
+        VectorPath(path_id="locked_path", closed=False, locked=True, segments=("locked_seg_1",)),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            "locked_seg_1",
+            "locked_path",
+            "polyline",
+            {"points": [[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]]},
+        ),
+    )
+    document = add_constraint(
+        document,
+        Constraint("c_keep", "coincident", targets=("locked_seg_1",), locked=True),
+    )
+    original_document = document
+
+    preview = CommandPreviewService().preview(
+        _command("propose_replace_segment_with_line", path_id="locked_path", command_id="locked_fail"),
+        document,
+    )
+
+    assert preview.success is False
+    assert "locked path" in (preview.reason or "")
+    assert preview.constraint_change_summary.before == {"coincident": 1}
+    assert preview.constraint_change_summary.after == {"coincident": 1}
+    assert preview.constraint_change_summary.delta == {"coincident": 0}
+    assert preview.constraint_change_summary.added_constraint_ids == ()
+    assert preview.constraint_change_summary.removed_constraint_ids == ()
+    assert preview.constraint_change_summary.changed_constraint_ids == ()
     assert document == original_document
 
 

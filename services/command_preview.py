@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import uuid
 from xml.etree import ElementTree as ET
 
+from core.types import Constraint
 from core.types import VectorDocument
 from services.command_executor import CommandExecutionResult, CommandExecutor
 from services.dxf_exporter import DxfExporter
@@ -17,6 +18,16 @@ class ExportImpactSummary:
     before: dict[str, int]
     after: dict[str, int]
     delta: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class ConstraintChangeSummary:
+    before: dict[str, int]
+    after: dict[str, int]
+    delta: dict[str, int]
+    added_constraint_ids: tuple[str, ...]
+    removed_constraint_ids: tuple[str, ...]
+    changed_constraint_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +45,7 @@ class CommandPreviewResult:
     self_intersection_count_before: dict[str, int]
     self_intersection_count_after: dict[str, int]
     segment_type_summary: dict[str, dict[str, int]]
+    constraint_change_summary: ConstraintChangeSummary
     export_impact_summary: ExportImpactSummary
 
 
@@ -140,6 +152,7 @@ class CommandPreviewService:
                 "after": after_counts,
                 "delta": delta_counts,
             },
+            constraint_change_summary=self._constraint_change_summary(before_document, after_document),
             export_impact_summary=self._export_impact_summary(before_document, after_document),
         )
 
@@ -175,6 +188,45 @@ class CommandPreviewService:
         counts: dict[str, int] = {}
         for segment in document.segments:
             counts[segment.type] = counts.get(segment.type, 0) + 1
+        return counts
+
+    def _constraint_change_summary(
+        self,
+        before_document: VectorDocument,
+        after_document: VectorDocument,
+    ) -> ConstraintChangeSummary:
+        before_by_id = {constraint.constraint_id: constraint for constraint in before_document.constraints}
+        after_by_id = {constraint.constraint_id: constraint for constraint in after_document.constraints}
+
+        before_counts = self._constraint_type_counts(before_document.constraints)
+        after_counts = self._constraint_type_counts(after_document.constraints)
+        keys = sorted(set(before_counts) | set(after_counts))
+        delta_counts = {
+            key: after_counts.get(key, 0) - before_counts.get(key, 0)
+            for key in keys
+        }
+
+        before_ids = set(before_by_id)
+        after_ids = set(after_by_id)
+        changed_ids = tuple(
+            constraint_id
+            for constraint_id in sorted(before_ids & after_ids)
+            if before_by_id[constraint_id] != after_by_id[constraint_id]
+        )
+
+        return ConstraintChangeSummary(
+            before=before_counts,
+            after=after_counts,
+            delta=delta_counts,
+            added_constraint_ids=tuple(sorted(after_ids - before_ids)),
+            removed_constraint_ids=tuple(sorted(before_ids - after_ids)),
+            changed_constraint_ids=changed_ids,
+        )
+
+    def _constraint_type_counts(self, constraints: tuple[Constraint, ...]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for constraint in constraints:
+            counts[constraint.type] = counts.get(constraint.type, 0) + 1
         return counts
 
     def _export_impact_summary(
@@ -229,5 +281,6 @@ __all__ = [
     "BatchCommandPreviewResult",
     "CommandPreviewResult",
     "CommandPreviewService",
+    "ConstraintChangeSummary",
     "ExportImpactSummary",
 ]
