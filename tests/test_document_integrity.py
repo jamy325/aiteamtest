@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import math
 
-from core.document import add_anchor, add_constraint, add_path, add_segment, create_document
-from core.types import Anchor, Constraint, CoordinateSystem, Path as VectorPath, Segment, updated
+from core.document import add_anchor, add_constraint, add_object, add_path, add_segment, create_document
+from core.types import Anchor, Constraint, CoordinateSystem, Object, Path as VectorPath, Segment, updated
 from services.command_executor import CommandExecutor
 from services.document_integrity import DocumentIntegrityValidator
 
@@ -297,6 +297,82 @@ def test_document_integrity_validator_reports_dangling_constraint_target() -> No
     assert any(issue.code == "DANGLING_CONSTRAINT_TARGET" for issue in report.errors)
     assert "c_bad" in report.affected_ids
     assert "missing_seg" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_missing_object_path_reference() -> None:
+    document = create_document(
+        document_id="doc_missing_object_path",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_object(
+        document,
+        Object(
+            "obj_missing_path",
+            "shape",
+            paths=("missing_path",),
+        ),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "MISSING_OBJECT_PATH_REFERENCE" for issue in report.errors)
+    assert "obj_missing_path" in report.affected_ids
+    assert "missing_path" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_missing_object_constraint_reference() -> None:
+    document = create_document(
+        document_id="doc_missing_object_constraint",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_object(
+        document,
+        Object(
+            "obj_missing_constraint",
+            "shape",
+            constraints=("missing_constraint",),
+        ),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "MISSING_OBJECT_CONSTRAINT_REFERENCE" for issue in report.errors)
+    assert "obj_missing_constraint" in report.affected_ids
+    assert "missing_constraint" in report.affected_ids
+
+
+def test_document_integrity_validator_reports_missing_path_object_reference() -> None:
+    document = create_document(
+        document_id="doc_missing_path_object",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = updated(
+        document,
+        paths=document.paths
+        + (
+            VectorPath(
+                path_id="path_missing_object",
+                object_id="missing_object",
+                closed=False,
+                segments=(),
+            ),
+        ),
+    )
+
+    report = DocumentIntegrityValidator().validate(document)
+
+    assert report.success is False
+    assert any(issue.code == "MISSING_PATH_OBJECT_REFERENCE" for issue in report.errors)
+    assert "path_missing_object" in report.affected_ids
+    assert "missing_object" in report.affected_ids
 
 
 def test_document_integrity_validator_reports_non_vector_coordinate_space() -> None:

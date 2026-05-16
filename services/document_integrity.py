@@ -33,6 +33,7 @@ class DocumentIntegrityValidator:
 
         path_ids = {path.path_id for path in document.paths}
         object_ids = {obj.object_id for obj in document.objects}
+        constraint_ids = {constraint.constraint_id for constraint in document.constraints}
         segment_ids = {segment.segment_id for segment in document.segments}
         anchor_ids = {anchor.anchor_id for anchor in document.anchors}
         referenced_segment_ids = {segment_id for path in document.paths for segment_id in path.segments}
@@ -49,7 +50,32 @@ class DocumentIntegrityValidator:
 
         segment_by_id = {segment.segment_id: segment for segment in document.segments}
 
+        for obj in document.objects:
+            missing_paths = tuple(path_id for path_id in obj.paths if path_id not in path_ids)
+            if missing_paths:
+                errors.append(
+                    IntegrityIssue(
+                        code="MISSING_OBJECT_PATH_REFERENCE",
+                        message=f"object {obj.object_id} references missing path(s)",
+                        affected_ids=(obj.object_id,) + missing_paths,
+                    )
+                )
+            missing_constraints = tuple(
+                constraint_id for constraint_id in obj.constraints if constraint_id not in constraint_ids
+            )
+            if missing_constraints:
+                errors.append(
+                    IntegrityIssue(
+                        code="MISSING_OBJECT_CONSTRAINT_REFERENCE",
+                        message=f"object {obj.object_id} references missing constraint(s)",
+                        affected_ids=(obj.object_id,) + missing_constraints,
+                    )
+                )
+
         for path in document.paths:
+            path_reference_issue = self._path_reference_issue(path, object_ids=object_ids, path_ids=path_ids)
+            if path_reference_issue:
+                errors.extend(path_reference_issue)
             missing_segments = tuple(segment_id for segment_id in path.segments if segment_id not in segment_by_id)
             if missing_segments:
                 errors.append(
@@ -130,6 +156,41 @@ class DocumentIntegrityValidator:
             warnings=tuple(warnings),
             affected_ids=affected_ids,
         )
+
+    def _path_reference_issue(
+        self,
+        path: Any,
+        *,
+        object_ids: set[str],
+        path_ids: set[str],
+    ) -> list[IntegrityIssue]:
+        issues: list[IntegrityIssue] = []
+        if path.object_id and path.object_id not in object_ids:
+            issues.append(
+                IntegrityIssue(
+                    code="MISSING_PATH_OBJECT_REFERENCE",
+                    message=f"path {path.path_id} references missing object",
+                    affected_ids=(path.path_id, path.object_id),
+                )
+            )
+        if path.parent_path and path.parent_path not in path_ids:
+            issues.append(
+                IntegrityIssue(
+                    code="MISSING_PARENT_PATH_REFERENCE",
+                    message=f"path {path.path_id} references missing parent_path",
+                    affected_ids=(path.path_id, path.parent_path),
+                )
+            )
+        missing_child_paths = tuple(child_path for child_path in path.child_paths if child_path not in path_ids)
+        if missing_child_paths:
+            issues.append(
+                IntegrityIssue(
+                    code="MISSING_CHILD_PATH_REFERENCE",
+                    message=f"path {path.path_id} references missing child_path(s)",
+                    affected_ids=(path.path_id,) + missing_child_paths,
+                )
+            )
+        return issues
 
     def _closed_path_issue(
         self,
