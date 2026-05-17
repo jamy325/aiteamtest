@@ -216,8 +216,6 @@ class ContourExtractor:
                 touches_border=touches_border,
                 bbox_coverage=bbox_coverage,
             )
-            overlay_pixels[contour_id] = tuple((int(pixel[0]), int(pixel[1])) for pixel in traced_path.pixels)
-            closed_lookup[contour_id] = traced_path.closed
             if filter_reason is not None:
                 filtered.append(
                     {
@@ -228,6 +226,9 @@ class ContourExtractor:
                     }
                 )
                 continue
+
+            overlay_pixels[contour_id] = tuple((int(pixel[0]), int(pixel[1])) for pixel in traced_path.pixels)
+            closed_lookup[contour_id] = traced_path.closed
 
             points = self._to_vector_points(traced_path.pixels)
             extracted.append(
@@ -323,6 +324,7 @@ class ContourExtractor:
         debug_hierarchy: list[dict[str, object]] = []
         contour_pixels: dict[str, tuple[tuple[int, int], ...]] = {}
         closed_lookup: dict[str, bool] = {}
+        overlay_ids: list[str] = []
         filtered: list[dict[str, object]] = []
         total_area = float(width * height) if width > 0 and height > 0 else 1.0
         for index, contour in enumerate(contours):
@@ -341,6 +343,7 @@ class ContourExtractor:
             )
             closed_lookup[contour_ids[index]] = len(points) >= 3
             if filter_reason is None:
+                overlay_ids.append(contour_ids[index])
                 extracted.append(
                     BinaryContour(
                         contour_id=contour_ids[index],
@@ -382,7 +385,7 @@ class ContourExtractor:
             tuple(extracted),
             tuple(debug_hierarchy),
             contour_pixels,
-            contour_ids,
+            tuple(overlay_ids),
             closed_lookup,
             tuple(filtered),
         )
