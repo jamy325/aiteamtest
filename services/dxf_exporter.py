@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+from typing import Literal
 
 from core.coordinate import CoordinateTransformer
-from core.types import CoordinateSystem, Point, Segment, VectorDocument
+from core.types import CoordinateSystem, Path, Point, Segment, VectorDocument
 from services.segment_sampler import SegmentSampler
 
+ExportMode = Literal["outline", "centerline", "all_debug"]
 
 @dataclass(frozen=True, slots=True)
 class DxfExporter:
@@ -21,7 +23,7 @@ class DxfExporter:
     def __post_init__(self) -> None:
         object.__setattr__(self, "_segment_sampler", SegmentSampler())
 
-    def export_document(self, document: VectorDocument) -> str:
+    def export_document(self, document: VectorDocument, *, export_mode: ExportMode = "all_debug") -> str:
         transformer = self._transformer_for_document(document)
         lines: list[str] = [
             "0",
@@ -40,11 +42,45 @@ class DxfExporter:
             "ENTITIES",
         ]
 
-        for segment in document.segments:
-            lines.extend(self._segment_entity_lines(segment, transformer))
+        selected_paths = self._selected_paths(document, export_mode)
+        if not selected_paths:
+            lines.extend(["999", f"warning: no paths selected for export_mode={export_mode}"])
+        segment_lookup = {segment.segment_id: segment for segment in document.segments}
+        for path in selected_paths:
+            for segment_id in path.segments:
+                segment = segment_lookup.get(segment_id)
+                if segment is not None:
+                    lines.extend(self._segment_entity_lines(segment, transformer))
 
         lines.extend(["0", "ENDSEC", "0", "EOF"])
         return "\n".join(lines) + "\n"
+
+    def export_report(self, document: VectorDocument, *, export_mode: ExportMode = "all_debug") -> dict[str, object]:
+        selected_paths = self._selected_paths(document, export_mode)
+        skipped_paths = tuple(path for path in document.paths if path not in selected_paths)
+        return {
+            "export_mode": export_mode,
+            "exported_path_count": len(selected_paths),
+            "skipped_path_count": len(skipped_paths),
+            "exported_by_source": self._count_sources(selected_paths),
+            "skipped_by_source": self._count_sources(skipped_paths),
+            "warning": None if selected_paths else f"no paths selected for export_mode={export_mode}",
+        }
+
+    def _selected_paths(self, document: VectorDocument, export_mode: ExportMode) -> tuple[Path, ...]:
+        if export_mode == "all_debug":
+            return document.paths
+        if export_mode == "outline":
+            return tuple(path for path in document.paths if path.source == "binary_contour")
+        if export_mode == "centerline":
+            return tuple(path for path in document.paths if path.source == "skeleton_contour")
+        raise ValueError(f"unsupported export_mode: {export_mode}")
+
+    def _count_sources(self, paths: tuple[Path, ...] | list[Path]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for path in paths:
+            counts[path.source] = counts.get(path.source, 0) + 1
+        return counts
 
     def _segment_entity_lines(self, segment: Segment, transformer: CoordinateTransformer) -> list[str]:
         if segment.type == "line":
@@ -193,4 +229,4 @@ class DxfExporter:
         return text if text else "0"
 
 
-__all__ = ["DxfExporter"]
+__all__ = ["DxfExporter", "ExportMode"]
