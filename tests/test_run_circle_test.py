@@ -46,6 +46,9 @@ def test_run_circle_test_generates_summary_and_records_fitting_source(tmp_path: 
         assert payload["has_circle_segment"] is True
         assert payload["fitting_source"] == "raw_contour_points"
         assert payload["circle_segments"]
+        svg_payload = Path(payload["output_files"]["svg"]).read_text(encoding="utf-8")
+        assert "<circle" in svg_payload or "<path" in svg_payload
+        assert 'stroke="none"' not in svg_payload or 'fill="none" stroke="none"' not in svg_payload
     else:
         assert payload["execute_reason"]
 

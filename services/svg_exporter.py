@@ -91,7 +91,7 @@ class SvgExporter:
         style = path.style or Style()
 
         if len(compound_paths) == 1:
-            native = self._native_shape_element(document, path, transformer, style)
+            native = self._native_shape_element(document, path, transformer, style, path.source)
             if native is not None:
                 return native
 
@@ -99,7 +99,7 @@ class SvgExporter:
         element.set("d", " ".join(self._path_d(document, item, transformer) for item in compound_paths))
         if len(compound_paths) > 1:
             element.set("fill-rule", "evenodd")
-        self._apply_style(element, style)
+        self._apply_style(element, style, path_source=path.source)
         element.set("id", path.path_id)
         return element
 
@@ -109,6 +109,7 @@ class SvgExporter:
         path: Path,
         transformer: CoordinateTransformer,
         style: Style,
+        path_source: str,
     ) -> ET.Element | None:
         if len(path.segments) != 1:
             return None
@@ -139,7 +140,7 @@ class SvgExporter:
         else:
             return None
 
-        self._apply_style(element, style)
+        self._apply_style(element, style, path_source=path_source)
         element.set("id", path.path_id)
         return element
 
@@ -286,19 +287,30 @@ class SvgExporter:
             sweep += math.tau
         return sweep
 
-    def _apply_style(self, element: ET.Element, style: Style) -> None:
-        if style.fill_color is None:
-            element.set("fill", "none")
+    def _apply_style(self, element: ET.Element, style: Style, *, path_source: str | None = None) -> None:
+        has_fill = style.fill_color is not None
+        has_stroke_color = style.stroke_color is not None
+        fill_value = "none" if style.fill_color is None else self._color(style.fill_color)
+        stroke_width = float(style.stroke_width)
+
+        if has_stroke_color:
+            stroke_value = self._color(style.stroke_color)
+            if stroke_width <= 0.0 and not has_fill:
+                stroke_width = 1.0
+        elif not has_fill:
+            stroke_value = "#000000"
+            stroke_width = 1.0
         else:
-            element.set("fill", self._color(style.fill_color))
+            stroke_value = "none"
+
+        element.set("fill", fill_value)
         if style.fill_alpha is not None:
             element.set("fill-opacity", self._fmt(style.fill_alpha))
-        if style.stroke_color is None or style.stroke_width <= 0.0:
-            element.set("stroke", "none")
-        else:
-            element.set("stroke", self._color(style.stroke_color))
-            element.set("stroke-width", self._fmt(style.stroke_width))
-        if style.stroke_alpha is not None and style.stroke_color is not None:
+
+        element.set("stroke", stroke_value)
+        if stroke_value != "none":
+            element.set("stroke-width", self._fmt(max(stroke_width, 0.0)))
+        if style.stroke_alpha is not None and has_stroke_color:
             element.set("stroke-opacity", self._fmt(style.stroke_alpha))
         if not math.isclose(style.opacity, 1.0, abs_tol=1e-9):
             element.set("opacity", self._fmt(style.opacity))

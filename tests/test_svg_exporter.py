@@ -242,6 +242,78 @@ def test_svg_exporter_keeps_viewbox_visible_when_y_axis_is_up() -> None:
     assert path_element.attrib["d"].startswith("M 0 100 L 0 90")
 
 
+def test_svg_exporter_adds_default_visible_stroke_for_unstyled_centerline_path() -> None:
+    document = _document()
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="unstyled_centerline",
+            closed=False,
+            source="skeleton_contour",
+            segments=("line_seg",),
+        ),
+    )
+    document = add_segment(
+        document,
+        Segment("line_seg", "unstyled_centerline", "line", {"start": [10.0, 20.0], "end": [80.0, 20.0]}),
+    )
+
+    svg = SvgExporter().export_document(document, export_mode="centerline")
+    root = ET.fromstring(svg)
+    path_element = root.find("{http://www.w3.org/2000/svg}path")
+
+    assert path_element is not None
+    assert path_element.attrib["fill"] == "none"
+    assert path_element.attrib["stroke"] == "#000000"
+    assert path_element.attrib["stroke-width"] == "1"
+
+
+def test_svg_exporter_adds_default_visible_stroke_for_unstyled_circle() -> None:
+    document = _document()
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="unstyled_circle",
+            closed=True,
+            source="skeleton_contour",
+            segments=("circle_seg",),
+        ),
+    )
+    document = add_segment(document, Segment("circle_seg", "unstyled_circle", "circle", {"cx": 25.0, "cy": 25.0, "r": 10.0}))
+
+    svg = SvgExporter().export_document(document, export_mode="centerline")
+    root = ET.fromstring(svg)
+    circle = root.find("{http://www.w3.org/2000/svg}circle")
+
+    assert circle is not None
+    assert circle.attrib["fill"] == "none"
+    assert circle.attrib["stroke"] == "#000000"
+    assert circle.attrib["stroke-width"] == "1"
+
+
+def test_svg_exporter_respects_explicit_fill_without_forcing_fallback_stroke() -> None:
+    document = _document()
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="filled_circle",
+            closed=True,
+            source="skeleton_contour",
+            segments=("circle_seg",),
+            style=Style(fill_color=(10, 120, 200)),
+        ),
+    )
+    document = add_segment(document, Segment("circle_seg", "filled_circle", "circle", {"cx": 25.0, "cy": 25.0, "r": 10.0}))
+
+    svg = SvgExporter().export_document(document, export_mode="centerline")
+    root = ET.fromstring(svg)
+    circle = root.find("{http://www.w3.org/2000/svg}circle")
+
+    assert circle is not None
+    assert circle.attrib["fill"] == "rgb(10,120,200)"
+    assert circle.attrib["stroke"] == "none"
+
+
 def test_svg_exporter_matches_golden_snapshots() -> None:
     exporter = SvgExporter(pretty=True)
 
