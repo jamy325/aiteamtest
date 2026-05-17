@@ -19,6 +19,7 @@ class RefinementFeedbackInputs:
     inlier_ratio: float
     fit_error: float
     confidence_result: FittingConfidenceResult
+    fitting_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,11 +29,15 @@ class RefinementFeedbackResult:
     inlier_ratio: float
     fit_error: float
     confidence: float
+    fitting_source: str | None
     suggestion: str
     retry_policy: str
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        if payload.get("fitting_source") is None:
+            payload.pop("fitting_source", None)
+        return payload
 
 
 class RefinementFeedback:
@@ -51,6 +56,7 @@ class RefinementFeedback:
             inlier_ratio=inputs.inlier_ratio,
             fit_error=inputs.fit_error,
             confidence=inputs.confidence_result.confidence,
+            fitting_source=inputs.fitting_source,
             suggestion=suggestion,
             retry_policy=retry_policy,
         )
@@ -81,6 +87,7 @@ class RefinementFeedback:
             inlier_ratio=self._safe_ratio(inputs.inlier_ratio),
             fit_error=self._safe_non_negative(inputs.fit_error),
             confidence=self._safe_ratio(inputs.confidence_result.confidence),
+            fitting_source=inputs.fitting_source,
             suggestion=suggestion,
             retry_policy=retry_policy,
         )

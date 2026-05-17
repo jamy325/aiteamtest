@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import Any
 from typing import Literal
 
 from core.types import Anchor, Path, Point, Segment
@@ -31,6 +32,7 @@ class SimpleVectorizer:
         closed: bool = False,
         source: str = "resampled_contour",
         fill_role: str = "unknown",
+        path_metadata: dict[str, Any] | None = None,
     ) -> VectorizationResult:
         normalized_points = self._normalize_points(points, closed=closed)
         minimum_points = 3 if closed else 2
@@ -64,6 +66,7 @@ class SimpleVectorizer:
             metadata={
                 "coordinate_space": "vector",
                 "initial_segment_type": self.segment_type,
+                **(path_metadata or {}),
             },
         )
         return VectorizationResult(path=path, segments=segments, anchors=anchors)
