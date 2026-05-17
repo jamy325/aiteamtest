@@ -98,12 +98,18 @@ def test_dxf_exporter_supports_outline_centerline_and_all_debug_modes() -> None:
     centerline_report = exporter.export_report(document, export_mode="centerline")
     all_debug_report = exporter.export_report(document, export_mode="all_debug")
 
-    assert len(outline_entities) == 8
-    assert len(centerline_entities) == 4
-    assert len(all_debug_entities) == 12
+    assert len(outline_entities) == 2
+    assert len(centerline_entities) == 1
+    assert len(all_debug_entities) == 3
+    assert all(entity["0"] == ["LWPOLYLINE"] for entity in outline_entities)
+    assert all(entity["0"] == ["LWPOLYLINE"] for entity in centerline_entities)
+    assert all(entity["0"] == ["LWPOLYLINE"] for entity in all_debug_entities)
     assert outline_report["exported_by_source"] == {"binary_contour": 2}
     assert centerline_report["exported_by_source"] == {"skeleton_contour": 1}
     assert all_debug_report["exported_by_source"] == {"binary_contour": 2, "skeleton_contour": 1}
+    assert outline_report["entity_counts"]["LWPOLYLINE"] == 2
+    assert centerline_report["entity_counts"]["LWPOLYLINE"] == 1
+    assert all_debug_report["entity_counts"]["LWPOLYLINE"] == 3
 
 
 def test_exporters_report_warning_when_export_mode_has_no_matching_paths() -> None:

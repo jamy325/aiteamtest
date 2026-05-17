@@ -5,6 +5,7 @@ import math
 from typing import Literal
 
 from core.coordinate import CoordinateTransformer
+from core.precision import PrecisionUtility
 from core.types import CoordinateSystem, Path, Point, Segment, VectorDocument
 from services.segment_sampler import SegmentSampler
 
@@ -46,11 +47,12 @@ class DxfExporter:
         if not selected_paths:
             lines.extend(["999", f"warning: no paths selected for export_mode={export_mode}"])
         segment_lookup = {segment.segment_id: segment for segment in document.segments}
+        warnings: list[str] = []
         for path in selected_paths:
-            for segment_id in path.segments:
-                segment = segment_lookup.get(segment_id)
-                if segment is not None:
-                    lines.extend(self._segment_entity_lines(segment, transformer))
+            lines.extend(self._path_entity_lines(path, segment_lookup, transformer, warnings))
+
+        for warning in warnings:
+            lines.extend(["999", warning])
 
         lines.extend(["0", "ENDSEC", "0", "EOF"])
         return "\n".join(lines) + "\n"
@@ -58,13 +60,17 @@ class DxfExporter:
     def export_report(self, document: VectorDocument, *, export_mode: ExportMode = "all_debug") -> dict[str, object]:
         selected_paths = self._selected_paths(document, export_mode)
         skipped_paths = tuple(path for path in document.paths if path not in selected_paths)
+        entity_counts = self._entity_counts(document, selected_paths)
+        warnings = self._collect_warnings(document, selected_paths)
         return {
             "export_mode": export_mode,
             "exported_path_count": len(selected_paths),
             "skipped_path_count": len(skipped_paths),
             "exported_by_source": self._count_sources(selected_paths),
             "skipped_by_source": self._count_sources(skipped_paths),
+            "entity_counts": entity_counts,
             "warning": None if selected_paths else f"no paths selected for export_mode={export_mode}",
+            "warnings": warnings,
         }
 
     def _selected_paths(self, document: VectorDocument, export_mode: ExportMode) -> tuple[Path, ...]:
@@ -81,6 +87,114 @@ class DxfExporter:
         for path in paths:
             counts[path.source] = counts.get(path.source, 0) + 1
         return counts
+
+    def _entity_counts(self, document: VectorDocument, paths: tuple[Path, ...]) -> dict[str, int]:
+        segment_lookup = {segment.segment_id: segment for segment in document.segments}
+        counts: dict[str, int] = {"LWPOLYLINE": 0, "LINE": 0, "ARC": 0, "CIRCLE": 0}
+        for path in paths:
+            polyline_points = self._polyline_vertices(path, segment_lookup)
+            if polyline_points is not None:
+                counts["LWPOLYLINE"] += 1
+                continue
+            for segment_id in path.segments:
+                segment = segment_lookup.get(segment_id)
+                if segment is None:
+                    continue
+                if segment.type == "line":
+                    counts["LINE"] += 1
+                elif segment.type == "arc":
+                    counts["ARC"] += 1
+                elif segment.type == "circle":
+                    counts["CIRCLE"] += 1
+                else:
+                    counts["LWPOLYLINE"] += 1
+        return counts
+
+    def _collect_warnings(self, document: VectorDocument, paths: tuple[Path, ...]) -> tuple[str, ...]:
+        segment_lookup = {segment.segment_id: segment for segment in document.segments}
+        warnings: list[str] = []
+        for path in paths:
+            if path.closed and path.topology_status == "closed":
+                segments = [segment_lookup.get(segment_id) for segment_id in path.segments]
+                segments = [segment for segment in segments if segment is not None]
+                if segments and all(segment.type == "line" for segment in segments):
+                    if self._polyline_vertices(path, segment_lookup) is None:
+                        warnings.append(f"path {path.path_id} is not continuous enough for closed LWPOLYLINE fallback")
+        return tuple(warnings)
+
+    def _path_entity_lines(
+        self,
+        path: Path,
+        segment_lookup: dict[str, Segment],
+        transformer: CoordinateTransformer,
+        warnings: list[str],
+    ) -> list[str]:
+        polyline_points = self._polyline_vertices(path, segment_lookup)
+        if polyline_points is not None:
+            return self._path_polyline_lines(path, polyline_points, transformer)
+
+        if path.closed and path.topology_status == "closed":
+            segments = [segment_lookup.get(segment_id) for segment_id in path.segments]
+            segments = [segment for segment in segments if segment is not None]
+            if segments and all(segment.type == "line" for segment in segments):
+                warnings.append(f"path {path.path_id} is not continuous enough for closed LWPOLYLINE fallback")
+
+        lines: list[str] = []
+        for segment_id in path.segments:
+            segment = segment_lookup.get(segment_id)
+            if segment is not None:
+                lines.extend(self._segment_entity_lines(segment, transformer))
+        return lines
+
+    def _path_polyline_lines(
+        self,
+        path: Path,
+        points: tuple[Point, ...],
+        transformer: CoordinateTransformer,
+    ) -> list[str]:
+        lines = [
+            "0",
+            "LWPOLYLINE",
+            "8",
+            path.path_id,
+            "90",
+            str(len(points)),
+            "70",
+            "1" if path.closed and path.topology_status == "closed" else "0",
+        ]
+        for point in points:
+            dxf_point = transformer.vector_to_dxf(point)
+            lines.extend(["10", self._fmt(dxf_point[0]), "20", self._fmt(dxf_point[1])])
+        return lines
+
+    def _polyline_vertices(self, path: Path, segment_lookup: dict[str, Segment]) -> tuple[Point, ...] | None:
+        if not path.segments:
+            return None
+        segments = [segment_lookup.get(segment_id) for segment_id in path.segments]
+        if any(segment is None for segment in segments):
+            return None
+        typed_segments = [segment for segment in segments if segment is not None]
+        if len(typed_segments) < 2 or not all(segment.type == "line" for segment in typed_segments):
+            return None
+
+        vertices = [self._point_from_params(typed_segments[0].params, "start")]
+        previous_end = None
+        for segment in typed_segments:
+            start = self._point_from_params(segment.params, "start")
+            end = self._point_from_params(segment.params, "end")
+            if previous_end is not None and not PrecisionUtility.points_close(previous_end, start):
+                return None
+            vertices.append(end)
+            previous_end = end
+
+        if path.closed and path.topology_status == "closed":
+            if not PrecisionUtility.points_close(vertices[0], vertices[-1]):
+                return None
+            vertices.pop()
+            if len(vertices) < 3:
+                return None
+
+        return tuple(vertices)
 
     def _segment_entity_lines(self, segment: Segment, transformer: CoordinateTransformer) -> list[str]:
         if segment.type == "line":
