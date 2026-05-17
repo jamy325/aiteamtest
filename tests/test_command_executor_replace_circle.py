@@ -166,3 +166,26 @@ def test_command_executor_rejects_low_confidence_circle_replacement() -> None:
         or "fit_error" in (result.reason or "")
         or "inlier" in (result.reason or "")
     )
+
+
+def test_command_executor_accepts_stable_circle_low_confidence_gate() -> None:
+    executor = CommandExecutor()
+
+    assert (
+        executor._should_reject_circle_feedback(
+            "low_confidence",
+            rmse=0.15,
+            radial_error=0.09,
+            inlier_ratio=0.94,
+        )
+        is False
+    )
+    assert (
+        executor._should_reject_circle_feedback(
+            "low_confidence",
+            rmse=0.22,
+            radial_error=0.09,
+            inlier_ratio=0.94,
+        )
+        is True
+    )

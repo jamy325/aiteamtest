@@ -136,6 +136,11 @@ class MinimalPipeline:
                     path_id=f"{prefix}_path_{index}",
                     closed=contour.closed,
                     source=contour.source,
+                    path_metadata={
+                        "source_contour_id": contour.contour_id,
+                        "source_point_count": len(contour.points),
+                        "resampled_point_count": len(resampled_points),
+                    },
                 )
                 document = add_path(document, vectorized.path)
                 for anchor in vectorized.anchors:

@@ -55,6 +55,7 @@ class CommandExecutionResult:
     topology_status: str | None
     self_intersection_count: int
     requires_rerender: bool
+    fitting_source: str | None = None
     reason: str | None = None
 
 
@@ -82,6 +83,7 @@ class CommandExecutor:
         command_id = self._command_id(command)
         old_score = self.scorer.score_document(document).total_score
         affected_path_id = self._command_path_id(command)
+        fitting_source: str | None = None
 
         try:
             execution_command, target_type = self._normalize_execution_command(command, document)
@@ -95,7 +97,14 @@ class CommandExecutor:
             target_segments = tuple(self._segment_by_id(document, segment_id) for segment_id in validation.target_segment_ids)
             self._ensure_no_dangling_constraints(document, validation.target_segment_ids[1:])
             sampled_points = self._sample_segment_range(target_segments)
-            fit_points = self._fit_points_for_command(command, sampled_points, target_type)
+            fit_points, fitting_source, raw_source_point_count = self._fit_points_for_command(
+                command,
+                document=document,
+                path=path,
+                segments=target_segments,
+                sampled_points=sampled_points,
+                target_type=target_type,
+            )
             replacement_segment = self._replacement_segment(
                 command=command,
                 target_type=target_type,
@@ -103,6 +112,8 @@ class CommandExecutor:
                 segments=target_segments,
                 points=fit_points,
                 support_points=sampled_points,
+                fitting_source=fitting_source,
+                raw_source_point_count=raw_source_point_count,
             )
             replaced_document = self._replace_segment_range(
                 document,
@@ -129,6 +140,7 @@ class CommandExecutor:
                 topology_status=final_path.topology_status,
                 self_intersection_count=final_path.self_intersection_count,
                 requires_rerender=True,
+                fitting_source=replacement_segment.metadata.get("executor", {}).get("fitting_source"),
                 reason=None,
             )
         except (CommandValidationError, KeyError, ValueError) as exc:
@@ -144,6 +156,7 @@ class CommandExecutor:
                 topology_status=None if current_path is None else current_path.topology_status,
                 self_intersection_count=0 if current_path is None else current_path.self_intersection_count,
                 requires_rerender=False,
+                fitting_source=fitting_source,
                 reason=str(exc),
             )
 
@@ -156,6 +169,8 @@ class CommandExecutor:
         segments: tuple[Segment, ...],
         points: tuple[Point, ...],
         support_points: tuple[Point, ...],
+        fitting_source: str,
+        raw_source_point_count: int | None,
     ) -> Segment:
         primary_segment = segments[0]
         first_point = points[0]
@@ -188,6 +203,7 @@ class CommandExecutor:
                 initial_inlier_ratio=initial.inlier_ratio,
                 refined=refined,
                 params=params,
+                fitting_source=fitting_source,
             )
             if self._should_reject_line_feedback(feedback.reason, refined.rmse):
                 raise ValueError(feedback.reason or feedback.suggestion)
@@ -217,6 +233,7 @@ class CommandExecutor:
                 initial_fit_error=initial.fit_error,
                 refined=refined,
                 support_coverage=arc_coverage,
+                fitting_source=fitting_source,
             )
             if self._should_reject_arc_feedback(
                 feedback.reason,
@@ -245,8 +262,14 @@ class CommandExecutor:
                 initial_inlier_ratio=initial.inlier_ratio,
                 initial_fit_error=initial.fit_error,
                 refined=refined,
+                fitting_source=fitting_source,
             )
-            if self._should_reject_circle_feedback(feedback.reason):
+            if self._should_reject_circle_feedback(
+                feedback.reason,
+                rmse=refined.rmse,
+                radial_error=initial.fit_error,
+                inlier_ratio=initial.inlier_ratio,
+            ):
                 raise ValueError(feedback.reason or feedback.suggestion)
         elif target_type == "ellipse":
             ransac = RansacEllipseFitter(
@@ -270,7 +293,7 @@ class CommandExecutor:
             }
             confidence = refined.inlier_ratio
             fit_error = refined.fit_error
-            feedback = self._ellipse_refinement_feedback(refined=refined)
+            feedback = self._ellipse_refinement_feedback(refined=refined, fitting_source=fitting_source)
             if self._should_reject_ellipse_feedback(feedback.reason):
                 raise ValueError(feedback.reason or feedback.suggestion)
         else:
@@ -280,6 +303,10 @@ class CommandExecutor:
         metadata["executor"] = {
             "tool": self._command_tool(command),
             "command_id": self._command_id(command),
+            "fitting_source": fitting_source,
+            "fitting_point_count": len(points),
+            "support_point_count": len(support_points),
+            "raw_source_point_count": raw_source_point_count,
         }
         return Segment(
             segment_id=primary_segment.segment_id,
@@ -300,6 +327,7 @@ class CommandExecutor:
         initial_inlier_ratio: float,
         refined: PreciseLineResult,
         params: dict[str, object],
+        fitting_source: str,
     ) -> object:
         start = self._coerce_point(params["start"])
         end = self._coerce_point(params["end"])
@@ -319,6 +347,7 @@ class CommandExecutor:
                 inlier_ratio=initial_inlier_ratio,
                 fit_error=refined.rmse,
                 confidence_result=confidence_result,
+                fitting_source=fitting_source,
             )
         )
 
@@ -338,6 +367,7 @@ class CommandExecutor:
         initial_fit_error: float,
         refined: object,
         support_coverage: float,
+        fitting_source: str,
     ) -> object:
         params = refined.params
         segment_length = support_coverage * float(params["r"])
@@ -358,6 +388,7 @@ class CommandExecutor:
                 inlier_ratio=initial_inlier_ratio,
                 fit_error=refined.rmse,
                 confidence_result=confidence_result,
+                fitting_source=fitting_source,
             )
         )
 
@@ -367,6 +398,7 @@ class CommandExecutor:
         initial_inlier_ratio: float,
         initial_fit_error: float,
         refined: object,
+        fitting_source: str,
     ) -> object:
         radius = float(refined.params["r"])
         confidence_result = self.fitting_confidence_metric.evaluate(
@@ -385,10 +417,11 @@ class CommandExecutor:
                 inlier_ratio=initial_inlier_ratio,
                 fit_error=refined.rmse,
                 confidence_result=confidence_result,
+                fitting_source=fitting_source,
             )
         )
 
-    def _ellipse_refinement_feedback(self, *, refined: object) -> object:
+    def _ellipse_refinement_feedback(self, *, refined: object, fitting_source: str) -> object:
         confidence_result = FittingConfidenceResult(
             confidence=self._ellipse_confidence(refined.inlier_ratio, refined.fit_error),
             failure_reason=None,
@@ -399,6 +432,7 @@ class CommandExecutor:
                 inlier_ratio=refined.inlier_ratio,
                 fit_error=refined.fit_error,
                 confidence_result=confidence_result,
+                fitting_source=fitting_source,
             )
         )
 
@@ -413,8 +447,27 @@ class CommandExecutor:
             return False
         return True
 
-    def _should_reject_circle_feedback(self, reason: str | None) -> bool:
-        return reason is not None
+    def _should_reject_circle_feedback(
+        self,
+        reason: str | None,
+        *,
+        rmse: float,
+        radial_error: float,
+        inlier_ratio: float,
+    ) -> bool:
+        if reason is None:
+            return False
+        if (
+            reason == "low_confidence"
+            and rmse <= (self.refinement_feedback.config.max_fit_error * 0.72)
+            and radial_error <= (self.refinement_feedback.config.max_fit_error * 0.6)
+            and inlier_ratio >= max(
+                self.refinement_feedback.config.min_inlier_ratio,
+                self.fitting_confidence_metric.config.target_inlier_ratio - 0.05,
+            )
+        ):
+            return False
+        return True
 
     def _should_reject_ellipse_feedback(self, reason: str | None) -> bool:
         return reason is not None
@@ -484,12 +537,33 @@ class CommandExecutor:
     def _fit_points_for_command(
         self,
         command: object,
+        *,
+        document: VectorDocument,
+        path: Path,
+        segments: tuple[Segment, ...],
         sampled_points: tuple[Point, ...],
         target_type: str,
-    ) -> tuple[Point, ...]:
+    ) -> tuple[tuple[Point, ...], str, int | None]:
+        raw_points = self._raw_source_points_for_command(
+            document=document,
+            path=path,
+            segments=segments,
+            support_points=sampled_points,
+            command=command,
+            target_type=target_type,
+        )
+        if raw_points is not None:
+            if self._command_tool(command) in PATH_REPLACE_TOOL_TO_TYPE:
+                return (
+                    self._prepared_raw_fitting_points(raw_points, path_closed=path.closed),
+                    "raw_contour_points",
+                    len(raw_points),
+                )
+            return (self._fit_points(raw_points, target_type), "raw_contour_points", len(raw_points))
+
         if self._command_tool(command) in PATH_REPLACE_TOOL_TO_TYPE:
-            return self._dedupe_points(sampled_points)
-        return self._fit_points(sampled_points, target_type)
+            return (self._dedupe_points(sampled_points), "segment_samples_fallback", None)
+        return (self._fit_points(sampled_points, target_type), "segment_samples_fallback", None)
 
     def _sample_segment_range(self, segments: tuple[Segment, ...]) -> tuple[Point, ...]:
         sampled_points: list[Point] = []
@@ -502,6 +576,171 @@ class CommandExecutor:
             else:
                 sampled_points.extend(current)
         return self._dedupe_points(tuple(sampled_points))
+
+    def _raw_source_points_for_command(
+        self,
+        *,
+        document: VectorDocument,
+        path: Path,
+        segments: tuple[Segment, ...],
+        support_points: tuple[Point, ...],
+        command: object,
+        target_type: str,
+    ) -> tuple[Point, ...] | None:
+        if target_type not in {"arc", "circle", "ellipse"}:
+            return None
+        raw_points = self._raw_source_points_for_path(document, path)
+        if raw_points is None or len(raw_points) < self._min_points(target_type):
+            return None
+        if self._command_tool(command) in PATH_REPLACE_TOOL_TO_TYPE:
+            return raw_points
+        raw_range_points = self._raw_points_for_segment_range(path, segments, raw_points, support_points)
+        if raw_range_points is None:
+            return None
+        return self._prepared_raw_fitting_points(raw_range_points, path_closed=path.closed)
+
+    def _raw_source_points_for_path(self, document: VectorDocument, path: Path) -> tuple[Point, ...] | None:
+        contour_id = path.metadata.get("source_contour_id")
+        if contour_id is None:
+            return None
+        pipeline_metadata = document.metadata.get("pipeline")
+        if not isinstance(pipeline_metadata, dict):
+            return None
+        contour_group = pipeline_metadata.get("source_contours")
+        if not isinstance(contour_group, dict):
+            return None
+        for group_name in ("binary_contours", "skeleton_contours"):
+            contours = contour_group.get(group_name, ())
+            if not isinstance(contours, list):
+                continue
+            for contour in contours:
+                if not isinstance(contour, dict) or contour.get("contour_id") != contour_id:
+                    continue
+                points = contour.get("points")
+                if not isinstance(points, list):
+                    return None
+                coerced = self._coerce_points(points)
+                if not coerced:
+                    return None
+                deduped = self._dedupe_points(coerced)
+                if len(deduped) > 1 and PrecisionUtility.points_close(deduped[0], deduped[-1]):
+                    deduped = deduped[:-1]
+                return deduped
+        return None
+
+    def _prepared_raw_fitting_points(
+        self,
+        points: tuple[Point, ...],
+        *,
+        path_closed: bool,
+    ) -> tuple[Point, ...]:
+        deduped = self._dedupe_points(points)
+        if len(deduped) <= 8:
+            return deduped
+        window = self._raw_smoothing_window(len(deduped))
+        if window <= 1:
+            return deduped
+        return self._smooth_point_sequence(deduped, window=window, closed=path_closed)
+
+    def _raw_smoothing_window(self, point_count: int) -> int:
+        if point_count < 64:
+            return 1
+        window = max(3, min(15, point_count // 24))
+        if window % 2 == 0:
+            window += 1
+        return window
+
+    def _smooth_point_sequence(
+        self,
+        points: tuple[Point, ...],
+        *,
+        window: int,
+        closed: bool,
+    ) -> tuple[Point, ...]:
+        if window <= 1 or len(points) <= 2:
+            return points
+        radius = window // 2
+        smoothed: list[Point] = []
+        last_index = len(points) - 1
+        for index in range(len(points)):
+            if closed:
+                samples = [points[(index + offset) % len(points)] for offset in range(-radius, radius + 1)]
+            else:
+                samples = [points[min(max(index + offset, 0), last_index)] for offset in range(-radius, radius + 1)]
+            smoothed.append(
+                (
+                    sum(sample[0] for sample in samples) / len(samples),
+                    sum(sample[1] for sample in samples) / len(samples),
+                )
+            )
+        return tuple(smoothed)
+
+    def _raw_points_for_segment_range(
+        self,
+        path: Path,
+        segments: tuple[Segment, ...],
+        raw_points: tuple[Point, ...],
+        support_points: tuple[Point, ...],
+    ) -> tuple[Point, ...] | None:
+        start_point = self._segment_start_point(segments[0])
+        end_point = self._segment_end_point(segments[-1])
+        if start_point is None or end_point is None:
+            return None
+        start_index = self._nearest_point_index(raw_points, start_point)
+        end_index = self._nearest_point_index(raw_points, end_point)
+        if start_index is None or end_index is None:
+            return None
+
+        if path.closed:
+            forward = self._closed_point_slice(raw_points, start_index, end_index)
+            backward = tuple(reversed(self._closed_point_slice(raw_points, end_index, start_index)))
+            candidate = self._best_oriented_sequence((forward, backward), support_points)
+        else:
+            low = min(start_index, end_index)
+            high = max(start_index, end_index)
+            base = raw_points[low : high + 1]
+            forward = base if start_index <= end_index else tuple(reversed(base))
+            backward = tuple(reversed(forward))
+            candidate = self._best_oriented_sequence((forward, backward), support_points)
+
+        deduped = self._dedupe_points(candidate)
+        return deduped if deduped else None
+
+    def _best_oriented_sequence(
+        self,
+        candidates: tuple[tuple[Point, ...], ...],
+        support_points: tuple[Point, ...],
+    ) -> tuple[Point, ...]:
+        if not support_points:
+            return candidates[0]
+        best = candidates[0]
+        best_score = math.inf
+        for candidate in candidates:
+            if not candidate:
+                continue
+            score = (
+                PrecisionUtility.distance_between_points(candidate[0], support_points[0])
+                + PrecisionUtility.distance_between_points(candidate[-1], support_points[-1])
+            )
+            if len(candidate) > 2 and len(support_points) > 2:
+                score += PrecisionUtility.distance_between_points(
+                    candidate[len(candidate) // 2],
+                    support_points[len(support_points) // 2],
+                )
+            if score < best_score:
+                best = candidate
+                best_score = score
+        return best
+
+    def _closed_point_slice(
+        self,
+        points: tuple[Point, ...],
+        start_index: int,
+        end_index: int,
+    ) -> tuple[Point, ...]:
+        if start_index <= end_index:
+            return points[start_index : end_index + 1]
+        return points[start_index:] + points[: end_index + 1]
 
     def _replace_segment_range(
         self,
@@ -660,6 +899,39 @@ class CommandExecutor:
             if path.path_id == path_id:
                 return index
         return None
+
+    def _segment_start_point(self, segment: Segment) -> Point | None:
+        if "start" in segment.params:
+            return self._coerce_point(segment.params["start"])
+        points = segment.params.get("points")
+        if isinstance(points, list) and points:
+            return self._coerce_point(points[0])
+        return None
+
+    def _segment_end_point(self, segment: Segment) -> Point | None:
+        if "end" in segment.params:
+            return self._coerce_point(segment.params["end"])
+        points = segment.params.get("points")
+        if isinstance(points, list) and points:
+            return self._coerce_point(points[-1])
+        return None
+
+    def _nearest_point_index(self, points: tuple[Point, ...], target: Point) -> int | None:
+        if not points:
+            return None
+        return min(
+            range(len(points)),
+            key=lambda index: PrecisionUtility.distance_between_points(points[index], target),
+        )
+
+    def _coerce_points(self, values: list[object]) -> tuple[Point, ...]:
+        points: list[Point] = []
+        for value in values:
+            try:
+                points.append(self._coerce_point(value))
+            except (TypeError, ValueError):
+                return ()
+        return tuple(points)
 
     def _dedupe_points(self, points: tuple[Point, ...]) -> tuple[Point, ...]:
         if not points:
