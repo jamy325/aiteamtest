@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+from typing import Literal
 from xml.etree import ElementTree as ET
 
 from core.coordinate import CoordinateTransformer
@@ -11,6 +12,7 @@ from services.segment_sampler import SegmentSampler
 
 SVG_NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG_NS)
+ExportMode = Literal["outline", "centerline", "all_debug"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +30,7 @@ class SvgExporter:
     def __post_init__(self) -> None:
         object.__setattr__(self, "_segment_sampler", SegmentSampler())
 
-    def export_document(self, document: VectorDocument) -> str:
+    def export_document(self, document: VectorDocument, *, export_mode: ExportMode = "all_debug") -> str:
         transformer = CoordinateTransformer(document.coordinate_system)
         root = ET.Element(self._qualified("svg"))
         root.set("version", "1.1")
@@ -37,7 +39,11 @@ class SvgExporter:
         root.set("viewBox", self._view_box(document, transformer))
 
         paths_by_id = {path.path_id: path for path in document.paths}
-        for path in document.paths:
+        selected_paths = self._selected_paths(document, export_mode)
+        if not selected_paths:
+            metadata = ET.SubElement(root, self._qualified("metadata"))
+            metadata.text = f"warning: no paths selected for export_mode={export_mode}"
+        for path in selected_paths:
             if path.parent_path is not None:
                 continue
             element = self._path_element(document, path, paths_by_id, transformer)
@@ -45,6 +51,34 @@ class SvgExporter:
 
         self._indent(root)
         return ET.tostring(root, encoding="unicode")
+
+    def export_report(self, document: VectorDocument, *, export_mode: ExportMode = "all_debug") -> dict[str, object]:
+        selected_paths = self._selected_paths(document, export_mode)
+        exported_by_source = self._count_sources(selected_paths)
+        skipped_paths = tuple(path for path in document.paths if path not in selected_paths)
+        return {
+            "export_mode": export_mode,
+            "exported_path_count": len(selected_paths),
+            "skipped_path_count": len(skipped_paths),
+            "exported_by_source": exported_by_source,
+            "skipped_by_source": self._count_sources(skipped_paths),
+            "warning": None if selected_paths else f"no paths selected for export_mode={export_mode}",
+        }
+
+    def _selected_paths(self, document: VectorDocument, export_mode: ExportMode) -> tuple[Path, ...]:
+        if export_mode == "all_debug":
+            return document.paths
+        if export_mode == "outline":
+            return tuple(path for path in document.paths if path.source == "binary_contour")
+        if export_mode == "centerline":
+            return tuple(path for path in document.paths if path.source == "skeleton_contour")
+        raise ValueError(f"unsupported export_mode: {export_mode}")
+
+    def _count_sources(self, paths: tuple[Path, ...] | list[Path]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for path in paths:
+            counts[path.source] = counts.get(path.source, 0) + 1
+        return counts
 
     def _path_element(
         self,
@@ -308,4 +342,4 @@ class SvgExporter:
             element.tail = indent
 
 
-__all__ = ["SvgExporter"]
+__all__ = ["ExportMode", "SvgExporter"]
