@@ -12,3 +12,4 @@ build/
 .env.*
 *.pem
 *.key
+out/

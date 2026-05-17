@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--export-mode", choices=("outline", "centerline", "all_debug"), default="centerline")
 args = parser.parse_args()
 
-input_image = Path("test_input.png")
+input_image = Path("test_images/test_input.png")
 out = Path("out/p1_manual_test")
 debug_out = out / "debug"
 out.mkdir(parents=True, exist_ok=True)
