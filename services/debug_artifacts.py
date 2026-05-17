@@ -129,6 +129,10 @@ class DebugArtifactExporter:
                 "binary_contours_skipped_for_vectorization": int(skipped_binary_count),
                 "skeleton_contours_skipped_for_vectorization": int(skipped_skeleton_count),
             },
+            "skeleton_simplification": self._summarize_skeleton_simplification(
+                contour_debug.skeleton_contours,
+                resampled_skeleton,
+            ),
             "filtered_binary_contours": list(contour_debug.filtered_binary_contours),
             "filtered_skeleton_contours": list(contour_debug.filtered_skeleton_contours),
             "timings_ms": dict(contour_debug.timings_ms),
@@ -145,6 +149,49 @@ class DebugArtifactExporter:
             exported_files=tuple(sorted(exported_files)),
             summary=summary,
         )
+
+    def _summarize_skeleton_simplification(
+        self,
+        original_contours: tuple[BinaryContour, ...],
+        simplified_contours: tuple[tuple[str, tuple[Point, ...]], ...],
+    ) -> dict[str, Any]:
+        original_lookup = {contour.contour_id: contour for contour in original_contours}
+        entries: list[dict[str, Any]] = []
+        total_original_points = 0
+        total_simplified_points = 0
+        total_original_segments = 0
+        total_simplified_segments = 0
+
+        for contour_id, simplified_points in simplified_contours:
+            original = original_lookup.get(contour_id)
+            if original is None:
+                continue
+            original_point_count = len(original.points)
+            simplified_point_count = len(simplified_points)
+            original_segment_count = self._segment_count_for_points(original_point_count, original.closed)
+            simplified_segment_count = self._segment_count_for_points(simplified_point_count, original.closed)
+            total_original_points += original_point_count
+            total_simplified_points += simplified_point_count
+            total_original_segments += original_segment_count
+            total_simplified_segments += simplified_segment_count
+            entries.append(
+                {
+                    "contour_id": contour_id,
+                    "closed": original.closed,
+                    "original_point_count": original_point_count,
+                    "simplified_point_count": simplified_point_count,
+                    "original_segment_count": original_segment_count,
+                    "simplified_segment_count": simplified_segment_count,
+                }
+            )
+
+        return {
+            "original_point_count": total_original_points,
+            "simplified_point_count": total_simplified_points,
+            "original_segment_count": total_original_segments,
+            "simplified_segment_count": total_simplified_segments,
+            "per_contour": entries,
+        }
 
     def _create_run_directory(self, document_id: str) -> Path:
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -292,6 +339,13 @@ class DebugArtifactExporter:
             return (float(value[0]), float(value[1]))
         except (TypeError, ValueError):
             return None
+
+    def _segment_count_for_points(self, point_count: int, closed: bool) -> int:
+        if point_count <= 1:
+            return 0
+        if closed:
+            return point_count - 1
+        return max(0, point_count - 1)
 
     def _point_to_pixel(self, transformer: CoordinateTransformer, point: Point) -> tuple[int, int]:
         pixel = transformer.vector_to_pixel(point)

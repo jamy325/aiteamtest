@@ -77,7 +77,10 @@ class MinimalPipeline:
 
         resample_start = perf_counter()
         resampled_binary = tuple(self._resample_contour(contour) for contour in extracted_contours.binary_contours)
-        resampled_skeleton = tuple(self._resample_contour(contour) for contour in extracted_contours.skeleton_contours)
+        resampled_skeleton = tuple(
+            self._resample_contour(contour, simplify_linear=True)
+            for contour in extracted_contours.skeleton_contours
+        )
         resample_elapsed_ms = (perf_counter() - resample_start) * 1000.0
 
         document = updated(
@@ -248,10 +251,17 @@ class MinimalPipeline:
             Path(output_path).write_bytes(encoded)
         return encoded
 
-    def _resample_contour(self, contour: BinaryContour) -> tuple[str, tuple[tuple[float, float], ...]]:
+    def _resample_contour(
+        self,
+        contour: BinaryContour,
+        *,
+        simplify_linear: bool = False,
+    ) -> tuple[str, tuple[tuple[float, float], ...]]:
         if contour.coordinate_space != "vector":
             raise ValueError("minimal pipeline expects Vector Space contours")
         points = self.resampler.resample(contour.points, closed=contour.closed)
+        if simplify_linear:
+            points = self.resampler.simplify_linear_contour(points, closed=contour.closed)
         return (contour.contour_id, points)
 
     def _serialize_contour(self, contour: BinaryContour) -> dict[str, Any]:

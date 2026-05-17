@@ -24,6 +24,8 @@ class ResamplerConfig:
     preserve_corners: bool = True
     noise_threshold_mode: NoiseThresholdMode = "absolute"
     noise_scale_ratio: float = 0.08
+    skeleton_rdp_epsilon: float | None = None
+    skeleton_rdp_epsilon_ratio: float = 0.01
 
 
 class Resampler:
@@ -51,6 +53,29 @@ class Resampler:
             sampled = sampled + (sampled[0],)
         return sampled
 
+    def simplify_linear_contour(
+        self,
+        points: tuple[Point, ...] | list[Point],
+        *,
+        closed: bool = False,
+        epsilon: float | None = None,
+    ) -> tuple[Point, ...]:
+        normalized = self._normalize_points(points, closed=closed)
+        if len(normalized) <= 2:
+            return self._close_points(normalized, closed=closed)
+
+        effective_epsilon = self._skeleton_rdp_epsilon(normalized, epsilon)
+        if closed:
+            simplified = self._rdp_closed(normalized, effective_epsilon)
+            if len(simplified) < 4:
+                return self._close_points(normalized, closed=True)
+            return self._close_points(simplified, closed=True)
+
+        simplified = self._rdp_open(normalized, effective_epsilon)
+        if len(simplified) < 2:
+            return (normalized[0], normalized[-1])
+        return simplified
+
     def _resample_simple_path(self, points: tuple[Point, ...], closed: bool) -> tuple[Point, ...]:
         if len(points) <= 1:
             return points
@@ -63,6 +88,76 @@ class Resampler:
         if closed and sampled and sampled[0] != sampled[-1]:
             sampled = sampled + (sampled[0],)
         return sampled
+
+    def _skeleton_rdp_epsilon(self, points: tuple[Point, ...], epsilon: float | None) -> float:
+        if epsilon is not None:
+            return max(float(epsilon), self.config.duplicate_epsilon)
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        diagonal = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+        return max(self.config.duplicate_epsilon, diagonal * self.config.skeleton_rdp_epsilon_ratio)
+
+    def _rdp_closed(self, points: tuple[Point, ...], epsilon: float) -> tuple[Point, ...]:
+        if len(points) <= 3:
+            return points
+
+        split_index = self._farthest_point_index(points)
+        if split_index <= 0 or split_index >= len(points) - 1:
+            return points
+
+        first_chain = points[: split_index + 1]
+        second_chain = points[split_index:] + (points[0],)
+        simplified_first = self._rdp_open(first_chain, epsilon)
+        simplified_second = self._rdp_open(second_chain, epsilon)
+        merged = self._dedupe_adjacent_points(simplified_first[:-1] + simplified_second[:-1])
+        return merged if len(merged) >= 3 else points
+
+    def _rdp_open(self, points: tuple[Point, ...], epsilon: float) -> tuple[Point, ...]:
+        if len(points) <= 2:
+            return points
+
+        start = points[0]
+        end = points[-1]
+        max_distance = -1.0
+        split_index = -1
+        for index in range(1, len(points) - 1):
+            distance = self._distance_to_segment(points[index], start, end)
+            if distance > max_distance:
+                max_distance = distance
+                split_index = index
+
+        if max_distance > epsilon and split_index > 0:
+            left = self._rdp_open(points[: split_index + 1], epsilon)
+            right = self._rdp_open(points[split_index:], epsilon)
+            return left[:-1] + right
+        return (start, end)
+
+    def _farthest_point_index(self, points: tuple[Point, ...]) -> int:
+        origin = points[0]
+        farthest_index = 0
+        farthest_distance = -1.0
+        for index in range(1, len(points)):
+            distance = PrecisionUtility.distance_between_points(origin, points[index])
+            if distance > farthest_distance:
+                farthest_distance = distance
+                farthest_index = index
+        return farthest_index
+
+    def _dedupe_adjacent_points(self, points: tuple[Point, ...]) -> tuple[Point, ...]:
+        if not points:
+            return ()
+        deduped = [points[0]]
+        for point in points[1:]:
+            if not PrecisionUtility.points_close(deduped[-1], point, epsilon=self.config.duplicate_epsilon):
+                deduped.append(point)
+        return tuple(deduped)
+
+    def _close_points(self, points: tuple[Point, ...], *, closed: bool) -> tuple[Point, ...]:
+        if not closed or not points:
+            return points
+        if PrecisionUtility.points_close(points[0], points[-1], epsilon=self.config.duplicate_epsilon):
+            return points
+        return points + (points[0],)
 
     def _normalize_points(self, points: tuple[Point, ...] | list[Point], closed: bool) -> tuple[Point, ...]:
         normalized: list[Point] = []
