@@ -101,6 +101,69 @@ def test_dxf_exporter_applies_px_to_mm_and_y_axis_flip_for_line() -> None:
     assert line["21"] == ["30"]
 
 
+def test_dxf_exporter_writes_closed_rectangle_as_closed_lwpolyline() -> None:
+    document = _document(unit="px", y_axis="down", px_to_mm=1.0)
+    path = VectorPath(path_id="rect", segments=("s1", "s2", "s3", "s4"), closed=True, topology_status="closed")
+    document = add_path(document, path)
+    for segment in (
+        Segment("s1", "rect", "line", {"start": [10.0, 10.0], "end": [90.0, 10.0]}),
+        Segment("s2", "rect", "line", {"start": [90.0, 10.0], "end": [90.0, 90.0]}),
+        Segment("s3", "rect", "line", {"start": [90.0, 90.0], "end": [10.0, 90.0]}),
+        Segment("s4", "rect", "line", {"start": [10.0, 90.0], "end": [10.0, 10.0]}),
+    ):
+        document = add_segment(document, segment)
+
+    entities = _parse_entities(DxfExporter().export_document(document))
+
+    assert len(entities) == 1
+    polyline = entities[0]
+    assert polyline["0"] == ["LWPOLYLINE"]
+    assert polyline["70"] == ["1"]
+    assert polyline["90"] == ["4"]
+
+
+def test_dxf_exporter_writes_open_line_path_as_open_lwpolyline() -> None:
+    document = _document(unit="px", y_axis="down", px_to_mm=1.0)
+    path = VectorPath(path_id="open_poly", segments=("s1", "s2", "s3"), closed=False, topology_status="open")
+    document = add_path(document, path)
+    for segment in (
+        Segment("s1", "open_poly", "line", {"start": [10.0, 10.0], "end": [20.0, 10.0]}),
+        Segment("s2", "open_poly", "line", {"start": [20.0, 10.0], "end": [20.0, 20.0]}),
+        Segment("s3", "open_poly", "line", {"start": [20.0, 20.0], "end": [30.0, 20.0]}),
+    ):
+        document = add_segment(document, segment)
+
+    entities = _parse_entities(DxfExporter().export_document(document))
+
+    assert len(entities) == 1
+    polyline = entities[0]
+    assert polyline["0"] == ["LWPOLYLINE"]
+    assert polyline["70"] == ["0"]
+    assert polyline["90"] == ["4"]
+
+
+def test_dxf_exporter_falls_back_when_closed_line_path_is_discontinuous() -> None:
+    document = _document(unit="px", y_axis="down", px_to_mm=1.0)
+    path = VectorPath(path_id="broken", segments=("s1", "s2", "s3", "s4"), closed=True, topology_status="closed")
+    document = add_path(document, path)
+    for segment in (
+        Segment("s1", "broken", "line", {"start": [10.0, 10.0], "end": [90.0, 10.0]}),
+        Segment("s2", "broken", "line", {"start": [90.0, 10.0], "end": [90.0, 90.0]}),
+        Segment("s3", "broken", "line", {"start": [90.0, 90.0], "end": [10.0, 90.0]}),
+        Segment("s4", "broken", "line", {"start": [12.0, 90.0], "end": [10.0, 10.0]}),
+    ):
+        document = add_segment(document, segment)
+
+    payload = DxfExporter().export_document(document)
+    entities = _parse_entities(payload)
+    report = DxfExporter().export_report(document)
+
+    assert len(entities) == 4
+    assert all(entity["0"] == ["LINE"] for entity in entities)
+    assert "not continuous enough for closed LWPOLYLINE fallback" in payload
+    assert report["warnings"]
+
+
 def test_dxf_exporter_supports_arc_and_circle_entities() -> None:
     document = _document(unit="mm", y_axis="up")
     arc_path = VectorPath(path_id="p_arc", segments=("s_arc",))
