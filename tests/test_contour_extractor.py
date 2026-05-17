@@ -10,6 +10,9 @@ from core.types import CoordinateSystem
 from services.contour_extractor import ContourExtractor
 
 
+FIXTURE_ROOT = Path("tests/fixtures/debug_artifacts")
+
+
 def _chebyshev_distance(left: tuple[float, float], right: tuple[float, float]) -> float:
     return max(abs(left[0] - right[0]), abs(left[1] - right[1]))
 
@@ -20,6 +23,15 @@ def _assert_continuous_points(points: tuple[tuple[float, float], ...], *, closed
         assert _chebyshev_distance(left, right) <= 1.0
     if closed and len(points) > 1:
         assert _chebyshev_distance(points[-1], points[0]) <= 1.0
+
+
+def _contour_touches_page_border(points: tuple[tuple[float, float], ...], image_shape: tuple[int, int]) -> bool:
+    height, width = image_shape
+    if not points:
+        return False
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs) <= 0.0 or min(ys) <= 0.0 or max(xs) >= float(width - 1) or max(ys) >= float(height - 1)
 
 
 def test_extract_binary_contours_preserves_hierarchy_and_fields() -> None:
@@ -213,3 +225,25 @@ def test_contour_extractor_has_no_forbidden_dependencies() -> None:
 
     assert imports.isdisjoint(forbidden_imports)
     assert "VectorDocument" not in source
+
+
+def test_auto_foreground_polarity_rejects_page_border_for_black_square_fixture() -> None:
+    image = cv2.imread(str(FIXTURE_ROOT / "black_square_on_white.png"), cv2.IMREAD_COLOR)
+    extracted, debug = ContourExtractor().extract_contours_with_debug(image)
+
+    assert debug.foreground_mode == "dark_on_light"
+    assert debug.threshold_polarity == "dark_on_light"
+    assert "border_foreground_ratio" in debug.foreground_reason
+    assert all(not (item.get("touches_border") and item.get("bbox_coverage", 0.0) >= 0.98 and not item.get("filtered")) for item in debug.binary_contours_hierarchy)
+    assert all(not _contour_touches_page_border(contour.points, image.shape[:2]) for contour in extracted.binary_contours)
+    assert all(not _contour_touches_page_border(contour.points, image.shape[:2]) for contour in extracted.skeleton_contours)
+
+
+def test_auto_foreground_polarity_rejects_page_border_for_blue_circle_fixture() -> None:
+    image = cv2.imread(str(FIXTURE_ROOT / "blue_circle_on_white.png"), cv2.IMREAD_COLOR)
+    extracted, debug = ContourExtractor().extract_contours_with_debug(image)
+
+    assert debug.foreground_mode == "dark_on_light"
+    assert all(not (item.get("touches_border") and item.get("bbox_coverage", 0.0) >= 0.98 and not item.get("filtered")) for item in debug.binary_contours_hierarchy)
+    assert all(not _contour_touches_page_border(contour.points, image.shape[:2]) for contour in extracted.binary_contours)
+    assert all(not _contour_touches_page_border(contour.points, image.shape[:2]) for contour in extracted.skeleton_contours)

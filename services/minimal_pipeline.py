@@ -161,6 +161,10 @@ class MinimalPipeline:
                 skeleton_contours=contour_debug.skeleton_contours,
                 timings_ms=timings_ms,
                 threshold_polarity=contour_debug.threshold_polarity,
+                foreground_mode=contour_debug.foreground_mode,
+                foreground_reason=contour_debug.foreground_reason,
+                filtered_binary_contours=contour_debug.filtered_binary_contours,
+                filtered_skeleton_contours=contour_debug.filtered_skeleton_contours,
             )
             debug_artifacts = DebugArtifactExporter(
                 output_root=debug_output_dir,

@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from core.types import CoordinateSystem
+from services.contour_extractor import ContourExtractor
 from services.minimal_pipeline import MinimalPipeline
 
 
@@ -17,6 +18,23 @@ def _artifact_dir(root: Path) -> Path:
     directories = [path for path in root.iterdir() if path.is_dir()]
     assert len(directories) == 1
     return directories[0]
+
+
+def _assert_outer_frame_unchanged(overlay: np.ndarray, image: np.ndarray) -> None:
+    original = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    diff = np.any(overlay != original, axis=2)
+    border = np.zeros(diff.shape, dtype=bool)
+    border[0, :] = True
+    border[-1, :] = True
+    border[:, 0] = True
+    border[:, -1] = True
+    changed_border_pixels = int((diff & border).sum())
+
+    assert changed_border_pixels < 20
+    assert np.array_equal(overlay[0, 0], original[0, 0])
+    assert np.array_equal(overlay[0, -1], original[0, -1])
+    assert np.array_equal(overlay[-1, 0], original[-1, 0])
+    assert np.array_equal(overlay[-1, -1], original[-1, -1])
 
 
 def test_minimal_pipeline_debug_exports_black_square_fixture_artifacts(tmp_path: Path) -> None:
@@ -63,7 +81,11 @@ def test_minimal_pipeline_debug_exports_black_square_fixture_artifacts(tmp_path:
     assert set(summary["timings_ms"]).issuperset(
         {"grayscale", "binary_preprocess", "binary_contours", "skeleton", "resampling", "vectorization"}
     )
-    assert summary["threshold_polarity"] == "foreground_white"
+    assert summary["threshold_polarity"] == "dark_on_light"
+    assert summary["foreground_mode"] == "dark_on_light"
+    assert "border_foreground_ratio" in summary["foreground_reason"]
+    assert "filtered_binary_contours" in summary
+    assert "filtered_skeleton_contours" in summary
 
 
 def test_minimal_pipeline_debug_exports_blue_circle_fixture_hierarchy_metadata(tmp_path: Path) -> None:
@@ -81,11 +103,52 @@ def test_minimal_pipeline_debug_exports_blue_circle_fixture_hierarchy_metadata(t
     hierarchy = json.loads((output_dir / "binary_contours_hierarchy.json").read_text(encoding="utf-8"))
 
     assert hierarchy
-    required_fields = {"contour_id", "area", "bbox", "depth", "parent", "children", "touches_border", "bbox_coverage"}
+    required_fields = {
+        "contour_id",
+        "area",
+        "bbox",
+        "depth",
+        "parent",
+        "children",
+        "touches_border",
+        "bbox_coverage",
+        "filtered",
+        "filter_reason",
+    }
     assert all(required_fields.issubset(item) for item in hierarchy)
     assert (output_dir / "binary_contours_overlay.png").exists()
     assert (output_dir / "skeleton_contours_overlay.png").exists()
     assert (output_dir / "vector_overlay_debug.png").exists()
+
+
+def test_filtered_binary_page_border_is_not_drawn_in_normal_overlay() -> None:
+    image = cv2.imread(str(FIXTURE_ROOT / "black_square_on_white.png"), cv2.IMREAD_COLOR)
+
+    _, debug = ContourExtractor(foreground_mode="light_on_dark").extract_contours_with_debug(image)
+
+    assert debug.filtered_binary_contours
+    assert any(
+        item["reason"] == "page_border_filter"
+        and item["touches_border"] is True
+        and float(item["bbox_coverage"]) >= 0.98
+        for item in debug.filtered_binary_contours
+    )
+    _assert_outer_frame_unchanged(debug.binary_contours_overlay, image)
+
+
+def test_filtered_skeleton_page_border_is_not_drawn_in_normal_overlay() -> None:
+    image = cv2.imread(str(FIXTURE_ROOT / "black_square_on_white.png"), cv2.IMREAD_COLOR)
+
+    _, debug = ContourExtractor(foreground_mode="light_on_dark").extract_contours_with_debug(image)
+
+    assert debug.filtered_skeleton_contours
+    assert any(
+        item["reason"] == "page_border_filter"
+        and item["touches_border"] is True
+        and float(item["bbox_coverage"]) >= 0.98
+        for item in debug.filtered_skeleton_contours
+    )
+    _assert_outer_frame_unchanged(debug.skeleton_contours_overlay, image)
 
 
 def test_minimal_pipeline_debug_exports_alpha_masks_when_present(tmp_path: Path) -> None:

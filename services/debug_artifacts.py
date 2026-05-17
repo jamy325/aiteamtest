@@ -129,8 +129,12 @@ class DebugArtifactExporter:
                 "binary_contours_skipped_for_vectorization": int(skipped_binary_count),
                 "skeleton_contours_skipped_for_vectorization": int(skipped_skeleton_count),
             },
+            "filtered_binary_contours": list(contour_debug.filtered_binary_contours),
+            "filtered_skeleton_contours": list(contour_debug.filtered_skeleton_contours),
             "timings_ms": dict(contour_debug.timings_ms),
             "threshold_polarity": contour_debug.threshold_polarity,
+            "foreground_mode": contour_debug.foreground_mode,
+            "foreground_reason": contour_debug.foreground_reason,
             "exported_files": sorted(exported_files),
         }
         self._maybe_write_json(output_dir, "debug_summary", summary, exported_files)
