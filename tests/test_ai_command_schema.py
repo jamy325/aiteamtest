@@ -105,6 +105,87 @@ def test_ai_command_schema_accepts_valid_replace_command_and_batch() -> None:
     validate_ai_review_response(response)
 
 
+def test_ai_command_schema_accepts_path_level_commands_and_mixed_batch() -> None:
+    response = {
+        "summary": "Primitive replacements are available at both path and segment scope.",
+        "issues": [],
+        "proposed_commands": [
+            {
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "path_circle",
+                "reason": "The whole loop reads as a clean circle.",
+                "confidence": 0.87,
+                "requires_user_confirmation": True,
+                "candidate_id": "cand_circle_1",
+                "semantic_source": "ai_review",
+                "semantic_confidence": 0.92,
+                "topology_hint": "Keep the loop closed after replacement.",
+                "self_intersection_hint": None,
+                "alpha_hint": None,
+                "color_hint": None
+            },
+            {
+                "tool": "propose_replace_path_with_ellipse",
+                "path_id": "path_ellipse",
+                "reason": "The silhouette is better explained by an ellipse.",
+                "confidence": 0.83,
+                "requires_user_confirmation": True,
+                "candidate_id": "cand_ellipse_1",
+                "semantic_source": "planner",
+                "semantic_confidence": 0.89,
+                "topology_hint": None,
+                "self_intersection_hint": None,
+                "alpha_hint": None,
+                "color_hint": None
+            },
+            {
+                "tool": "propose_batch_refinement",
+                "summary": "Apply a loop replacement and a local edge cleanup together.",
+                "commands": [
+                    {
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_circle",
+                        "reason": "Keep the batch aligned with the circle interpretation.",
+                        "confidence": 0.84,
+                        "requires_user_confirmation": True,
+                        "candidate_id": "cand_circle_batch",
+                        "semantic_source": "batch_planner",
+                        "semantic_confidence": 0.9,
+                        "topology_hint": None,
+                        "self_intersection_hint": None,
+                        "alpha_hint": None,
+                        "color_hint": None
+                    },
+                    {
+                        "tool": "propose_replace_segment_with_line",
+                        "path_id": "path_line",
+                        "segment_range": [0, 1],
+                        "reason": "This local edge should remain straight.",
+                        "confidence": 0.79,
+                        "requires_user_confirmation": True,
+                        "locked_anchor_ids": [],
+                        "topology_hint": None,
+                        "self_intersection_hint": None,
+                        "alpha_hint": None,
+                        "color_hint": None
+                    }
+                ],
+                "confidence": 0.8,
+                "requires_user_confirmation": True,
+                "candidate_id": "cand_batch_1",
+                "semantic_source": "planner",
+                "semantic_confidence": 0.86,
+                "topology_hint": None,
+                "self_intersection_hint": None,
+                "alpha_hint": None,
+                "color_hint": None
+            }
+        ]
+    }
+
+    validate_ai_review_response(response)
+
+
 def test_ai_command_schema_rejects_precise_geometry_parameters() -> None:
     response = {
         "summary": "This region looks circular.",
@@ -159,6 +240,26 @@ def test_ai_command_schema_rejects_precise_angle_parameters(field_name: str, fie
                 field_name: field_value,
             }
         ],
+    }
+
+    with pytest.raises(ValidationError):
+        validate_ai_review_response(response)
+
+
+def test_ai_command_schema_rejects_invalid_path_level_semantic_confidence() -> None:
+    response = {
+        "summary": "This loop looks circular.",
+        "issues": [],
+        "proposed_commands": [
+            {
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "path_circle",
+                "reason": "The whole loop reads as a circle.",
+                "confidence": 0.88,
+                "requires_user_confirmation": True,
+                "semantic_confidence": 1.2
+            }
+        ]
     }
 
     with pytest.raises(ValidationError):

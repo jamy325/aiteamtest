@@ -54,6 +54,46 @@ def _document_for_command_validation() -> object:
     return document
 
 
+def _closed_path_document_for_command_validation() -> object:
+    document = create_document(
+        document_id="doc_path_command_schema",
+        width=100.0,
+        height=100.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="closed_path",
+            closed=True,
+            segments=("closed_segment_1", "closed_segment_2"),
+        ),
+    )
+    for anchor in (
+        Anchor(anchor_id="closed_anchor_1", path_id="closed_path", position=(0.0, 0.0)),
+        Anchor(anchor_id="closed_anchor_2", path_id="closed_path", position=(5.0, 5.0)),
+    ):
+        document = add_anchor(document, anchor)
+    for segment in (
+        Segment(
+            segment_id="closed_segment_1",
+            path_id="closed_path",
+            type="polyline",
+            params={"points": [[0.0, 0.0], [4.0, 1.0], [5.0, 5.0]]},
+            anchors=("closed_anchor_1", "closed_anchor_2"),
+        ),
+        Segment(
+            segment_id="closed_segment_2",
+            path_id="closed_path",
+            type="polyline",
+            params={"points": [[5.0, 5.0], [1.0, 4.0], [0.0, 0.0]]},
+            anchors=("closed_anchor_2", "closed_anchor_1"),
+        ),
+    ):
+        document = add_segment(document, segment)
+    return document
+
+
 def test_validate_command_accepts_valid_line_intent() -> None:
     document = _document_for_command_validation()
     command = {
@@ -71,6 +111,26 @@ def test_validate_command_accepts_valid_line_intent() -> None:
     assert result.tool == "propose_replace_segment_with_line"
     assert result.target_path_id == "path_1"
     assert result.target_segment_ids == ("segment_1",)
+
+
+def test_validate_command_accepts_path_level_circle_intent() -> None:
+    document = _closed_path_document_for_command_validation()
+    command = {
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "closed_path",
+        "reason": "The entire loop reads as a circle.",
+        "confidence": 0.86,
+        "requires_user_confirmation": True,
+        "candidate_id": "cand_circle_1",
+        "semantic_source": "ai_review",
+        "semantic_confidence": 0.91,
+    }
+
+    result = validate_command(command, document)
+
+    assert result.tool == "propose_replace_path_with_circle"
+    assert result.target_path_id == "closed_path"
+    assert result.target_segment_ids == ("closed_segment_1", "closed_segment_2")
 
 
 def test_validate_command_rejects_unknown_tool() -> None:
@@ -221,6 +281,52 @@ def test_validate_command_accepts_batch_command() -> None:
     assert result.target_segment_ids == ("seg_a",)
 
 
+def test_validate_command_accepts_mixed_path_and_segment_batch_command() -> None:
+    document = _closed_path_document_for_command_validation()
+    document = add_path(document, VectorPath(path_id="path_batch", segments=("seg_a",)))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="seg_a",
+            path_id="path_batch",
+            type="line",
+            params={"start": [0.0, 0.0], "end": [1.0, 0.0]},
+        ),
+    )
+    command = {
+        "tool": "propose_batch_refinement",
+        "summary": "Review full-loop and local edge replacements together.",
+        "commands": [
+            {
+                "tool": "propose_replace_path_with_ellipse",
+                "path_id": "closed_path",
+                "reason": "The loop reads as an ellipse.",
+                "confidence": 0.82,
+                "requires_user_confirmation": True,
+                "candidate_id": "cand_ellipse_1",
+                "semantic_source": "planner",
+                "semantic_confidence": 0.88,
+            },
+            {
+                "tool": "propose_replace_segment_with_line",
+                "path_id": "path_batch",
+                "segment_range": [0, 0],
+                "reason": "Keep this edge straight.",
+                "confidence": 0.9,
+                "requires_user_confirmation": True,
+            },
+        ],
+        "confidence": 0.84,
+        "requires_user_confirmation": True,
+    }
+
+    result = validate_command(command, document)
+
+    assert result.tool == "propose_batch_refinement"
+    assert result.target_path_id == "closed_path"
+    assert result.target_segment_ids == ("closed_segment_1", "closed_segment_2", "seg_a")
+
+
 def test_validate_command_rejects_batch_nested_unknown_tool() -> None:
     document = create_document(
         document_id="doc_batch_bad_tool",
@@ -341,6 +447,36 @@ def test_validate_command_rejects_non_dict_command() -> None:
 
     with pytest.raises(CommandValidationError, match="command must be a dictionary"):
         validate_command([], document)
+
+
+def test_validate_command_rejects_path_level_segment_range_and_bad_semantic_confidence() -> None:
+    document = _closed_path_document_for_command_validation()
+
+    with pytest.raises(CommandValidationError, match="path replacement does not accept segment_range"):
+        validate_command(
+            {
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "closed_path",
+                "segment_range": [0, 1],
+                "reason": "path-level command should not carry a range",
+                "confidence": 0.8,
+                "requires_user_confirmation": True,
+            },
+            document,
+        )
+
+    with pytest.raises(CommandValidationError, match="semantic_confidence must be within \\[0, 1\\]"):
+        validate_command(
+            {
+                "tool": "propose_replace_path_with_ellipse",
+                "path_id": "closed_path",
+                "reason": "path-level confidence metadata is invalid",
+                "confidence": 0.8,
+                "requires_user_confirmation": True,
+                "semantic_confidence": 1.4,
+            },
+            document,
+        )
 
 
 def test_command_schema_service_has_no_forbidden_dependencies() -> None:
