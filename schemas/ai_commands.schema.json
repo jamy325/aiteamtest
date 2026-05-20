@@ -102,11 +102,78 @@
             "type": "string"
           }
         },
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semantic_source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semantic_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
         "topology_hint": { "$ref": "#/$defs/nullable_string" },
         "self_intersection_hint": { "$ref": "#/$defs/nullable_string" },
         "alpha_hint": { "$ref": "#/$defs/nullable_string" },
         "color_hint": { "$ref": "#/$defs/nullable_string" }
       }
+    },
+    "replace_path_command": {
+      "description": "Intent-only path-level command. Precise geometry parameters such as cx, cy, r, rx, ry, rotation, and control points are intentionally not part of this schema.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "path_id", "reason", "confidence", "requires_user_confirmation"],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": [
+            "propose_replace_path_with_circle",
+            "propose_replace_path_with_ellipse"
+          ]
+        },
+        "path_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "requires_user_confirmation": {
+          "type": "boolean"
+        },
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semantic_source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semantic_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "topology_hint": { "$ref": "#/$defs/nullable_string" },
+        "self_intersection_hint": { "$ref": "#/$defs/nullable_string" },
+        "alpha_hint": { "$ref": "#/$defs/nullable_string" },
+        "color_hint": { "$ref": "#/$defs/nullable_string" }
+      }
+    },
+    "replace_command": {
+      "oneOf": [
+        { "$ref": "#/$defs/replace_segment_command" },
+        { "$ref": "#/$defs/replace_path_command" }
+      ]
     },
     "batch_command": {
       "type": "object",
@@ -124,7 +191,7 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "$ref": "#/$defs/replace_segment_command"
+            "$ref": "#/$defs/replace_command"
           }
         },
         "confidence": {
@@ -135,6 +202,19 @@
         "requires_user_confirmation": {
           "type": "boolean"
         },
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semantic_source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semantic_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
         "topology_hint": { "$ref": "#/$defs/nullable_string" },
         "self_intersection_hint": { "$ref": "#/$defs/nullable_string" },
         "alpha_hint": { "$ref": "#/$defs/nullable_string" },
@@ -144,6 +224,7 @@
     "command": {
       "oneOf": [
         { "$ref": "#/$defs/replace_segment_command" },
+        { "$ref": "#/$defs/replace_path_command" },
         { "$ref": "#/$defs/batch_command" }
       ]
     }
