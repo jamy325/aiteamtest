@@ -6,6 +6,7 @@ from typing import Any, Iterable, Literal, Mapping, TypeVar
 Point = tuple[float, float]
 Color = tuple[int, int, int]
 SegmentType = Literal["line", "arc", "circle", "ellipse", "bezier", "bspline", "polyline"]
+ShapeCandidateTargetType = Literal["circle", "rectangle", "ellipse", "arc", "line"]
 ContinuityType = Literal["corner", "smooth", "symmetric", "curvature"]
 SegmentTypes = ("line", "arc", "circle", "ellipse", "bezier", "bspline", "polyline")
 
@@ -236,6 +237,23 @@ class VectorDocument:
         object.__setattr__(self, "metadata", _copy_mapping(self.metadata))
 
 
+@dataclass(frozen=True, slots=True)
+class ShapeCandidate:
+    candidate_id: str
+    target_type: ShapeCandidateTargetType
+    path_id: str
+    segment_range: tuple[int, int]
+    source: str
+    confidence: float
+    evidence: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "segment_range", (int(self.segment_range[0]), int(self.segment_range[1])))
+        object.__setattr__(self, "confidence", float(self.confidence))
+        object.__setattr__(self, "evidence", _copy_mapping(self.evidence))
+
+
 __all__ = [
     "Anchor",
     "Color",
@@ -245,6 +263,8 @@ __all__ = [
     "Object",
     "Path",
     "Point",
+    "ShapeCandidate",
+    "ShapeCandidateTargetType",
     "Segment",
     "SegmentType",
     "SegmentTypes",
