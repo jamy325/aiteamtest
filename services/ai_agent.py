@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
+from services.ai_adapters import ResponderVisionAdapter, VisionReviewAdapter
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "ai_commands.schema.json"
 
@@ -20,6 +21,7 @@ Hard rules:
 - Do not execute tools or proposed commands.
 - Do not mutate the VectorDocument directly.
 - Proposed commands must stay at the intent-planning level and must require deterministic algorithm refinement later.
+- Review algorithm candidates and existing intent commands; do not replace them with precise fitted geometry.
 
 Required output shape:
 - summary
@@ -31,6 +33,9 @@ Inputs available to you:
 - overlay_image
 - distance_field_diff_image
 - vector_document_json
+- candidates
+- proposed_commands_from_algorithm
+- preview_summary
 - fit_error
 - complexity_score
 - topology_status
@@ -42,6 +47,8 @@ Inputs available to you:
 - color_notes
 
 When describing issues or commands:
+- inspect algorithm candidates first and explain why a candidate should or should not be trusted
+- keep any replacement proposal at semantic intent level so later deterministic refinement can solve the exact geometry
 - include topology guidance when path closure, gap, or continuity is suspicious
 - include self_intersection guidance when paths cross or overlap incorrectly
 - include alpha guidance when transparency or matte pollution affects interpretation
@@ -63,6 +70,9 @@ class AIReviewInput:
     topology_status: str
     self_intersection_count: int
     coordinate_system: dict[str, Any]
+    candidates: tuple[dict[str, Any], ...] = ()
+    proposed_commands_from_algorithm: tuple[dict[str, Any], ...] = ()
+    preview_summary: dict[str, Any] | None = None
     user_locked_ids: tuple[str, ...] = ()
     available_tools: tuple[str, ...] = ()
     alpha_notes: str | None = None
@@ -115,16 +125,22 @@ def _normalize_command(command: dict[str, Any]) -> dict[str, Any]:
 class AIReviewService:
     def __init__(
         self,
+        adapter: VisionReviewAdapter | None = None,
         responder: Callable[[str, AIReviewInput], dict[str, Any]] | None = None,
     ) -> None:
+        if adapter is not None and responder is not None:
+            raise ValueError("configure either adapter or responder, not both")
+        self.adapter = adapter if adapter is not None else (
+            ResponderVisionAdapter(responder) if responder is not None else None
+        )
         self.responder = responder
 
     def run_review(self, review_input: AIReviewInput) -> AIReviewOutput:
-        if self.responder is None:
-            raise RuntimeError("AI review responder is not configured")
+        if self.adapter is None:
+            raise RuntimeError("AI review adapter is not configured")
 
         prompt = build_review_prompt(review_input)
-        response = normalize_ai_review_response(self.responder(prompt, review_input))
+        response = normalize_ai_review_response(self.adapter.review(prompt, review_input))
         validate_ai_review_response(response)
         return AIReviewOutput(
             summary=str(response["summary"]),

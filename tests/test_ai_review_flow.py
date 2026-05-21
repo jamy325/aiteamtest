@@ -85,6 +85,66 @@ def test_ai_review_flow_displays_summary_issues_and_proposed_commands_without_ex
     assert captured["review_input"] == window.last_review_input
 
 
+def test_ai_review_service_supports_adapter_and_legacy_responder_paths() -> None:
+    captured: dict[str, object] = {}
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        captured["prompt"] = prompt
+        captured["review_input"] = review_input
+        return {
+            "summary": "Algorithm candidate looks valid.",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_replace_path_with_circle",
+                    "path_id": "path_circle",
+                    "reason": "The candidate reads as a circle.",
+                    "confidence": 0.82,
+                    "requires_user_confirmation": True,
+                    "candidate_id": "cand_circle_1",
+                    "semantic_source": "legacy_responder",
+                    "semantic_confidence": 0.9,
+                    "topology_hint": None,
+                    "self_intersection_hint": None,
+                    "alpha_hint": None,
+                    "color_hint": None,
+                }
+            ],
+        }
+
+    review_input = AIReviewInput(
+        original_image="raw.png",
+        overlay_image="overlay.png",
+        distance_field_diff_image="diff.png",
+        vector_document_json={"document_id": "doc_compat"},
+        candidates=(
+            {"candidate_id": "cand_circle_1", "shape_type": "circle", "path_id": "path_circle", "confidence": 0.91},
+        ),
+        proposed_commands_from_algorithm=(
+            {
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "path_circle",
+                "reason": "Algorithm candidate already suggests a circle.",
+                "confidence": 0.8,
+                "requires_user_confirmation": True,
+                "candidate_id": "cand_circle_1",
+            },
+        ),
+        preview_summary={"accepted_count": 1, "rejected_count": 0},
+        fit_error=0.1,
+        complexity_score=0.25,
+        topology_status="closed",
+        self_intersection_count=0,
+        coordinate_system={"unit": "px", "view_box": [0, 0, 100, 100]},
+    )
+
+    output = AIReviewService(responder=responder).run_review(review_input)
+
+    assert output.summary == "Algorithm candidate looks valid."
+    assert output.proposed_commands[0]["candidate_id"] == "cand_circle_1"
+    assert captured["review_input"] == review_input
+
+
 def test_ai_review_flow_rejects_invalid_schema_response() -> None:
     def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
         return {
@@ -153,3 +213,11 @@ def test_ai_review_flow_has_no_forbidden_dependencies() -> None:
 
         assert imports.isdisjoint(forbidden_imports)
         assert ".execute(" not in source
+
+
+def test_ai_review_service_rejects_simultaneous_adapter_and_responder_configuration() -> None:
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {"summary": "unused", "issues": [], "proposed_commands": []}
+
+    with pytest.raises(ValueError):
+        AIReviewService(adapter=object(), responder=responder)  # type: ignore[arg-type]

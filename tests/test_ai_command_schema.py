@@ -20,6 +20,25 @@ def test_ai_review_prompt_enforces_intent_only_output() -> None:
         overlay_image="overlay.png",
         distance_field_diff_image="diff.png",
         vector_document_json={"document_id": "doc_1"},
+        candidates=(
+            {
+                "candidate_id": "candidate_circle_1",
+                "shape_type": "circle",
+                "path_id": "path_1",
+                "confidence": 0.91,
+            },
+        ),
+        proposed_commands_from_algorithm=(
+            {
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "path_1",
+                "reason": "Algorithm candidate suggests a circle replacement.",
+                "confidence": 0.83,
+                "requires_user_confirmation": True,
+                "candidate_id": "candidate_circle_1",
+            },
+        ),
+        preview_summary={"accepted_count": 1, "rejected_count": 0},
         fit_error=0.12,
         complexity_score=0.34,
         topology_status="closed",
@@ -36,8 +55,12 @@ def test_ai_review_prompt_enforces_intent_only_output() -> None:
     assert "only output modification intent" in prompt
     assert "Do not output precise geometry parameters" in prompt
     assert "Do not mutate the VectorDocument directly" in prompt
+    assert "Review algorithm candidates" in prompt
     assert "use the `tool` field" in prompt
     assert "original_image" in prompt
+    assert "candidates" in prompt
+    assert "proposed_commands_from_algorithm" in prompt
+    assert "preview_summary" in prompt
     assert "available_tools" in prompt
     assert AI_REVIEW_PROMPT in prompt
 
