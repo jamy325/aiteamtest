@@ -10,10 +10,13 @@ import numpy as np
 
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment
+from services.auto_refinement_pipeline import AutoRefinementPipelineResult, AutoRefinementReport
 from services.benchmark_runner import BenchmarkCase, BenchmarkRunner
 from services.command_executor import CommandExecutionResult
+from services.command_preview import CommandPreviewResult, ConstraintChangeSummary, ExportImpactSummary
 from services.contour_extractor import BinaryContour, ExtractedContours
 from services.minimal_pipeline import MinimalPipelineResult
+from services.preview_auto_accept_policy import PreviewDecision
 
 
 def _write_case_image(image_path: Path, *, shape: str) -> None:
@@ -268,3 +271,197 @@ def test_benchmark_runner_cli_writes_json_report(tmp_path: Path) -> None:
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["summary"]["total_cases"] == 3
     assert len(payload["cases"]) == 3
+
+
+def _preview_result(command_id: str) -> CommandPreviewResult:
+    return CommandPreviewResult(
+        success=True,
+        command_id=command_id,
+        reason=None,
+        old_score=10.0,
+        predicted_new_score=8.5,
+        score_delta=-1.5,
+        affected_paths=("path_1",),
+        affected_segments=("seg_1",),
+        topology_status_before={"path_1": "closed"},
+        topology_status_after={"path_1": "closed"},
+        self_intersection_count_before={"path_1": 0},
+        self_intersection_count_after={"path_1": 0},
+        segment_type_summary={"before": {"polyline": 1}, "after": {"circle": 1}, "delta": {"polyline": -1, "circle": 1}},
+        constraint_change_summary=ConstraintChangeSummary(
+            before={},
+            after={},
+            delta={},
+            added_constraint_ids=(),
+            removed_constraint_ids=(),
+            changed_constraint_ids=(),
+        ),
+        export_impact_summary=ExportImpactSummary(before={"json_char_count": 10}, after={"json_char_count": 9}, delta={"json_char_count": -1}),
+    )
+
+
+def test_benchmark_runner_auto_refine_case_includes_quality_gate_metrics(tmp_path: Path) -> None:
+    image_path = tmp_path / "circle_case.png"
+    _write_case_image(image_path, shape="circle")
+
+    document = create_document(
+        document_id="doc_auto_refine_before",
+        width=100.0,
+        height=100.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="path_1", closed=True, segments=("seg_1",)))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="seg_1",
+            path_id="path_1",
+            type="polyline",
+            params={"points": [[10.0, 10.0], [40.0, 60.0], [70.0, 10.0], [10.0, 10.0]]},
+        ),
+    )
+    refined_document = create_document(
+        document_id="doc_auto_refine_after",
+        width=100.0,
+        height=100.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    refined_document = add_path(refined_document, VectorPath(path_id="path_1", closed=True, segments=("seg_1",)))
+    refined_document = add_segment(
+        refined_document,
+        Segment(
+            segment_id="seg_1",
+            path_id="path_1",
+            type="circle",
+            params={"cx": 50.0, "cy": 50.0, "r": 20.0},
+        ),
+    )
+    contours = ExtractedContours(
+        binary_contours=(
+            BinaryContour(
+                contour_id="binary_1",
+                source="binary_contour",
+                points=((10.0, 10.0), (40.0, 60.0), (70.0, 10.0)),
+                coordinate_space="vector",
+                closed=True,
+                area=1.0,
+                depth=0,
+                parent_contour=None,
+                children=(),
+            ),
+        ),
+        skeleton_contours=(),
+    )
+
+    class _FakePipeline:
+        def run_from_file(self, image_path: str | Path, *, document_id: str = "document_1") -> MinimalPipelineResult:
+            return MinimalPipelineResult(
+                document=document,
+                json_payload="{}",
+                extracted_contours=contours,
+                source_image=np.zeros((8, 8), dtype=np.uint8),
+            )
+
+    class _FakeAutoRefinementPipeline:
+        def run_from_pipeline_result(self, pipeline_result: MinimalPipelineResult, *, target_types=None, dry_run_only=None) -> AutoRefinementPipelineResult:
+            return AutoRefinementPipelineResult(
+                refined_document=refined_document,
+                candidates=(),
+                proposed_commands=(
+                    {
+                        "command_id": "cmd_auto_1",
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_1",
+                        "reason": "intent only",
+                        "confidence": 0.82,
+                        "requires_user_confirmation": True,
+                    },
+                ),
+                preview_decisions=(
+                    PreviewDecision(
+                        command={
+                            "command_id": "cmd_auto_1",
+                            "tool": "propose_replace_path_with_circle",
+                            "path_id": "path_1",
+                            "reason": "intent only",
+                            "confidence": 0.82,
+                            "requires_user_confirmation": True,
+                        },
+                        preview_result=_preview_result("cmd_auto_1"),
+                        decision="auto_accept",
+                        reason="good improvement",
+                        risk_flags=(),
+                    ),
+                ),
+                report=AutoRefinementReport(
+                    candidate_stats={"total": 1, "by_target_type": {"circle": 1}, "by_source": {"raw_contour_points": 1}},
+                    command_stats={"total": 1, "evaluated_total": 1, "by_tool": {"propose_replace_path_with_circle": 1}, "batch_count": 0},
+                    decision_stats={"auto_accept": 1, "user_confirm": 0, "reject": 0},
+                    score_before=12.0,
+                    score_after=8.5,
+                    integrity={"success": True, "error_count": 0, "warning_count": 0, "affected_ids": [], "errors": [], "warnings": []},
+                    dry_run_only=False,
+                    target_types=("circle",),
+                ),
+            )
+
+    runner = BenchmarkRunner(
+        pipeline_factory=lambda case: _FakePipeline(),
+        auto_refinement_pipeline=_FakeAutoRefinementPipeline(),
+    )
+
+    result = runner.run_case(
+        BenchmarkCase(
+            case_id="auto_refine_case",
+            image_path=str(image_path),
+            auto_refine=True,
+            auto_refine_target_types=("circle",),
+            expected_geometry={"circle": 1},
+        )
+    )
+
+    assert result.success is True
+    assert result.auto_refine is True
+    assert result.geometry_before["circle"] == 0
+    assert result.geometry_after["circle"] == 1
+    assert result.geometry_hits["circle"] == 1
+    assert result.candidate_counts["total"] == 1
+    assert result.proposed_command_counts["propose_replace_path_with_circle"] == 1
+    assert result.accepted_count == 1
+    assert result.rejected_count == 0
+    assert result.user_confirm_count == 0
+    assert result.preview_decisions[0]["decision"] == "auto_accept"
+    assert result.score_before >= 0.0
+    assert result.score_after >= 0.0
+    assert result.score_delta == result.score_after - result.score_before
+    assert result.export_summary["dxf"]["entity_counts"]["CIRCLE"] >= 1
+    assert result.export_summary["svg"]["element_count"] > 0
+    assert set(result.export_summary["svg"]["path_command_counts"]).issuperset({"M", "L", "C", "A", "Z"})
+
+
+def test_benchmark_runner_auto_refine_case_reports_threshold_failure(tmp_path: Path) -> None:
+    image_path = tmp_path / "threshold_case.png"
+    _write_case_image(image_path, shape="line")
+    case = BenchmarkCase(
+        case_id="threshold_fail_case",
+        image_path=str(image_path),
+        fail_thresholds={"min_circle_count": 1, "max_total_score": 0.1},
+    )
+
+    result = BenchmarkRunner().run_case(case)
+
+    assert result.success is False
+    assert result.failure_reason is not None
+    assert "min_circle_count" in result.failure_reason or "max_total_score" in result.failure_reason
+
+
+def test_repository_benchmark_manifest_keeps_freeform_case_green_by_default_contract() -> None:
+    cases = BenchmarkRunner().load_manifest(Path("benchmark_manifest.json"))
+
+    freeform_case = next(case for case in cases if case.case_id == "freeform_bezier_fallback")
+
+    assert freeform_case.auto_refine is True
+    assert "max_total_score" not in freeform_case.fail_thresholds
+    assert freeform_case.fail_thresholds["max_circle_count"] == 0
+    assert freeform_case.fail_thresholds["max_ellipse_count"] == 0
+    assert freeform_case.fail_thresholds["max_segment_count"] > 0
