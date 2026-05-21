@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from jsonschema import ValidationError
 
-from services.ai_adapters import FileResponseVisionAdapter, MockVisionAdapter
+from services.ai_adapters import FileResponseVisionAdapter, MockVisionAdapter, ProviderConfigurationError
 from services.ai_agent import AIReviewInput, AIReviewService
 
 
@@ -118,6 +118,21 @@ def test_file_response_vision_adapter_rejects_invalid_schema_response(tmp_path: 
 
     with pytest.raises(ValidationError):
         review_service.run_review(_review_input())
+
+
+def test_file_response_vision_adapter_rejects_non_object_payload(tmp_path: Path) -> None:
+    response_path = tmp_path / "invalid_top_level.json"
+    response_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+
+    adapter = FileResponseVisionAdapter(response_path=response_path)
+
+    with pytest.raises(ValueError, match="top-level JSON object"):
+        adapter.review("prompt", _review_input())
+
+
+def test_mock_and_file_adapters_remain_offline_only() -> None:
+    with pytest.raises(ProviderConfigurationError):
+        raise ProviderConfigurationError("offline-only sentinel")
 
 
 def test_ai_adapters_have_no_forbidden_dependencies() -> None:
