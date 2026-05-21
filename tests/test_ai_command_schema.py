@@ -10,6 +10,7 @@ from services.ai_agent import (
     AI_REVIEW_PROMPT,
     build_review_prompt,
     load_ai_command_schema,
+    normalize_ai_review_response,
     validate_ai_review_response,
 )
 
@@ -20,6 +21,25 @@ def test_ai_review_prompt_enforces_intent_only_output() -> None:
         overlay_image="overlay.png",
         distance_field_diff_image="diff.png",
         vector_document_json={"document_id": "doc_1"},
+        candidates=(
+            {
+                "candidate_id": "candidate_circle_1",
+                "shape_type": "circle",
+                "path_id": "path_1",
+                "confidence": 0.91,
+            },
+        ),
+        proposed_commands_from_algorithm=(
+            {
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "path_1",
+                "reason": "Algorithm candidate suggests a circle replacement.",
+                "confidence": 0.83,
+                "requires_user_confirmation": True,
+                "candidate_id": "candidate_circle_1",
+            },
+        ),
+        preview_summary={"accepted_count": 1, "rejected_count": 0},
         fit_error=0.12,
         complexity_score=0.34,
         topology_status="closed",
@@ -36,8 +56,12 @@ def test_ai_review_prompt_enforces_intent_only_output() -> None:
     assert "only output modification intent" in prompt
     assert "Do not output precise geometry parameters" in prompt
     assert "Do not mutate the VectorDocument directly" in prompt
+    assert "Review algorithm candidates" in prompt
     assert "use the `tool` field" in prompt
     assert "original_image" in prompt
+    assert "candidates" in prompt
+    assert "proposed_commands_from_algorithm" in prompt
+    assert "preview_summary" in prompt
     assert "available_tools" in prompt
     assert AI_REVIEW_PROMPT in prompt
 
@@ -103,6 +127,59 @@ def test_ai_command_schema_accepts_valid_replace_command_and_batch() -> None:
     }
 
     validate_ai_review_response(response)
+
+
+def test_ai_command_schema_normalizes_legacy_command_type_to_tool() -> None:
+    normalized = normalize_ai_review_response(
+        {
+            "summary": "Legacy command field should remain compatible.",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "command_type": "propose_replace_segment_with_arc",
+                    "path_id": "path_1",
+                    "segment_range": [0, 2],
+                    "reason": "Legacy responder output still maps to tool.",
+                    "confidence": 0.8,
+                    "requires_user_confirmation": True,
+                }
+            ],
+        }
+    )
+
+    assert normalized["proposed_commands"][0]["tool"] == "propose_replace_segment_with_arc"
+    assert "command_type" not in normalized["proposed_commands"][0]
+
+
+def test_ai_command_schema_normalizes_legacy_batch_nested_command_type_to_tool() -> None:
+    normalized = normalize_ai_review_response(
+        {
+            "summary": "Legacy nested command fields should remain compatible.",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_batch_refinement",
+                    "summary": "Normalize nested legacy commands.",
+                    "commands": [
+                        {
+                            "command_type": "propose_replace_segment_with_line",
+                            "path_id": "path_nested",
+                            "segment_range": [1, 3],
+                            "reason": "Nested legacy responder output still maps to tool.",
+                            "confidence": 0.76,
+                            "requires_user_confirmation": True,
+                        }
+                    ],
+                    "confidence": 0.75,
+                    "requires_user_confirmation": True,
+                }
+            ],
+        }
+    )
+
+    nested = normalized["proposed_commands"][0]["commands"][0]
+    assert nested["tool"] == "propose_replace_segment_with_line"
+    assert "command_type" not in nested
 
 
 def test_ai_command_schema_accepts_path_level_commands_and_mixed_batch() -> None:

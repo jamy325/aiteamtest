@@ -85,6 +85,66 @@ def test_ai_review_flow_displays_summary_issues_and_proposed_commands_without_ex
     assert captured["review_input"] == window.last_review_input
 
 
+def test_ai_review_service_supports_adapter_and_legacy_responder_paths() -> None:
+    captured: dict[str, object] = {}
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        captured["prompt"] = prompt
+        captured["review_input"] = review_input
+        return {
+            "summary": "Algorithm candidate looks valid.",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_replace_path_with_circle",
+                    "path_id": "path_circle",
+                    "reason": "The candidate reads as a circle.",
+                    "confidence": 0.82,
+                    "requires_user_confirmation": True,
+                    "candidate_id": "cand_circle_1",
+                    "semantic_source": "legacy_responder",
+                    "semantic_confidence": 0.9,
+                    "topology_hint": None,
+                    "self_intersection_hint": None,
+                    "alpha_hint": None,
+                    "color_hint": None,
+                }
+            ],
+        }
+
+    review_input = AIReviewInput(
+        original_image="raw.png",
+        overlay_image="overlay.png",
+        distance_field_diff_image="diff.png",
+        vector_document_json={"document_id": "doc_compat"},
+        candidates=(
+            {"candidate_id": "cand_circle_1", "shape_type": "circle", "path_id": "path_circle", "confidence": 0.91},
+        ),
+        proposed_commands_from_algorithm=(
+            {
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "path_circle",
+                "reason": "Algorithm candidate already suggests a circle.",
+                "confidence": 0.8,
+                "requires_user_confirmation": True,
+                "candidate_id": "cand_circle_1",
+            },
+        ),
+        preview_summary={"accepted_count": 1, "rejected_count": 0},
+        fit_error=0.1,
+        complexity_score=0.25,
+        topology_status="closed",
+        self_intersection_count=0,
+        coordinate_system={"unit": "px", "view_box": [0, 0, 100, 100]},
+    )
+
+    output = AIReviewService(responder=responder).run_review(review_input)
+
+    assert output.summary == "Algorithm candidate looks valid."
+    assert output.proposed_commands[0]["candidate_id"] == "cand_circle_1"
+    assert captured["review_input"] == review_input
+
+
 def test_ai_review_flow_rejects_invalid_schema_response() -> None:
     def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
         return {
@@ -122,6 +182,86 @@ def test_ai_review_flow_rejects_invalid_schema_response() -> None:
     assert window.review_display_state.summary == ""
 
 
+@pytest.mark.parametrize(
+    "bad_response",
+    (
+        {"summary": "bad", "issues": 123, "proposed_commands": []},
+        {"summary": "bad", "issues": [], "proposed_commands": 123},
+        {
+            "summary": "bad",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_batch_refinement",
+                    "summary": "nested bad payload",
+                    "commands": 123,
+                    "confidence": 0.5,
+                    "requires_user_confirmation": True,
+                }
+            ],
+        },
+        {"summary": "bad", "issues": [], "proposed_commands": [123]},
+    ),
+)
+def test_ai_review_flow_rejects_structurally_invalid_response_with_value_error(bad_response: dict[str, object]) -> None:
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return bad_response
+
+    service = AIReviewService(responder=responder)
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_bad"},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    with pytest.raises(ValueError):
+        service.run_review(review_input)
+
+
+def test_ai_review_flow_rejects_excessive_batch_nesting_with_value_error() -> None:
+    nested_command: dict[str, object] = {
+        "command_type": "propose_replace_segment_with_line",
+        "path_id": "path_1",
+        "segment_range": [0, 1],
+        "reason": "base command",
+        "confidence": 0.7,
+        "requires_user_confirmation": True,
+    }
+    for depth in range(11):
+        nested_command = {
+            "tool": "propose_batch_refinement",
+            "summary": f"batch depth {depth}",
+            "commands": [nested_command],
+            "confidence": 0.6,
+            "requires_user_confirmation": True,
+        }
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {"summary": "too deep", "issues": [], "proposed_commands": [nested_command]}
+
+    service = AIReviewService(responder=responder)
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_deep"},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    with pytest.raises(ValueError, match="max depth"):
+        service.run_review(review_input)
+
+
 def test_canvas_widget_tracks_locked_ids_for_ai_review_input() -> None:
     canvas_widget = CanvasWidget()
 
@@ -153,3 +293,11 @@ def test_ai_review_flow_has_no_forbidden_dependencies() -> None:
 
         assert imports.isdisjoint(forbidden_imports)
         assert ".execute(" not in source
+
+
+def test_ai_review_service_rejects_simultaneous_adapter_and_responder_configuration() -> None:
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {"summary": "unused", "issues": [], "proposed_commands": []}
+
+    with pytest.raises(ValueError):
+        AIReviewService(adapter=object(), responder=responder)  # type: ignore[arg-type]

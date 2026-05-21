@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
+from services.ai_adapters import ResponderVisionAdapter, VisionReviewAdapter
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "ai_commands.schema.json"
 
@@ -20,6 +21,7 @@ Hard rules:
 - Do not execute tools or proposed commands.
 - Do not mutate the VectorDocument directly.
 - Proposed commands must stay at the intent-planning level and must require deterministic algorithm refinement later.
+- Review algorithm candidates and existing intent commands; do not replace them with precise fitted geometry.
 
 Required output shape:
 - summary
@@ -31,6 +33,9 @@ Inputs available to you:
 - overlay_image
 - distance_field_diff_image
 - vector_document_json
+- candidates
+- proposed_commands_from_algorithm
+- preview_summary
 - fit_error
 - complexity_score
 - topology_status
@@ -42,6 +47,8 @@ Inputs available to you:
 - color_notes
 
 When describing issues or commands:
+- inspect algorithm candidates first and explain why a candidate should or should not be trusted
+- keep any replacement proposal at semantic intent level so later deterministic refinement can solve the exact geometry
 - include topology guidance when path closure, gap, or continuity is suspicious
 - include self_intersection guidance when paths cross or overlap incorrectly
 - include alpha guidance when transparency or matte pollution affects interpretation
@@ -63,6 +70,9 @@ class AIReviewInput:
     topology_status: str
     self_intersection_count: int
     coordinate_system: dict[str, Any]
+    candidates: tuple[dict[str, Any], ...] = ()
+    proposed_commands_from_algorithm: tuple[dict[str, Any], ...] = ()
+    preview_summary: dict[str, Any] | None = None
     user_locked_ids: tuple[str, ...] = ()
     available_tools: tuple[str, ...] = ()
     alpha_notes: str | None = None
@@ -91,10 +101,16 @@ def load_ai_command_schema() -> dict[str, Any]:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
-def normalize_ai_review_response(response: dict[str, Any]) -> dict[str, Any]:
+def normalize_ai_review_response(response: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise ValueError("AI review response must be a dict")
+
     normalized = dict(response)
-    normalized["issues"] = [dict(issue) for issue in response.get("issues", ())]
-    normalized["proposed_commands"] = [_normalize_command(dict(command)) for command in response.get("proposed_commands", ())]
+    normalized["issues"] = [_normalize_issue(issue) for issue in _coerce_sequence(response.get("issues", ()), field_name="issues")]
+    normalized["proposed_commands"] = [
+        _normalize_command(command)
+        for command in _coerce_sequence(response.get("proposed_commands", ()), field_name="proposed_commands")
+    ]
     return normalized
 
 
@@ -103,28 +119,56 @@ def validate_ai_review_response(response: dict[str, Any]) -> None:
     validator.validate(normalize_ai_review_response(response))
 
 
-def _normalize_command(command: dict[str, Any]) -> dict[str, Any]:
+def _normalize_issue(issue: Any) -> dict[str, Any]:
+    if not isinstance(issue, dict):
+        raise ValueError("each issue must be a dict")
+    return dict(issue)
+
+
+def _normalize_command(command: Any, *, depth: int = 0, max_depth: int = 10) -> dict[str, Any]:
+    if not isinstance(command, dict):
+        raise ValueError("each proposed command must be a dict")
+    if depth > max_depth:
+        raise ValueError(f"AI review command nesting exceeds max depth {max_depth}")
+
     normalized = dict(command)
     if "tool" not in normalized and "command_type" in normalized:
         normalized["tool"] = normalized.pop("command_type")
     if normalized.get("tool") == "propose_batch_refinement":
-        normalized["commands"] = [_normalize_command(dict(item)) for item in normalized.get("commands", ())]
+        normalized["commands"] = [
+            _normalize_command(item, depth=depth + 1, max_depth=max_depth)
+            for item in _coerce_sequence(normalized.get("commands", ()), field_name="propose_batch_refinement.commands")
+        ]
     return normalized
+
+
+def _coerce_sequence(value: Any, *, field_name: str) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list or tuple")
+    return list(value)
 
 
 class AIReviewService:
     def __init__(
         self,
+        adapter: VisionReviewAdapter | None = None,
         responder: Callable[[str, AIReviewInput], dict[str, Any]] | None = None,
     ) -> None:
+        if adapter is not None and responder is not None:
+            raise ValueError("configure either adapter or responder, not both")
+        self.adapter = adapter if adapter is not None else (
+            ResponderVisionAdapter(responder) if responder is not None else None
+        )
         self.responder = responder
 
     def run_review(self, review_input: AIReviewInput) -> AIReviewOutput:
-        if self.responder is None:
-            raise RuntimeError("AI review responder is not configured")
+        if self.adapter is None:
+            raise RuntimeError("AI review adapter is not configured")
 
         prompt = build_review_prompt(review_input)
-        response = normalize_ai_review_response(self.responder(prompt, review_input))
+        response = normalize_ai_review_response(self.adapter.review(prompt, review_input))
         validate_ai_review_response(response)
         return AIReviewOutput(
             summary=str(response["summary"]),
