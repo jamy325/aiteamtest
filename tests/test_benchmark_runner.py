@@ -453,3 +453,15 @@ def test_benchmark_runner_auto_refine_case_reports_threshold_failure(tmp_path: P
     assert result.success is False
     assert result.failure_reason is not None
     assert "min_circle_count" in result.failure_reason or "max_total_score" in result.failure_reason
+
+
+def test_repository_benchmark_manifest_keeps_freeform_case_green_by_default_contract() -> None:
+    cases = BenchmarkRunner().load_manifest(Path("benchmark_manifest.json"))
+
+    freeform_case = next(case for case in cases if case.case_id == "freeform_bezier_fallback")
+
+    assert freeform_case.auto_refine is True
+    assert "max_total_score" not in freeform_case.fail_thresholds
+    assert freeform_case.fail_thresholds["max_circle_count"] == 0
+    assert freeform_case.fail_thresholds["max_ellipse_count"] == 0
+    assert freeform_case.fail_thresholds["max_segment_count"] > 0

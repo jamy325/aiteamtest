@@ -52,7 +52,9 @@
         "ellipse": 0
       },
       "fail_thresholds": {
-        "max_total_score": 800
+        "max_circle_count": 0,
+        "max_ellipse_count": 0,
+        "max_segment_count": 500
       }
     }
   ]

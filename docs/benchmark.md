@@ -1,6 +1,7 @@
 # Benchmark
 
 `BenchmarkRunner` supports an explicit `auto_refine` mode for quality-gate runs.
+The repository-level `benchmark_manifest.json` is intended to stay green by default; failure-only gates should live in unit tests or a separate negative manifest.
 
 Manifest fields:
 
