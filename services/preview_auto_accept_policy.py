@@ -14,7 +14,7 @@ DecisionType = Literal["auto_accept", "user_confirm", "reject"]
 
 @dataclass(frozen=True, slots=True)
 class PreviewAndAutoAcceptPolicyConfig:
-    auto_accept_min_confidence: float = 0.85
+    auto_accept_min_confidence: float = 0.73
     auto_accept_min_score_improvement: float = 0.5
     reject_score_regression_over: float = 0.0
     medium_confidence_threshold: float = 0.55
