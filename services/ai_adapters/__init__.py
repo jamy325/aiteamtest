@@ -5,6 +5,7 @@ from services.ai_adapters.gemini_provider import GeminiVisionAdapter
 from services.ai_adapters.mock import MockVisionAdapter
 from services.ai_adapters.openai_provider import OpenAIVisionAdapter
 from services.ai_adapters.provider_factory import create_vision_adapter
+from services.ai_adapters.siliconflow_provider import SiliconFlowVisionAdapter
 
 __all__ = [
     "FileResponseVisionAdapter",
@@ -13,6 +14,7 @@ __all__ = [
     "OpenAIVisionAdapter",
     "ProviderConfigurationError",
     "ResponderVisionAdapter",
+    "SiliconFlowVisionAdapter",
     "VisionReviewAdapter",
     "create_vision_adapter",
 ]

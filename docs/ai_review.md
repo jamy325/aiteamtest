@@ -8,7 +8,9 @@
 - `MockVisionAdapter` returns a fixed JSON payload for deterministic tests.
 - `FileResponseVisionAdapter` reads a JSON response from disk for offline review playback.
 - `create_vision_adapter(...)` is the provider factory for `mock`, `file`, `openai`, and `gemini`.
+- `create_vision_adapter(...)` also supports `siliconflow` for OpenAI-compatible VLM chat completions.
 - `OpenAIVisionAdapter` and `GeminiVisionAdapter` are optional runtime adapters with lazy SDK loading.
+- `SiliconFlowVisionAdapter` is an optional runtime adapter using SiliconFlow's OpenAI-compatible `/chat/completions` interface.
 - Legacy `responder(prompt, review_input)` callables still work through `ResponderVisionAdapter`.
 
 ## Input contract
@@ -42,6 +44,13 @@ The review model is expected to inspect algorithm candidates and existing intent
   - Optional packages: `pip install google-genai pillow`
   - Environment variables: `GEMINI_API_KEY` or `GOOGLE_API_KEY`
   - Default model in this repo: `gemini-3.5-flash`
+- SiliconFlow provider:
+  - Optional package: `pip install openai`
+  - Environment variable: `SILICONFLOW_API_KEY`
+  - Default base URL in this repo: `https://api.siliconflow.cn/v1`
+  - Default model in this repo: `Qwen/Qwen2.5-VL-7B-Instruct`
+  - Uses OpenAI-compatible `chat.completions` messages with `text` plus `image_url` content parts
+  - You can override `base_url` if your SiliconFlow deployment uses a different API domain
 
 If a provider SDK is not installed, or the API key is missing, the adapter raises a clear `ProviderConfigurationError`.
 
@@ -50,3 +59,4 @@ If a provider SDK is not installed, or the API key is missing, the adapter raise
 - Default unit tests only use `mock` and `file` providers, or injected stub clients.
 - Default test runs must not access the network.
 - A live provider integration test exists behind `ENABLE_LIVE_AI_PROVIDER_TESTS=1`; keep it disabled in normal CI and local validation.
+- For SiliconFlow live checks, set `AI_PROVIDER=siliconflow` and provide `SILICONFLOW_API_KEY`.
