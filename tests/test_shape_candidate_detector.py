@@ -6,7 +6,7 @@ from pathlib import Path
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment
 from services.minimal_pipeline import MinimalPipeline
-from services.shape_candidate_detector import ShapeCandidateDetector
+from services.shape_candidate_detector import ShapeCandidateDetector, ShapeCandidateDetectorConfig
 
 
 def _rectangle_document() -> object:
@@ -162,6 +162,86 @@ def _noise_document() -> object:
     return document
 
 
+def _generic_circle_document(*, radius: float = 28.0) -> object:
+    document = create_document(
+        document_id="generic_circle_doc",
+        width=160.0,
+        height=160.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [],
+                    "skeleton_contours": [
+                        {
+                            "contour_id": "generic_circle_contour_0",
+                            "source": "skeleton_contour",
+                            "points": [
+                                [80.0 + radius * math.cos(math.tau * index / 96), 80.0 + radius * math.sin(math.tau * index / 96)]
+                                for index in range(96)
+                            ],
+                            "coordinate_space": "vector",
+                            "closed": True,
+                            "area": 0.0,
+                            "depth": 0,
+                            "parent_contour": None,
+                            "children": [],
+                        }
+                    ],
+                }
+            }
+        },
+    )
+    polygon_points = tuple(
+        (80.0 + radius * math.cos(math.tau * index / 16), 80.0 + radius * math.sin(math.tau * index / 16))
+        for index in range(16)
+    )
+    segment_ids = tuple(f"generic_circle_seg_{index}" for index in range(len(polygon_points)))
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="generic_circle_path",
+            closed=True,
+            source="skeleton_contour",
+            segments=segment_ids,
+            metadata={"source_contour_id": "generic_circle_contour_0"},
+        ),
+    )
+    for index in range(len(polygon_points)):
+        start = polygon_points[index]
+        end = polygon_points[(index + 1) % len(polygon_points)]
+        document = add_segment(
+            document,
+            Segment(
+                segment_id=segment_ids[index],
+                path_id="generic_circle_path",
+                type="line",
+                params={"start": [start[0], start[1]], "end": [end[0], end[1]]},
+            ),
+        )
+    return document
+
+
+def _tiny_line_document() -> object:
+    document = create_document(
+        document_id="doc_tiny_line",
+        width=20.0,
+        height=20.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id="tiny_line_path", closed=False, segments=("tiny_line_0",)))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="tiny_line_0",
+            path_id="tiny_line_path",
+            type="polyline",
+            params={"points": [[2.0, 2.0], [4.0, 2.05], [6.0, 2.0]]},
+        ),
+    )
+    return document
+
+
 def test_shape_candidate_detector_detects_circle_candidate_from_circle_fixture() -> None:
     fixture_path = Path("test_images/circle/test_input_circle.png")
     document = MinimalPipeline(segment_type="line").run_from_file(fixture_path, document_id="circle_fixture").document
@@ -229,3 +309,52 @@ def test_shape_candidate_detector_does_not_emit_high_confidence_candidates_for_n
     candidates = ShapeCandidateDetector().detect_candidates(_noise_document())
 
     assert not candidates or max(candidate.confidence for candidate in candidates) < 0.68
+
+
+def test_shape_candidate_detector_config_can_filter_circle_candidates_more_strictly() -> None:
+    fixture_path = Path("test_images/circle/test_input_circle.png")
+    document = MinimalPipeline(segment_type="line").run_from_file(fixture_path, document_id="circle_fixture_strict").document
+
+    default_candidates = [
+        candidate for candidate in ShapeCandidateDetector().detect_candidates(document) if candidate.target_type == "circle"
+    ]
+    strict_candidates = [
+        candidate
+        for candidate in ShapeCandidateDetector(
+            ShapeCandidateDetectorConfig(min_circle_confidence=0.95)
+        ).detect_candidates(document)
+        if candidate.target_type == "circle"
+    ]
+
+    assert default_candidates
+    assert strict_candidates == []
+
+
+def test_shape_candidate_detector_config_can_disable_raw_source_preference() -> None:
+    document = _generic_circle_document()
+
+    candidates = ShapeCandidateDetector(
+        ShapeCandidateDetectorConfig(prefer_raw_source_points=False, min_circle_points=12)
+    ).detect_candidates(document)
+
+    circle_candidates = [candidate for candidate in candidates if candidate.target_type == "circle"]
+    assert circle_candidates
+    best = max(circle_candidates, key=lambda item: item.confidence)
+    assert best.source == "segment_samples_fallback"
+
+
+def test_shape_candidate_detector_config_can_keep_tiny_paths() -> None:
+    document = _tiny_line_document()
+
+    default_candidates = ShapeCandidateDetector().detect_candidates(document)
+    configured_candidates = ShapeCandidateDetector(
+        ShapeCandidateDetectorConfig(
+            filter_tiny_paths=False,
+            min_path_diagonal=1.0,
+            min_line_length=3.0,
+            min_line_confidence=0.2,
+        )
+    ).detect_candidates(document)
+
+    assert default_candidates == ()
+    assert any(candidate.target_type == "line" for candidate in configured_candidates)

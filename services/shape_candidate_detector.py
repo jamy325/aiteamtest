@@ -6,7 +6,7 @@ from typing import Any
 
 from core.precision import PrecisionUtility
 from core.types import Path, Point, Segment, ShapeCandidate, VectorDocument
-from services.ellipse_fitter import RansacEllipseConfig, RansacEllipseFitter, RansacEllipseResult
+from services.ellipse_fitter import RansacEllipseConfig, RansacEllipseFitter
 from services.fitting_confidence import FittingConfidenceInputs, FittingConfidenceMetric
 from services.refiner import (
     PreciseArcFitter,
@@ -42,11 +42,40 @@ class ShapeCandidateDetectorConfig:
     min_rectangle_confidence: float = 0.72
     min_line_confidence: float = 0.7
     min_arc_confidence: float = 0.68
+    circle_fit_rmse_target: float = 0.06
+    circle_fit_rmse_maximum: float = 0.18
+    circle_inlier_ratio_minimum: float = 0.65
+    circle_inlier_ratio_target: float = 0.95
+    circle_fit_score_weight: float = 0.55
+    circle_inlier_score_weight: float = 0.3
+    circle_aspect_score_weight: float = 0.15
+    ellipse_fit_rmse_target: float = 0.03
+    ellipse_fit_rmse_maximum: float = 1.0
+    ellipse_inlier_ratio_minimum: float = 0.7
+    ellipse_inlier_ratio_target: float = 0.95
+    ellipse_axis_ratio_target: float = 0.9
+    ellipse_fit_score_weight: float = 0.45
+    ellipse_inlier_score_weight: float = 0.4
+    ellipse_axis_score_weight: float = 0.15
+    line_fit_rmse_target: float = 0.02
+    line_fit_rmse_maximum: float = 0.15
+    line_inlier_ratio_minimum: float = 0.6
+    line_inlier_ratio_target: float = 0.95
+    line_fit_score_weight: float = 0.5
+    line_straightness_score_weight: float = 0.35
+    line_inlier_score_weight: float = 0.15
     rectangle_rdp_epsilon_ratio: float = 0.025
     rectangle_min_rdp_epsilon: float = 1.0
     rectangle_angle_tolerance: float = math.pi / 9.0
     rectangle_parallel_tolerance: float = math.pi / 10.0
     rectangle_edge_ratio_tolerance: float = 0.35
+    rectangle_right_angle_score_weight: float = 0.45
+    rectangle_parallel_score_weight: float = 0.35
+    rectangle_opposite_length_score_weight: float = 0.2
+    raw_smoothing_min_point_count: int = 64
+    raw_smoothing_min_window: int = 3
+    raw_smoothing_max_window: int = 15
+    raw_smoothing_point_count_divisor: int = 24
     max_segment_window: int = 4
     filter_tiny_paths: bool = True
     filter_open_paths_for_closed_candidates: bool = True
@@ -191,9 +220,23 @@ class ShapeCandidateDetector:
             return None
 
         aspect_score = max(0.0, 1.0 - (abs(aspect_ratio - 1.0) / max(self.config.max_circle_aspect_delta, 1e-9)))
-        fit_score = self._lower_is_better(precise.rmse, target=0.06, maximum=0.18)
-        inlier_score = self._higher_is_better(ransac.inlier_ratio, minimum=0.65, target=0.95)
-        confidence = max(0.0, min(1.0, (fit_score * 0.55) + (inlier_score * 0.3) + (aspect_score * 0.15)))
+        fit_score = self._lower_is_better(
+            precise.rmse,
+            target=self.config.circle_fit_rmse_target,
+            maximum=self.config.circle_fit_rmse_maximum,
+        )
+        inlier_score = self._higher_is_better(
+            ransac.inlier_ratio,
+            minimum=self.config.circle_inlier_ratio_minimum,
+            target=self.config.circle_inlier_ratio_target,
+        )
+        confidence = self._weighted_score(
+            (
+                (fit_score, self.config.circle_fit_score_weight),
+                (inlier_score, self.config.circle_inlier_score_weight),
+                (aspect_score, self.config.circle_aspect_score_weight),
+            )
+        )
         if confidence < self.config.min_circle_confidence:
             return None
 
@@ -242,14 +285,24 @@ class ShapeCandidateDetector:
             return None
 
         axis_ratio = min(result.rx, result.ry) / max(result.rx, result.ry)
-        fit_score = self._lower_is_better(result.fit_error, target=0.03, maximum=self.config.ellipse_ransac_config.max_error)
+        fit_score = self._lower_is_better(
+            result.fit_error,
+            target=self.config.ellipse_fit_rmse_target,
+            maximum=self.config.ellipse_fit_rmse_maximum,
+        )
         inlier_score = self._higher_is_better(
             result.inlier_ratio,
-            minimum=self.config.ellipse_ransac_config.min_inlier_ratio,
-            target=0.95,
+            minimum=self.config.ellipse_inlier_ratio_minimum,
+            target=self.config.ellipse_inlier_ratio_target,
         )
-        axis_score = max(0.0, min(1.0, axis_ratio / 0.9))
-        confidence = max(0.0, min(1.0, (fit_score * 0.45) + (inlier_score * 0.4) + (axis_score * 0.15)))
+        axis_score = max(0.0, min(1.0, axis_ratio / max(self.config.ellipse_axis_ratio_target, 1e-9)))
+        confidence = self._weighted_score(
+            (
+                (fit_score, self.config.ellipse_fit_score_weight),
+                (inlier_score, self.config.ellipse_inlier_score_weight),
+                (axis_score, self.config.ellipse_axis_score_weight),
+            )
+        )
         if confidence < self.config.min_ellipse_confidence:
             return None
 
@@ -275,6 +328,9 @@ class ShapeCandidateDetector:
                     "axes": [result.rx, result.ry],
                     "rotation": result.rotation,
                     "axis_ratio": axis_ratio,
+                    "fit_score": fit_score,
+                    "inlier_score": inlier_score,
+                    "axis_score": axis_score,
                 },
             ),
             reason="closed path has high-confidence ellipse fit",
@@ -313,9 +369,12 @@ class ShapeCandidateDetector:
             self._length_pair_score(edges[0]["length"], edges[2]["length"]),
             self._length_pair_score(edges[1]["length"], edges[3]["length"]),
         )
-        confidence = max(
-            0.0,
-            min(1.0, (right_angle_score * 0.45) + (parallel_score * 0.35) + (opposite_length_score * 0.2)),
+        confidence = self._weighted_score(
+            (
+                (right_angle_score, self.config.rectangle_right_angle_score_weight),
+                (parallel_score, self.config.rectangle_parallel_score_weight),
+                (opposite_length_score, self.config.rectangle_opposite_length_score_weight),
+            )
         )
         if confidence < self.config.min_rectangle_confidence:
             return None
@@ -373,9 +432,23 @@ class ShapeCandidateDetector:
 
         chord_length = PrecisionUtility.distance_between_points(points[0], points[-1])
         straightness_score = max(0.0, min(1.0, chord_length / max(segment_length, 1e-9)))
-        fit_score = self._lower_is_better(precise.rmse, target=0.02, maximum=0.15)
-        inlier_score = self._higher_is_better(ransac.inlier_ratio, minimum=0.6, target=0.95)
-        confidence = max(0.0, min(1.0, (fit_score * 0.5) + (straightness_score * 0.35) + (inlier_score * 0.15)))
+        fit_score = self._lower_is_better(
+            precise.rmse,
+            target=self.config.line_fit_rmse_target,
+            maximum=self.config.line_fit_rmse_maximum,
+        )
+        inlier_score = self._higher_is_better(
+            ransac.inlier_ratio,
+            minimum=self.config.line_inlier_ratio_minimum,
+            target=self.config.line_inlier_ratio_target,
+        )
+        confidence = self._weighted_score(
+            (
+                (fit_score, self.config.line_fit_score_weight),
+                (straightness_score, self.config.line_straightness_score_weight),
+                (inlier_score, self.config.line_inlier_score_weight),
+            )
+        )
         if confidence < self.config.min_line_confidence:
             return None
 
@@ -632,9 +705,12 @@ class ShapeCandidateDetector:
         return self._smooth_point_sequence(deduped, window=window, closed=path_closed)
 
     def _raw_smoothing_window(self, point_count: int) -> int:
-        if point_count < 64:
+        if point_count < self.config.raw_smoothing_min_point_count:
             return 1
-        window = max(3, min(15, point_count // 24))
+        window = max(
+            self.config.raw_smoothing_min_window,
+            min(self.config.raw_smoothing_max_window, point_count // max(self.config.raw_smoothing_point_count_divisor, 1)),
+        )
         if window % 2 == 0:
             window += 1
         return window
@@ -873,6 +949,13 @@ class ShapeCandidateDetector:
         if value >= maximum:
             return 0.0
         return max(0.0, min(1.0, (maximum - value) / (maximum - target)))
+
+    def _weighted_score(self, items: tuple[tuple[float, float], ...]) -> float:
+        total_weight = sum(weight for _, weight in items)
+        if total_weight <= 0.0:
+            return 0.0
+        weighted_sum = sum(score * weight for score, weight in items)
+        return max(0.0, min(1.0, weighted_sum / total_weight))
 
 
 def _polyline_length(points: tuple[Point, ...]) -> float:
