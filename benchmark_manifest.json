@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "case_id": "auto_circle",
+      "image_path": "test_images/circle/test_input_circle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["circle"],
+      "expected_geometry": {
+        "circle": 1
+      },
+      "fail_thresholds": {
+        "min_circle_count": 1,
+        "max_total_score": 500
+      }
+    },
+    {
+      "case_id": "auto_ellipse",
+      "image_path": "test_images/ellipse/test_input_ellipse.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["ellipse"],
+      "expected_geometry": {
+        "ellipse": 1
+      },
+      "fail_thresholds": {
+        "min_ellipse_count": 1,
+        "max_total_score": 500
+      }
+    },
+    {
+      "case_id": "auto_rectangle",
+      "image_path": "test_images/benchmark_rectangle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["rectangle", "line"],
+      "expected_geometry": {
+        "line": 4
+      },
+      "fail_thresholds": {
+        "min_line_count": 4,
+        "max_segment_count": 32
+      }
+    },
+    {
+      "case_id": "freeform_bezier_fallback",
+      "image_path": "test_images/bezier/test_input_bezier_fallback.png",
+      "segment_type": "bezier",
+      "auto_refine": true,
+      "expected_geometry": {
+        "circle": 0,
+        "ellipse": 0
+      },
+      "fail_thresholds": {
+        "max_total_score": 800
+      }
+    }
+  ]
+}
