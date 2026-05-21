@@ -101,10 +101,16 @@ def load_ai_command_schema() -> dict[str, Any]:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
-def normalize_ai_review_response(response: dict[str, Any]) -> dict[str, Any]:
+def normalize_ai_review_response(response: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise ValueError("AI review response must be a dict")
+
     normalized = dict(response)
-    normalized["issues"] = [dict(issue) for issue in response.get("issues", ())]
-    normalized["proposed_commands"] = [_normalize_command(dict(command)) for command in response.get("proposed_commands", ())]
+    normalized["issues"] = [_normalize_issue(issue) for issue in _coerce_sequence(response.get("issues", ()), field_name="issues")]
+    normalized["proposed_commands"] = [
+        _normalize_command(command)
+        for command in _coerce_sequence(response.get("proposed_commands", ()), field_name="proposed_commands")
+    ]
     return normalized
 
 
@@ -113,13 +119,35 @@ def validate_ai_review_response(response: dict[str, Any]) -> None:
     validator.validate(normalize_ai_review_response(response))
 
 
-def _normalize_command(command: dict[str, Any]) -> dict[str, Any]:
+def _normalize_issue(issue: Any) -> dict[str, Any]:
+    if not isinstance(issue, dict):
+        raise ValueError("each issue must be a dict")
+    return dict(issue)
+
+
+def _normalize_command(command: Any, *, depth: int = 0, max_depth: int = 10) -> dict[str, Any]:
+    if not isinstance(command, dict):
+        raise ValueError("each proposed command must be a dict")
+    if depth > max_depth:
+        raise ValueError(f"AI review command nesting exceeds max depth {max_depth}")
+
     normalized = dict(command)
     if "tool" not in normalized and "command_type" in normalized:
         normalized["tool"] = normalized.pop("command_type")
     if normalized.get("tool") == "propose_batch_refinement":
-        normalized["commands"] = [_normalize_command(dict(item)) for item in normalized.get("commands", ())]
+        normalized["commands"] = [
+            _normalize_command(item, depth=depth + 1, max_depth=max_depth)
+            for item in _coerce_sequence(normalized.get("commands", ()), field_name="propose_batch_refinement.commands")
+        ]
     return normalized
+
+
+def _coerce_sequence(value: Any, *, field_name: str) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list or tuple")
+    return list(value)
 
 
 class AIReviewService:

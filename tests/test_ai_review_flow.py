@@ -182,6 +182,86 @@ def test_ai_review_flow_rejects_invalid_schema_response() -> None:
     assert window.review_display_state.summary == ""
 
 
+@pytest.mark.parametrize(
+    "bad_response",
+    (
+        {"summary": "bad", "issues": 123, "proposed_commands": []},
+        {"summary": "bad", "issues": [], "proposed_commands": 123},
+        {
+            "summary": "bad",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_batch_refinement",
+                    "summary": "nested bad payload",
+                    "commands": 123,
+                    "confidence": 0.5,
+                    "requires_user_confirmation": True,
+                }
+            ],
+        },
+        {"summary": "bad", "issues": [], "proposed_commands": [123]},
+    ),
+)
+def test_ai_review_flow_rejects_structurally_invalid_response_with_value_error(bad_response: dict[str, object]) -> None:
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return bad_response
+
+    service = AIReviewService(responder=responder)
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_bad"},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    with pytest.raises(ValueError):
+        service.run_review(review_input)
+
+
+def test_ai_review_flow_rejects_excessive_batch_nesting_with_value_error() -> None:
+    nested_command: dict[str, object] = {
+        "command_type": "propose_replace_segment_with_line",
+        "path_id": "path_1",
+        "segment_range": [0, 1],
+        "reason": "base command",
+        "confidence": 0.7,
+        "requires_user_confirmation": True,
+    }
+    for depth in range(11):
+        nested_command = {
+            "tool": "propose_batch_refinement",
+            "summary": f"batch depth {depth}",
+            "commands": [nested_command],
+            "confidence": 0.6,
+            "requires_user_confirmation": True,
+        }
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {"summary": "too deep", "issues": [], "proposed_commands": [nested_command]}
+
+    service = AIReviewService(responder=responder)
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_deep"},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    with pytest.raises(ValueError, match="max depth"):
+        service.run_review(review_input)
+
+
 def test_canvas_widget_tracks_locked_ids_for_ai_review_input() -> None:
     canvas_widget = CanvasWidget()
 
