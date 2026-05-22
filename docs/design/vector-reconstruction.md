@@ -6,7 +6,7 @@
 
 核心思想：
 
-AI / Policy 负责判断图形语义、提出修改意图并决定是否继续自动执行，传统算法负责精确求解参数，约束系统负责保持几何关系，拓扑系统负责路径连续、闭合和自交检测，坐标系统负责统一计算和导出，外部决策消费者只在需要升级时介入。
+AIAgent 负责判断图形语义并提出修改意图，DecisionPolicy 负责基于结构化 preview_result 决定是否继续自动执行，传统算法负责精确求解参数，约束系统负责保持几何关系，拓扑系统负责路径连续、闭合和自交检测，坐标系统负责统一计算和导出，外部决策消费者只在需要升级时介入。
 
 系统最终应实现：
 
@@ -14,7 +14,7 @@ AI / Policy 负责判断图形语义、提出修改意图并决定是否继续�
 2. 自动提取 binary_contours 和 skeleton_contours。
 3. 在 ContourExtractor 后立即将 pixel 坐标转换为 Vector Space。
 4. 自动生成初始矢量草图。
-5. AI / Policy 审查当前矢量结果。
+5. AIAgent 审查当前矢量结果并提出 proposed_commands。
 6. AI 只提出“修改意图”，不直接决定精确几何参数。
 7. BatchCommandPlanner 规划可验证的 command proposal。
 8. Preview / Validation 生成 overlay、diff、score、topology 与 constraint 检查结果。
@@ -56,7 +56,7 @@ AI / Policy 负责判断图形语义、提出修改意图并决定是否继续�
 
 正确方向：
 
-位图 → 轮廓点 → 坐标标准化 → 初始矢量 → AI / Policy 审查 → 命令规划 → Preview / Validation → DecisionPolicy → Auto Apply / Auto Reject / Requires External Decision → 导出。
+位图 → 轮廓点 → 坐标标准化 → 初始矢量 → AIAgent 审查 → 命令规划 → Preview / Validation → DecisionPolicy → Auto Apply / Auto Reject / Requires External Decision → 导出。
 
 ---
 
@@ -80,16 +80,17 @@ AI / Policy 负责判断图形语义、提出修改意图并决定是否继续�
 14. Scorer：综合评分系统
 15. AIAgent：视觉 AI 审查与意图生成
 16. BatchCommandPlanner：AI 批量提议规划器
-17. RefinementEngine：鲁棒算法精化引擎
-18. RefinementFeedback：算法反哺 AI 的确定性反馈
-19. SharedTangentOptimizer：G1 共切同步优化器
-20. SegmentRigidityPolicy：混合路径刚性策略
-21. TopologyEngine：路径闭合、自交检测和拓扑一致性维护
-22. AlphaAwareStyleAnalyzer：颜色、透明度与样式分析
-23. CommandExecutor：命令执行器
-24. BatchCommandExecutor：批量命令执行器
-25. HistoryManager：撤销与回滚
-26. Exporter：SVG / DXF / JSON 导出
+17. DecisionPolicy：基于结构化 preview_result 的确定性决策器
+18. RefinementEngine：鲁棒算法精化引擎
+19. RefinementFeedback：算法反哺 AI 的确定性反馈
+20. SharedTangentOptimizer：G1 共切同步优化器
+21. SegmentRigidityPolicy：混合路径刚性策略
+22. TopologyEngine：路径闭合、自交检测和拓扑一致性维护
+23. AlphaAwareStyleAnalyzer：颜色、透明度与样式分析
+24. CommandExecutor：命令执行器
+25. BatchCommandExecutor：批量命令执行器
+26. HistoryManager：撤销与回滚
+27. Exporter：SVG / DXF / JSON 导出
 
 整体流程：
 
@@ -120,7 +121,7 @@ GlobalSnappingEngine 推断 coincident 约束
   ↓
 生成 Distance Field Diff 图
   ↓
-AI / Policy 审查并提出单个或批量修改意图
+AIAgent 审查并提出单个或批量修改意图
   ↓
 BreakPointOptimizer 优化切分范围
   ↓
@@ -841,7 +842,7 @@ epsilon = 1px ~ 3px 转换后的 Vector Space 距离
 2. soft coincident 先记录，不强制吸附。
 3. hard coincident 可直接吸附。
 4. 高 confidence 可自动应用。
-5. 中低 confidence 交给 AI / Policy 或 external decision consumer。
+5. 中低 confidence 交给 DecisionPolicy 或 external decision consumer。
 6. 跨 Object 吸附需要更谨慎，避免误合并。
 
 ---
@@ -1370,6 +1371,22 @@ AI 不直接拟合曲线，而是做：
 9. 根据 self_intersection 反馈建议回滚或重切分
 10. 根据 alpha / color variance 建议样式处理
 
+AI 的职责边界必须严格限制为：
+
+1. 视觉理解
+2. 语义判断
+3. 生成 `proposed_commands`
+4. 根据 `PolicyFeedback` 调整下一轮提议
+
+AI 不能决定以下事情：
+
+1. 命令是否可以提交到主文档
+2. 命令是否满足 auto apply 条件
+3. 是否绕过 locked / topology / self-intersection / rollback gate
+4. 是否因为“看起来像对的”就跳过 preview_result
+
+换句话说，AI 可以提出候选修改，但不能裁判自己的提议是否应该执行。
+
 ---
 
 ### 23.2 AI 输入
@@ -1391,6 +1408,56 @@ AI 不直接拟合曲线，而是做：
 13. RefinementFeedback
 14. alpha / color variance
 15. 当前可用工具列表
+
+这些输入用于视觉和语义理解，而不是用于在 AI 内部直接做最终提交决策。
+
+---
+
+### 23.3 PolicyFeedback、RejectionMemory 与 retry budget
+
+当 `DecisionPolicy` 拒绝某个提议后，AI 应收到结构化反馈，而不是只看到一个笼统的“失败”。
+
+推荐反馈结构至少包含：
+
+```json
+{
+  "reason_code": "topology_regression",
+  "metrics_delta": {
+    "score_before": 12.4,
+    "score_after": 13.1,
+    "self_intersection_delta": 1,
+    "constraint_violation_delta": 2
+  },
+  "policy_hint": "avoid freeform replacement on this path",
+  "retry_constraints": {
+    "max_scope": "single_segment",
+    "forbid_risk_level_above": "medium"
+  },
+  "forbidden_repeated_commands": [
+    "propose_replace_path_with_bezier:path_001"
+  ]
+}
+```
+
+其中：
+
+- `PolicyFeedback` 用于告诉 AI “为什么没过”。
+- `RejectionMemory` 用于避免 AI 在同一上下文中反复提出已被拒绝的等价命令。
+- `retry budget` 用于限制 AI 在同一目标上的重试次数。
+
+推荐至少维护：
+
+1. 每个 path / segment 的重试计数
+2. 每类 reason_code 的最近失败记录
+3. forbidden repeated commands 列表
+4. stop condition 命中记录
+
+典型 stop condition：
+
+1. 连续多次 `schema_invalid`
+2. 连续多次 `topology_regression`
+3. 重试后 score 仍无明显改善
+4. 预算耗尽仍无法通过 locked / topology / self-intersection gate
 
 ---
 
@@ -1598,29 +1665,160 @@ AI 不直接拟合曲线，而是做：
 
 ---
 
-## 26. CommandExecutor 命令执行器
+## 26. DecisionPolicy 与事务化执行
 
-### 26.1 职责
+### 26.1 AIAgent / DecisionPolicy / CommandExecutor 职责边界
 
-1. 校验 AI 命令是否合法。
-2. 检查用户锁定。
+三者必须严格拆分：
+
+1. `AIAgent`：只负责视觉理解、语义判断、提出 `proposed_commands`。
+2. `DecisionPolicy`：只负责基于结构化 preview_result 做确定性决策。
+3. `CommandExecutor`：只负责事务化执行 command，不做语义判断，不做 policy 决策。
+
+`DecisionPolicy` 的输入只能来自结构化数据，例如：
+
+1. `preview_result`
+2. `score`
+3. `topology`
+4. `constraints`
+5. `fitting_confidence`
+6. `risk_level`
+7. `affected scope`
+8. `locked target status`
+9. `rollback snapshot availability`
+
+`DecisionPolicy` 不应重新做视觉判断，也不应根据一张 overlay 图直接拍板。
+
+### 26.2 事务化预览执行
+
+所有命令都应先经过 dry-run，而不是直接改主文档：
+
+```text
+proposed_command
+  -> clone VectorDocument
+  -> dry_run on cloned VectorDocument
+  -> preview_result
+  -> DecisionPolicy
+  -> commit / reject / requires_external_decision
+```
+
+其中：
+
+1. `clone VectorDocument` 用于保证预览阶段可回滚、无副作用。
+2. `preview_result` 至少应包含 score delta、topology delta、constraint delta、self-intersection delta、complexity delta。
+3. 只有在 `DecisionPolicy` 明确返回 `auto_apply` 时，事务结果才允许提交回主文档。
+4. 若返回 `auto_reject`，必须丢弃预览文档。
+5. 若返回 `requires_external_decision`，则保留 preview report，但不提交修改。
+
+### 26.3 Auto Apply 硬门槛
+
+`auto_apply` 至少应同时满足以下条件：
+
+1. score 明确改善。
+2. 自交不增加。
+3. topology 不恶化。
+4. locked 对象未修改。
+5. constraint violation 不增加。
+6. fitting confidence 达标。
+7. risk_level 允许自动执行。
+8. affected_segments / affected_paths 范围可控。
+9. rollback snapshot 已创建。
+
+推荐进一步检查：
+
+1. complexity 上升时必须有明确 edge_error 收益。
+2. coordinate system 一致。
+3. 批量命令之间不存在互相覆盖或重复执行。
+
+AI confidence 只能作为输入特征之一，不能单独决定 `auto_apply`。
+
+### 26.4 Auto Reject 硬门槛
+
+以下任一条件成立，都应直接 `auto_reject`：
+
+1. dry_run 失败。
+2. schema 无效。
+3. inlier_ratio 过低。
+4. fit_error 升高。
+5. 新增自交。
+6. 破坏 locked target。
+7. topology 恶化。
+8. constraint violation 增加。
+9. complexity 上升但 edge_error 没明显下降。
+10. 坐标系统不一致。
+
+此外，以下场景也不应直接自动应用：
+
+1. 影响范围过大但收益不确定。
+2. 高风险自由曲线替换没有足够 preview gain。
+3. 多次被 `RejectionMemory` 命中的重复提议。
+4. Bezier fallback 等高风险操作尚未满足当前 `AutonomyLevel` 的自动执行边界。
+
+### 26.5 AutonomyLevel
+
+引擎应显式支持不同自主等级：
+
+1. `manual_only`
+2. `assisted`
+3. `autonomous_safe`
+4. `autonomous_full`
+
+建议语义：
+
+- `manual_only`：所有命令都进入 `requires_external_decision`。
+- `assisted`：只有极低风险命令可自动应用，其余升级。
+- `autonomous_safe`：满足全部硬门槛的安全命令可自动应用。
+- `autonomous_full`：更积极地自动推进，但仍不得绕过核心安全门。
+
+无论等级如何，以下 gate 都不能被绕过：
+
+1. locked gate
+2. topology gate
+3. self-intersection gate
+4. rollback gate
+
+### 26.6 PolicyFeedback、RejectionMemory 与 stop condition
+
+`DecisionPolicy` 在 reject / escalate 后应返回：
+
+1. `reason_code`
+2. `metrics_delta`
+3. `policy_hint`
+4. `retry_constraints`
+5. `forbidden repeated commands`
+
+这样 AI 下一轮才能基于确定性反馈调整提议，而不是盲目重复。
+
+推荐 stop condition：
+
+1. retry budget 耗尽
+2. 连续命中同一 `reason_code`
+3. 无法降低 risk_level
+4. 连续多轮 score 无改善
+
+这可以避免 AI 因反复提出被拒绝命令而进入死循环。
+
+### 26.7 CommandExecutor 职责
+
+1. 校验命令 schema。
+2. 检查锁定状态。
 3. 检查坐标系统。
-4. 调用 BreakPointOptimizer。
-5. 调用 RefinementEngine。
-6. 调用 SharedTangentOptimizer。
-7. 获取 RefinementFeedback。
-8. 应用 SegmentRigidityPolicy。
-9. 应用 TopologyEngine。
-10. 检测 self-intersection。
-11. 应用 ConstraintGraph。
-12. 更新 VectorDocument。
-13. 重新评分。
-14. 记录历史快照。
-15. 返回执行结果和影响范围。
+4. 在事务上下文中执行 dry-run 或 commit。
+5. 调用 BreakPointOptimizer、RefinementEngine、SharedTangentOptimizer 等确定性模块。
+6. 应用 SegmentRigidityPolicy、TopologyEngine、ConstraintGraph。
+7. 记录 rollback snapshot。
+8. 返回执行结果和影响范围。
+
+CommandExecutor 不负责：
+
+1. 视觉判断
+2. 语义判断
+3. policy 决策
+4. “凭经验”跳过 safety gate
 
 ---
 
-### 26.2 执行结果
+### 26.8 执行结果
 
 ```json
 {
@@ -1739,7 +1937,7 @@ rollback_batch_on_failure = false
 14. 查看 self-intersection 标记
 15. AI 审查
 16. 对 decision queue 执行 apply / reject / escalate
-17. 批量批准或拒绝 AI / Policy 建议
+17. 批量批准或拒绝 AI 提议 / decision queue
 18. 撤销
 19. 导出 SVG / DXF / JSON
 
@@ -2117,7 +2315,7 @@ AI 输出 proposed_commands 后，可由 DecisionPolicy 自动执行，或在高
 1. 输入参考图片。
 2. 系统自动生成初始矢量。
 3. 系统生成 overlay、diff、candidates 和 preview summary。
-4. AI / Policy 审查结构化上下文。
+4. AIAgent 审查结构化上下文，DecisionPolicy 只读取 preview_result 与相关结构化指标。
 5. AI 标出：
    - 哪里应为圆
    - 哪里应为圆弧
