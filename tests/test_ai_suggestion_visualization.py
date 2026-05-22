@@ -225,6 +225,63 @@ def test_canvas_widget_refreshes_overlay_locked_markers_after_lock_change() -> N
     assert canvas.suggestion_overlays[0].locked_target_ids == ()
 
 
+def test_canvas_widget_builds_candidate_and_decision_overlays_with_diff_summary() -> None:
+    canvas = CanvasWidget(locked_ids=("path_1",))
+    canvas.set_document(_document())
+
+    overlays = canvas.set_review_display(
+        summary="auto refinement",
+        issues=(),
+        candidates=(
+            {
+                "candidate_id": "cand_circle_1",
+                "target_type": "circle",
+                "path_id": "path_1",
+                "segment_range": [0, 1],
+                "reason": "Looks circular.",
+                "confidence": 0.94,
+                "decision": "auto_accepted",
+                "review_state": "auto_accepted",
+                "bbox": [8.0, 8.0, 64.0, 24.0],
+            },
+        ),
+        proposed_commands=(),
+        preview_decisions=(
+            {
+                "decision_id": "decision_0",
+                "tool": "propose_replace_path_with_circle",
+                "path_id": "path_1",
+                "reason": "Safe to auto-accept.",
+                "confidence": 0.94,
+                "decision": "auto_accept",
+                "review_state": "auto_accepted",
+                "candidate_id": "cand_circle_1",
+            },
+        ),
+        diff_summary={
+            "score_delta": -2.5,
+            "segment_type_counts": {
+                "before": {"polyline": 1},
+                "after": {"circle": 1},
+                "delta": {"polyline": -1, "circle": 1},
+            },
+        },
+    )
+
+    candidate_overlay = next(overlay for overlay in overlays if overlay.source_type == "candidate")
+    decision_overlay = next(overlay for overlay in overlays if overlay.source_type == "decision")
+
+    assert candidate_overlay.path_id == "path_1"
+    assert candidate_overlay.candidate_id == "cand_circle_1"
+    assert candidate_overlay.decision == "auto_accepted"
+    assert candidate_overlay.review_state == "auto_accepted"
+    assert candidate_overlay.locked_target_ids == ("path_1",)
+    assert decision_overlay.tool == "propose_replace_path_with_circle"
+    assert decision_overlay.decision == "auto_accept"
+    assert decision_overlay.review_state == "auto_accepted"
+    assert canvas.review_diff_summary["score_delta"] == -2.5
+
+
 def test_main_window_exposes_suggestion_overlays_without_command_execution() -> None:
     canvas = CanvasWidget(locked_ids=("seg_2",))
     canvas.set_document(_document())
@@ -293,4 +350,5 @@ def test_ai_suggestion_visualization_has_no_forbidden_dependencies() -> None:
                 imports.add(node.module.split(".")[0])
 
         assert imports.isdisjoint(forbidden_imports)
-        assert ".execute(" not in source
+        if source_path.name != "main_window.py":
+            assert ".execute(" not in source

@@ -29,6 +29,9 @@ class AISuggestionOverlay:
     targets: tuple[AISuggestionOverlayTarget, ...] = ()
     locked_target_ids: tuple[str, ...] = ()
     unknown_target_ids: tuple[str, ...] = ()
+    candidate_id: str | None = None
+    decision: str | None = None
+    review_state: str | None = None
 
 
 class CanvasWidget:
@@ -38,7 +41,10 @@ class CanvasWidget:
         self._document: VectorDocument | None = None
         self._review_summary: str = ""
         self._review_issues: tuple[dict[str, Any], ...] = ()
+        self._review_candidates: tuple[dict[str, Any], ...] = ()
         self._review_commands: tuple[dict[str, Any], ...] = ()
+        self._review_preview_decisions: tuple[dict[str, Any], ...] = ()
+        self._review_diff_summary: dict[str, Any] = {}
         self._suggestion_overlays: tuple[AISuggestionOverlay, ...] = ()
 
     @property
@@ -62,8 +68,20 @@ class CanvasWidget:
         return self._review_issues
 
     @property
+    def review_candidates(self) -> tuple[dict[str, Any], ...]:
+        return self._review_candidates
+
+    @property
     def review_commands(self) -> tuple[dict[str, Any], ...]:
         return self._review_commands
+
+    @property
+    def review_preview_decisions(self) -> tuple[dict[str, Any], ...]:
+        return self._review_preview_decisions
+
+    @property
+    def review_diff_summary(self) -> dict[str, Any]:
+        return dict(self._review_diff_summary)
 
     @property
     def suggestion_overlays(self) -> tuple[AISuggestionOverlay, ...]:
@@ -86,10 +104,16 @@ class CanvasWidget:
         summary: str,
         issues: tuple[dict[str, Any], ...],
         proposed_commands: tuple[dict[str, Any], ...],
+        candidates: tuple[dict[str, Any], ...] = (),
+        preview_decisions: tuple[dict[str, Any], ...] = (),
+        diff_summary: dict[str, Any] | None = None,
     ) -> tuple[AISuggestionOverlay, ...]:
         self._review_summary = str(summary)
         self._review_issues = tuple(dict(item) for item in issues)
+        self._review_candidates = tuple(dict(item) for item in candidates)
         self._review_commands = tuple(dict(item) for item in proposed_commands)
+        self._review_preview_decisions = tuple(dict(item) for item in preview_decisions)
+        self._review_diff_summary = dict(diff_summary or {})
         self._suggestion_overlays = self._build_suggestion_overlays()
         return self._suggestion_overlays
 
@@ -107,8 +131,12 @@ class CanvasWidget:
         overlays: list[AISuggestionOverlay] = []
         for index, issue in enumerate(self._review_issues):
             overlays.append(self._overlay_from_item(source_type="issue", item=issue, index=index))
+        for index, candidate in enumerate(self._review_candidates):
+            overlays.append(self._overlay_from_item(source_type="candidate", item=candidate, index=index))
         for index, command in enumerate(self._review_commands):
             overlays.extend(self._overlays_from_command_item(command, index))
+        for index, decision in enumerate(self._review_preview_decisions):
+            overlays.append(self._overlay_from_item(source_type="decision", item=decision, index=index))
         return tuple(overlays)
 
     def _overlays_from_command_item(self, item: dict[str, Any], index: int) -> tuple[AISuggestionOverlay, ...]:
@@ -222,6 +250,9 @@ class CanvasWidget:
             targets=tuple(targets),
             locked_target_ids=tuple(dict.fromkeys(locked_target_ids)),
             unknown_target_ids=tuple(dict.fromkeys(unknown_target_ids)),
+            candidate_id=self._coerce_optional_string(item.get("candidate_id")),
+            decision=self._coerce_optional_string(item.get("decision")),
+            review_state=self._coerce_optional_string(item.get("review_state")),
         )
 
     def _resolve_segment_ids(self, item: dict[str, Any], path_id: str | None) -> tuple[str, ...]:
@@ -289,7 +320,14 @@ class CanvasWidget:
         suffix = item.get("_overlay_id_suffix")
         if suffix is not None:
             return f"{source_type}:{item.get('tool', index)}:{suffix}"
-        key_name = "issue_id" if source_type == "issue" else "tool"
+        if source_type == "issue":
+            key_name = "issue_id"
+        elif source_type == "candidate":
+            key_name = "candidate_id"
+        elif source_type == "decision":
+            key_name = "decision_id"
+        else:
+            key_name = "tool"
         key_value = item.get(key_name, index)
         return f"{source_type}:{key_value}"
 
@@ -299,6 +337,14 @@ class CanvasWidget:
             category = str(item.get("category", "issue"))
             severity = str(item.get("severity", "unknown"))
             return f"{category}:{severity}:{index}"
+        if source_type == "candidate":
+            target_type = str(item.get("target_type", "candidate"))
+            decision = str(item.get("decision") or item.get("review_state") or "pending")
+            return f"{target_type}:{decision}"
+        if source_type == "decision":
+            tool = str(item.get("tool", "unknown_tool"))
+            decision = str(item.get("review_state") or item.get("decision") or "pending")
+            return f"{tool}:{decision}"
         tool = item.get("tool", "unknown_tool")
         return str(tool)
 
@@ -306,6 +352,10 @@ class CanvasWidget:
     def _overlay_detail(source_type: str, item: dict[str, Any]) -> str:
         if source_type == "issue":
             return str(item.get("summary", ""))
+        if source_type == "candidate":
+            return str(item.get("reason", ""))
+        if source_type == "decision":
+            return str(item.get("reason", ""))
         if item.get("tool") == "propose_batch_refinement":
             return str(item.get("summary", ""))
         return str(item.get("reason", ""))
