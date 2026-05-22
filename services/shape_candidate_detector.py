@@ -6,6 +6,7 @@ from typing import Any
 
 from core.precision import PrecisionUtility
 from core.types import Path, Point, Segment, ShapeCandidate, VectorDocument
+from services.bezier_fallback_fitter import BezierFallbackFitter, BezierFallbackFitterConfig
 from services.ellipse_fitter import RansacEllipseConfig, RansacEllipseFitter
 from services.fitting_confidence import FittingConfidenceInputs, FittingConfidenceMetric
 from services.refiner import (
@@ -77,6 +78,14 @@ class ShapeCandidateDetectorConfig:
     raw_smoothing_max_window: int = 15
     raw_smoothing_point_count_divisor: int = 24
     max_segment_window: int = 4
+    enable_bezier_fallback: bool = False
+    min_bezier_points: int = 12
+    min_bezier_confidence: float = 0.45
+    bezier_max_error: float = 3.0
+    bezier_max_segments: int = 8
+    bezier_smoothness: float = 0.75
+    bezier_standard_confidence_threshold: float = 0.75
+    bezier_confidence_scale: float = 0.85
     filter_tiny_paths: bool = True
     filter_open_paths_for_closed_candidates: bool = True
     prefer_raw_source_points: bool = True
@@ -97,6 +106,13 @@ class ShapeCandidateDetector:
         self.config = config or ShapeCandidateDetectorConfig()
         self.segment_sampler = segment_sampler or SegmentSampler()
         self.fitting_confidence_metric = fitting_confidence_metric or FittingConfidenceMetric()
+        self.bezier_fallback_fitter = BezierFallbackFitter(
+            BezierFallbackFitterConfig(
+                max_error=self.config.bezier_max_error,
+                max_segments=self.config.bezier_max_segments,
+                smoothness=self.config.bezier_smoothness,
+            )
+        )
         self.line_ransac_fitter = RansacLineFitter(self.config.line_ransac_config)
         self.circle_ransac_fitter = RansacCircleFitter(self.config.circle_ransac_config)
         self.arc_ransac_fitter = RansacArcFitter(self.config.arc_ransac_config)
@@ -129,26 +145,44 @@ class ShapeCandidateDetector:
         path: Path,
         segments: tuple[Segment, ...],
     ) -> tuple[ShapeCandidate, ...]:
-        if self.config.filter_open_paths_for_closed_candidates and not path.closed:
-            return ()
-
         points, source, raw_point_count = self._path_points(document, path, segments)
-        if len(points) < self.config.min_rectangle_points:
+        minimum_points = min(self.config.min_rectangle_points, self.config.min_bezier_points)
+        if len(points) < minimum_points:
             return ()
 
         bbox = self._bbox(points)
         if bbox["width"] < self.config.min_bbox_extent or bbox["height"] < self.config.min_bbox_extent:
             return ()
 
-        circle_candidate = self._circle_candidate(path, segments, points, source, raw_point_count, bbox)
-        ellipse_candidate = self._ellipse_candidate(path, segments, points, source, raw_point_count, bbox)
-        rectangle_candidate = self._rectangle_candidate(path, segments, points, source, raw_point_count, bbox)
+        result: list[ShapeCandidate] = []
+        if not (self.config.filter_open_paths_for_closed_candidates and not path.closed):
+            circle_candidate = self._circle_candidate(path, segments, points, source, raw_point_count, bbox)
+            ellipse_candidate = self._ellipse_candidate(path, segments, points, source, raw_point_count, bbox)
+            rectangle_candidate = self._rectangle_candidate(path, segments, points, source, raw_point_count, bbox)
 
-        result = [candidate for candidate in (circle_candidate, ellipse_candidate, rectangle_candidate) if candidate is not None]
-        if circle_candidate is not None and ellipse_candidate is not None:
-            aspect_ratio = float(circle_candidate.evidence["aspect_ratio"])
-            if abs(aspect_ratio - 1.0) <= self.config.max_circle_aspect_delta and circle_candidate.confidence >= ellipse_candidate.confidence:
-                result = [candidate for candidate in result if candidate.target_type != "ellipse"]
+            result = [
+                candidate
+                for candidate in (circle_candidate, ellipse_candidate, rectangle_candidate)
+                if candidate is not None
+            ]
+            if circle_candidate is not None and ellipse_candidate is not None:
+                aspect_ratio = float(circle_candidate.evidence["aspect_ratio"])
+                if (
+                    abs(aspect_ratio - 1.0) <= self.config.max_circle_aspect_delta
+                    and circle_candidate.confidence >= ellipse_candidate.confidence
+                ):
+                    result = [candidate for candidate in result if candidate.target_type != "ellipse"]
+        bezier_candidate = self._bezier_fallback_candidate(
+            path,
+            segments,
+            points,
+            source,
+            raw_point_count,
+            bbox,
+            tuple(result),
+        )
+        if bezier_candidate is not None:
+            result.append(bezier_candidate)
         return tuple(result)
 
     def _detect_segment_range_candidates(
@@ -405,6 +439,65 @@ class ShapeCandidateDetector:
                 },
             ),
             reason="closed path simplifies to four near-orthogonal, opposite-parallel edges",
+        )
+
+    def _bezier_fallback_candidate(
+        self,
+        path: Path,
+        segments: tuple[Segment, ...],
+        points: tuple[Point, ...],
+        source: str,
+        raw_point_count: int,
+        bbox: dict[str, float],
+        standard_candidates: tuple[ShapeCandidate, ...],
+    ) -> ShapeCandidate | None:
+        if not self.config.enable_bezier_fallback:
+            return None
+        if len(points) < self.config.min_bezier_points:
+            return None
+        if any(candidate.confidence >= self.config.bezier_standard_confidence_threshold for candidate in standard_candidates):
+            return None
+
+        fit_result = self.bezier_fallback_fitter.fit_contour(
+            points,
+            path_id=path.path_id,
+            closed=path.closed,
+            max_error=self.config.bezier_max_error,
+            max_segments=self.config.bezier_max_segments,
+            smoothness=self.config.bezier_smoothness,
+        )
+        confidence = max(0.0, min(1.0, fit_result.confidence * self.config.bezier_confidence_scale))
+        if confidence < self.config.min_bezier_confidence:
+            return None
+
+        complexity_delta = len(fit_result.segments) - len(segments)
+        return ShapeCandidate(
+            candidate_id=f"{path.path_id}:bezier:0-{len(segments) - 1}",
+            target_type="bezier",
+            path_id=path.path_id,
+            segment_range=(0, len(segments) - 1),
+            source=source,
+            confidence=confidence,
+            evidence=self._base_evidence(
+                source=source,
+                raw_point_count=max(raw_point_count, fit_result.source_point_count),
+                fit_point_count=fit_result.source_point_count,
+                segment_count=len(fit_result.segments),
+                bbox=bbox,
+                fit_error=fit_result.fit_error,
+                inlier_ratio=1.0,
+                model_complexity_delta=complexity_delta,
+                aspect_ratio=self._aspect_ratio(bbox),
+                extra={
+                    "closed": fit_result.closed,
+                    "fitted_segment_count": len(fit_result.segments),
+                    "fitted_anchor_count": len(fit_result.anchors),
+                    "fallback_max_error": fit_result.max_error,
+                    "fallback_complexity_score": fit_result.complexity_score,
+                    "fallback_raw_confidence": fit_result.confidence,
+                },
+            ),
+            reason="freeform contour is not well explained by standard geometry and fits a compact bezier fallback",
         )
 
     def _line_candidate(

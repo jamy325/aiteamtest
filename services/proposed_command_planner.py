@@ -122,6 +122,11 @@ class ProposedCommandPlanner:
     def _tool_for_candidate(self, candidate: ShapeCandidate, path: Path) -> str | None:
         if candidate.target_type in PATH_LEVEL_TOOL_BY_TARGET and self._covers_full_path(candidate, path):
             return PATH_LEVEL_TOOL_BY_TARGET[candidate.target_type]
+        if candidate.target_type == "bezier":
+            # Reserved for future propose_replace_path_with_bezier /
+            # propose_replace_segment_with_bezier support once schema and
+            # executor paths are implemented.
+            return None
         return SEGMENT_LEVEL_TOOL_BY_TARGET.get(candidate.target_type)
 
     def _base_command(
@@ -230,6 +235,8 @@ class ProposedCommandPlanner:
             return "This region reads as a straight edge and should be refined as a line."
         if candidate.target_type == "arc":
             return "This region reads as a circular arc and should be refined as an arc."
+        if candidate.target_type == "bezier":
+            return "This region needs freeform bezier fallback refinement once bezier replacement commands are supported."
         return "This region should be refined as a standard geometric primitive."
 
 

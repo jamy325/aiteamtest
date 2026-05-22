@@ -242,6 +242,72 @@ def _tiny_line_document() -> object:
     return document
 
 
+def _raw_contour_document(
+    points: tuple[tuple[float, float], ...],
+    *,
+    path_id: str,
+    contour_id: str,
+    closed: bool,
+) -> object:
+    document = create_document(
+        document_id=f"{path_id}_doc",
+        width=240.0,
+        height=240.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {
+                            "contour_id": contour_id,
+                            "source": "binary_contour",
+                            "points": [[point[0], point[1]] for point in points],
+                            "coordinate_space": "vector",
+                            "closed": closed,
+                            "area": 0.0,
+                            "depth": 0,
+                            "parent_contour": None,
+                            "children": [],
+                        }
+                    ],
+                    "skeleton_contours": [],
+                }
+            }
+        },
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id=path_id,
+            closed=closed,
+            source="binary_contour",
+            segments=(f"{path_id}_seg_0",),
+            metadata={"source_contour_id": contour_id},
+        ),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            segment_id=f"{path_id}_seg_0",
+            path_id=path_id,
+            type="polyline",
+            params={"points": [[point[0], point[1]] for point in points]},
+        ),
+    )
+    return document
+
+
+def _open_wave_document() -> object:
+    points = tuple(
+        (
+            12.0 + (index * 2.5),
+            60.0 + (14.0 * math.sin((index / 47.0) * math.tau * 1.5)),
+        )
+        for index in range(48)
+    )
+    return _raw_contour_document(points, path_id="wave_path", contour_id="wave_contour_0", closed=False)
+
+
 def test_shape_candidate_detector_detects_circle_candidate_from_circle_fixture() -> None:
     fixture_path = Path("test_images/circle/test_input_circle.png")
     document = MinimalPipeline(segment_type="line").run_from_file(fixture_path, document_id="circle_fixture").document
@@ -358,3 +424,75 @@ def test_shape_candidate_detector_config_can_keep_tiny_paths() -> None:
 
     assert default_candidates == ()
     assert any(candidate.target_type == "line" for candidate in configured_candidates)
+
+
+def test_shape_candidate_detector_can_emit_bezier_fallback_for_open_wave_when_enabled() -> None:
+    candidates = ShapeCandidateDetector(
+        ShapeCandidateDetectorConfig(
+            enable_bezier_fallback=True,
+            min_bezier_confidence=0.35,
+            bezier_max_error=3.0,
+            bezier_max_segments=5,
+        )
+    ).detect_candidates(_open_wave_document())
+
+    bezier_candidates = [candidate for candidate in candidates if candidate.target_type == "bezier"]
+    assert bezier_candidates
+    best = max(bezier_candidates, key=lambda item: item.confidence)
+    assert best.evidence["fitted_segment_count"] <= 5
+    assert best.confidence >= 0.35
+
+
+def test_shape_candidate_detector_can_emit_bezier_fallback_for_blob_fixture_when_enabled() -> None:
+    fixture_path = Path("test_images/bezier/test_input_bezier_fallback.png")
+    document = MinimalPipeline(segment_type="line").run_from_file(fixture_path, document_id="blob_fixture").document
+
+    candidates = ShapeCandidateDetector(
+        ShapeCandidateDetectorConfig(
+            enable_bezier_fallback=True,
+            min_bezier_confidence=0.35,
+            bezier_max_error=3.5,
+            bezier_max_segments=8,
+        )
+    ).detect_candidates(document)
+
+    bezier_candidates = [candidate for candidate in candidates if candidate.target_type == "bezier"]
+    assert bezier_candidates
+    best = max(bezier_candidates, key=lambda item: item.confidence)
+    assert best.source == "raw_contour_points"
+    assert best.evidence["fitted_segment_count"] <= 8
+    assert best.evidence["fitted_segment_count"] < (best.evidence["raw_point_count"] // 4)
+
+
+def test_shape_candidate_detector_does_not_prefer_bezier_fallback_for_circle_or_ellipse() -> None:
+    detector = ShapeCandidateDetector(
+        ShapeCandidateDetectorConfig(
+            enable_bezier_fallback=True,
+            min_bezier_confidence=0.2,
+            bezier_standard_confidence_threshold=0.7,
+        )
+    )
+
+    circle_document = MinimalPipeline(segment_type="line").run_from_file(
+        Path("test_images/circle/test_input_circle.png"),
+        document_id="circle_fixture_bezier_guard",
+    ).document
+    ellipse_document = MinimalPipeline(segment_type="line").run_from_file(
+        Path("test_images/ellipse/test_input_ellipse.png"),
+        document_id="ellipse_fixture_bezier_guard",
+    ).document
+
+    circle_candidates = detector.detect_candidates(circle_document)
+    ellipse_candidates = detector.detect_candidates(ellipse_document)
+
+    circle_shape_candidates = [
+        candidate for candidate in circle_candidates if candidate.target_type in {"circle", "ellipse", "bezier"}
+    ]
+    ellipse_shape_candidates = [
+        candidate for candidate in ellipse_candidates if candidate.target_type in {"circle", "ellipse", "bezier"}
+    ]
+
+    assert any(candidate.target_type == "circle" for candidate in circle_shape_candidates)
+    assert any(candidate.target_type == "ellipse" for candidate in ellipse_shape_candidates)
+    assert max(circle_shape_candidates, key=lambda item: item.confidence).target_type == "circle"
+    assert max(ellipse_shape_candidates, key=lambda item: item.confidence).target_type == "ellipse"
