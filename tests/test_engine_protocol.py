@@ -126,6 +126,12 @@ def test_decision_policy_result_requires_external_decision_payload() -> None:
     assert restored == result
 
 
+def test_engine_status_uses_requires_external_decision_value_and_accepts_legacy_alias() -> None:
+    assert EngineStatus.REQUIRES_EXTERNAL_DECISION.value == "requires_external_decision"
+    assert EngineStatus.from_legacy("needs_external_decision") is EngineStatus.REQUIRES_EXTERNAL_DECISION
+    assert EngineStatus.from_legacy("requires_external_decision") is EngineStatus.REQUIRES_EXTERNAL_DECISION
+
+
 def test_risk_levels_are_sortable() -> None:
     levels = [RiskLevel.HIGH, RiskLevel.LOW, RiskLevel.MEDIUM_HIGH, RiskLevel.MEDIUM]
 
@@ -170,7 +176,7 @@ def test_engine_result_round_trips_with_document_and_feedback_collections() -> N
         policy_feedback=feedback,
     )
     result = EngineResult(
-        status=EngineStatus.NEEDS_EXTERNAL_DECISION,
+        status=EngineStatus.REQUIRES_EXTERNAL_DECISION,
         document=document,
         report={"summary": "one decision escalated"},
         decisions=(decision,),

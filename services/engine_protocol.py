@@ -94,8 +94,21 @@ class RiskLevel(_StringEnum):
 
 class EngineStatus(_StringEnum):
     COMPLETED = "completed"
-    NEEDS_EXTERNAL_DECISION = "needs_external_decision"
+    REQUIRES_EXTERNAL_DECISION = "requires_external_decision"
     FAILED = "failed"
+
+    @classmethod
+    def from_legacy(cls, value: str) -> "EngineStatus":
+        normalized = str(value).strip().lower()
+        mapping = {
+            "completed": cls.COMPLETED,
+            "failed": cls.FAILED,
+            "requires_external_decision": cls.REQUIRES_EXTERNAL_DECISION,
+            "needs_external_decision": cls.REQUIRES_EXTERNAL_DECISION,
+        }
+        if normalized not in mapping:
+            raise ValueError(f"unsupported legacy engine status: {value}")
+        return mapping[normalized]
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +313,7 @@ class EngineResult:
     def from_dict(cls, data: Mapping[str, Any]) -> "EngineResult":
         document_raw = data.get("document")
         return cls(
-            status=EngineStatus(str(data["status"])),
+            status=EngineStatus.from_legacy(str(data["status"])),
             document=None if document_raw is None else document_from_dict(document_raw),
             report=dict(data.get("report", {})),
             decisions=tuple(
