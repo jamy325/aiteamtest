@@ -515,6 +515,74 @@ def test_preview_auto_accept_policy_rejects_low_inlier_ratio() -> None:
     assert result.decisions[0].risk_flags == ("low_inlier_ratio",)
 
 
+def test_preview_auto_accept_policy_rejects_fit_error_increase_even_with_good_score_and_confidence() -> None:
+    document = _document()
+    command = {
+        "command_id": "fit_error_up",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.95,
+        "requires_user_confirmation": True,
+        "policy_metrics": {
+            "fit_error_delta": 5.0,
+            "rollback_snapshot_created": True,
+        },
+    }
+    preview_service = FakePreviewService({"fit_error_up": _preview_result(command_id="fit_error_up", score_delta=-1.2)})
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:fit_error_up"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "fit_error_increased"
+    assert result.decisions[0].policy_feedback.metrics_delta["fit_error_delta"] == 5.0
+    assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_rejects_complexity_increase_without_edge_gain() -> None:
+    document = _document()
+    command = {
+        "command_id": "complexity_up",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.95,
+        "requires_user_confirmation": True,
+        "policy_metrics": {
+            "complexity_delta": 10.0,
+            "edge_error_delta": -0.001,
+            "rollback_snapshot_created": True,
+        },
+    }
+    preview_service = FakePreviewService({"complexity_up": _preview_result(command_id="complexity_up", score_delta=-1.2)})
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:complexity_up"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "complexity_increase_without_edge_gain"
+    assert result.decisions[0].policy_feedback.metrics_delta["complexity_delta"] == 10.0
+    assert result.decisions[0].policy_feedback.metrics_delta["edge_error_delta"] == -0.001
+    assert result.final_document == document
+
+
 def test_preview_auto_accept_policy_rejects_coordinate_system_inconsistency() -> None:
     document = _document()
     command = {

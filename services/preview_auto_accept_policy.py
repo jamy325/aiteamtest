@@ -29,6 +29,9 @@ class PreviewAndAutoAcceptPolicyConfig:
     min_inlier_ratio: float = 0.6
     auto_accept_min_score_improvement: float = 0.5
     reject_score_regression_over: float = 0.0
+    max_fit_error_increase: float = 0.0
+    max_complexity_increase: float = 0.0
+    min_edge_error_gain_for_complexity_increase: float = 0.01
     max_constraint_violation_increase: int = 0
     max_affected_segments: int = 24
     medium_confidence_threshold: float = 0.73
@@ -523,6 +526,52 @@ class PreviewAndAutoAcceptPolicy:
                 ),
             )
 
+        if float(policy_metrics.get("fit_error_delta", 0.0)) > self.config.max_fit_error_increase:
+            return PreviewDecision(
+                command=dict(command),
+                preview_result=preview,
+                decision="reject",
+                reason="Preview increases fit error beyond the allowed threshold.",
+                risk_flags=("fit_error_increased",),
+                decision_kind=DecisionKind.AUTO_REJECT,
+                risk_level=risk_level,
+                policy_feedback=PolicyFeedback(
+                    reason_code="fit_error_increased",
+                    message="Preview increases fit error beyond the allowed threshold.",
+                    metrics_delta=metrics_delta,
+                    policy_hint="reduce fit error before retry",
+                    retry_allowed=True,
+                    retry_constraints={"max_fit_error_increase": self.config.max_fit_error_increase},
+                ),
+            )
+
+        complexity_delta = float(policy_metrics.get("complexity_delta", 0.0))
+        edge_error_gain = self._edge_error_gain(policy_metrics)
+        if (
+            complexity_delta > self.config.max_complexity_increase
+            and edge_error_gain < self.config.min_edge_error_gain_for_complexity_increase
+        ):
+            return PreviewDecision(
+                command=dict(command),
+                preview_result=preview,
+                decision="reject",
+                reason="Preview increases complexity without enough edge-error gain.",
+                risk_flags=("complexity_increase_without_edge_gain",),
+                decision_kind=DecisionKind.AUTO_REJECT,
+                risk_level=risk_level,
+                policy_feedback=PolicyFeedback(
+                    reason_code="complexity_increase_without_edge_gain",
+                    message="Preview increases complexity without enough edge-error gain.",
+                    metrics_delta=metrics_delta,
+                    policy_hint="only accept extra complexity when edge error drops meaningfully",
+                    retry_allowed=True,
+                    retry_constraints={
+                        "max_complexity_increase": self.config.max_complexity_increase,
+                        "min_edge_error_gain_for_complexity_increase": self.config.min_edge_error_gain_for_complexity_increase,
+                    },
+                ),
+            )
+
         if float(command.get("confidence", 0.0)) < self.config.min_fitting_confidence:
             return PreviewDecision(
                 command=dict(command),
@@ -661,6 +710,9 @@ class PreviewAndAutoAcceptPolicy:
             "score_delta": preview.score_delta,
             "affected_segments": len(preview.affected_segments),
             "constraint_violation_delta": int(metrics.get("constraint_violation_delta", 0)),
+            "fit_error_delta": float(metrics.get("fit_error_delta", 0.0)),
+            "complexity_delta": float(metrics.get("complexity_delta", 0.0)),
+            "edge_error_delta": float(metrics.get("edge_error_delta", 0.0)),
             "inlier_ratio": float(metrics.get("inlier_ratio", 1.0)),
             "self_intersection_delta": sum(
                 max(preview.self_intersection_count_after.get(path_id, 0) - preview.self_intersection_count_before.get(path_id, 0), 0)
@@ -681,7 +733,14 @@ class PreviewAndAutoAcceptPolicy:
             "self_intersection_count_before": dict(preview.self_intersection_count_before),
             "self_intersection_count_after": dict(preview.self_intersection_count_after),
             "constraint_violation_delta": int(self._policy_metrics(command).get("constraint_violation_delta", 0)),
+            "fit_error_delta": float(self._policy_metrics(command).get("fit_error_delta", 0.0)),
+            "complexity_delta": float(self._policy_metrics(command).get("complexity_delta", 0.0)),
+            "edge_error_delta": float(self._policy_metrics(command).get("edge_error_delta", 0.0)),
         }
+
+    def _edge_error_gain(self, policy_metrics: dict[str, Any]) -> float:
+        edge_error_delta = float(policy_metrics.get("edge_error_delta", 0.0))
+        return max(-edge_error_delta, 0.0)
 
     def _coordinate_system_consistent(
         self,
