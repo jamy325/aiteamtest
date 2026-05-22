@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from services.ai_adapters.base import ResponderVisionAdapter, VisionReviewAdapter
+from services.ai_adapters.common import MAX_REVIEW_IMAGE_BYTES
 from services.ai_adapters.file_response import FileResponseVisionAdapter
 from services.ai_adapters.gemini_provider import GeminiVisionAdapter
 from services.ai_adapters.mock import MockVisionAdapter
@@ -30,6 +31,7 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             api_key=kwargs.get("api_key"),
             client=kwargs.get("client"),
             image_detail=str(kwargs.get("image_detail", "auto")),
+            max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
         )
 
     if normalized_provider == "gemini":
@@ -38,6 +40,7 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             api_key=kwargs.get("api_key"),
             client=kwargs.get("client"),
             image_loader=kwargs.get("image_loader"),
+            max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
         )
 
     if normalized_provider == "siliconflow":
@@ -47,6 +50,7 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             base_url=str(kwargs.get("base_url", "https://api.siliconflow.cn/v1")),
             client=kwargs.get("client"),
             image_detail=str(kwargs.get("image_detail", "auto")),
+            max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
         )
 
     if normalized_provider == "responder":

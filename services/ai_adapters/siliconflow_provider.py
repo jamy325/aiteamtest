@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from services.ai_adapters.base import VisionReviewAdapter
 from services.ai_adapters.common import (
+    MAX_REVIEW_IMAGE_BYTES,
     ProviderConfigurationError,
     collect_image_paths,
     encode_image_as_data_url,
@@ -25,16 +26,17 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
     base_url: str = "https://api.siliconflow.cn/v1"
     client: Any | None = None
     image_detail: str = "auto"
+    max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        for image_path in collect_image_paths(review_input):
+        for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
             content.append(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": encode_image_as_data_url(image_path),
+                        "url": encode_image_as_data_url(image_path, max_image_bytes=self.max_image_bytes),
                         "detail": self.image_detail,
                     },
                 }

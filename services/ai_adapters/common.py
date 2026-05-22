@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "ai_commands.schema.json"
+MAX_REVIEW_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -30,7 +31,11 @@ def resolve_api_key(*names: str) -> str | None:
     return None
 
 
-def collect_image_paths(review_input: AIReviewInput) -> tuple[Path, ...]:
+def collect_image_paths(
+    review_input: AIReviewInput,
+    *,
+    max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES,
+) -> tuple[Path, ...]:
     paths: list[Path] = []
     for raw_path in (
         review_input.original_image,
@@ -40,15 +45,26 @@ def collect_image_paths(review_input: AIReviewInput) -> tuple[Path, ...]:
         if raw_path is None:
             continue
         image_path = Path(raw_path)
-        if not image_path.exists():
-            raise ValueError(f"review image does not exist: {image_path}")
-        if not image_path.is_file():
-            raise ValueError(f"review image is not a file: {image_path}")
+        ensure_review_image_path(image_path, max_image_bytes=max_image_bytes)
         paths.append(image_path)
     return tuple(paths)
 
 
-def encode_image_as_data_url(image_path: Path) -> str:
+def ensure_review_image_path(image_path: Path, *, max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES) -> Path:
+    if not image_path.exists():
+        raise ValueError(f"review image does not exist: {image_path}")
+    if not image_path.is_file():
+        raise ValueError(f"review image is not a file: {image_path}")
+    file_size = image_path.stat().st_size
+    if file_size > int(max_image_bytes):
+        raise ValueError(
+            f"review image exceeds size limit: {image_path} ({file_size} bytes > {int(max_image_bytes)} bytes)"
+        )
+    return image_path
+
+
+def encode_image_as_data_url(image_path: Path, *, max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES) -> str:
+    ensure_review_image_path(image_path, max_image_bytes=max_image_bytes)
     mime_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
     data = base64.b64encode(image_path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{data}"
@@ -86,8 +102,10 @@ def extract_text_value(response: Any, *, provider_name: str, attr_names: tuple[s
 
 __all__ = [
     "ProviderConfigurationError",
+    "MAX_REVIEW_IMAGE_BYTES",
     "SCHEMA_PATH",
     "collect_image_paths",
+    "ensure_review_image_path",
     "encode_image_as_data_url",
     "extract_text_value",
     "load_response_schema",

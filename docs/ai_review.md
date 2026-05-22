@@ -36,6 +36,10 @@ The review model is expected to inspect algorithm candidates and existing intent
 
 ## Provider configuration
 
+- Review-image safety gate:
+  - Default max size per image: `20 * 1024 * 1024` bytes (20MB)
+  - The size check runs before any `read_bytes()` or `PIL.Image.open()` call
+  - Provider adapters can override the limit through `max_image_bytes` for tests or product configuration
 - OpenAI provider:
   - Optional package: `pip install openai`
   - Environment variable: `OPENAI_API_KEY`

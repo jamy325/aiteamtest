@@ -9,10 +9,12 @@ from jsonschema import ValidationError
 from services.ai_adapters import (
     FileResponseVisionAdapter,
     GeminiVisionAdapter,
+    MAX_REVIEW_IMAGE_BYTES,
     MockVisionAdapter,
     OpenAIVisionAdapter,
     ProviderConfigurationError,
     SiliconFlowVisionAdapter,
+    collect_image_paths,
     create_vision_adapter,
 )
 from services.ai_agent import AIReviewInput, AIReviewService
@@ -176,12 +178,117 @@ def test_create_vision_adapter_supports_siliconflow_stub(tmp_path: Path) -> None
 
     assert isinstance(adapter, SiliconFlowVisionAdapter)
     assert adapter.base_url == "https://api.siliconflow.cn/v1"
+    assert adapter.max_image_bytes == MAX_REVIEW_IMAGE_BYTES
     assert review_output.summary == "Provider review succeeded."
     last_kwargs = siliconflow_client.chat.completions.last_kwargs
     assert last_kwargs is not None
     content = last_kwargs["messages"][0]["content"]  # type: ignore[index]
     assert any(item["type"] == "image_url" for item in content)  # type: ignore[index]
     assert content[0]["type"] == "text"  # type: ignore[index]
+
+
+def test_collect_image_paths_allows_small_images_by_default(tmp_path: Path) -> None:
+    review_input = _review_input_with_images(tmp_path)
+
+    image_paths = collect_image_paths(review_input)
+
+    assert len(image_paths) == 3
+    assert all(path.exists() for path in image_paths)
+    assert MAX_REVIEW_IMAGE_BYTES == 20 * 1024 * 1024
+
+
+def test_collect_image_paths_rejects_missing_image(tmp_path: Path) -> None:
+    review_input = AIReviewInput(
+        original_image=str(tmp_path / "missing.png"),
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={},
+        fit_error=0.0,
+        complexity_score=0.0,
+        topology_status="open",
+        self_intersection_count=0,
+        coordinate_system={},
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        collect_image_paths(review_input)
+
+
+def test_openai_provider_rejects_large_image_before_data_url_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    original_path = Path(review_input.original_image or "")
+    original_path.write_bytes(PNG_BYTES + b"too-large")
+
+    def fail_if_encoded(image_path: Path, *, max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES) -> str:
+        raise AssertionError("data URL encoding should not run for oversized images")
+
+    monkeypatch.setattr("services.ai_adapters.openai_provider.encode_image_as_data_url", fail_if_encoded)
+    adapter = create_vision_adapter("openai", client=_OpenAIClientStub(), max_image_bytes=len(PNG_BYTES))
+
+    with pytest.raises(ValueError, match="exceeds size limit"):
+        adapter.review("prompt", review_input)
+
+
+def test_gemini_provider_rejects_large_image_before_image_loader_runs(tmp_path: Path) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    original_path = Path(review_input.original_image or "")
+    original_path.write_bytes(PNG_BYTES + b"too-large")
+
+    def fail_if_loaded(image_path: Path) -> object:
+        raise AssertionError("image loader should not run for oversized images")
+
+    adapter = create_vision_adapter(
+        "gemini",
+        client=_GeminiClientStub(),
+        image_loader=fail_if_loaded,
+        max_image_bytes=len(PNG_BYTES),
+    )
+
+    with pytest.raises(ValueError, match="exceeds size limit"):
+        adapter.review("prompt", review_input)
+
+
+def test_siliconflow_provider_rejects_large_image_before_data_url_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    original_path = Path(review_input.original_image or "")
+    original_path.write_bytes(PNG_BYTES + b"too-large")
+    siliconflow_client = _SiliconFlowClientStub()
+
+    def fail_if_encoded(image_path: Path, *, max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES) -> str:
+        raise AssertionError("data URL encoding should not run for oversized images")
+
+    monkeypatch.setattr("services.ai_adapters.siliconflow_provider.encode_image_as_data_url", fail_if_encoded)
+    adapter = create_vision_adapter(
+        "siliconflow",
+        client=siliconflow_client,
+        max_image_bytes=len(PNG_BYTES),
+    )
+
+    with pytest.raises(ValueError, match="exceeds size limit"):
+        adapter.review("prompt", review_input)
+
+    assert siliconflow_client.chat.completions.last_kwargs is None
+
+
+def test_provider_image_limit_is_configurable(tmp_path: Path) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    original_path = Path(review_input.original_image or "")
+    original_path.write_bytes(PNG_BYTES + b"x")
+
+    strict_adapter = create_vision_adapter("openai", client=_OpenAIClientStub(), max_image_bytes=len(PNG_BYTES))
+    permissive_adapter = create_vision_adapter("openai", client=_OpenAIClientStub(), max_image_bytes=len(PNG_BYTES) + 1)
+
+    with pytest.raises(ValueError, match="exceeds size limit"):
+        strict_adapter.review("prompt", review_input)
+
+    output = AIReviewService(adapter=permissive_adapter).run_review(review_input)
+    assert output.summary == "Provider review succeeded."
 
 
 def test_openai_provider_requires_api_key_when_client_is_not_injected(monkeypatch: pytest.MonkeyPatch) -> None:
