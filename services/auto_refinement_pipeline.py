@@ -6,6 +6,7 @@ from typing import Any
 
 from core.types import ShapeCandidateTargetType, VectorDocument
 from services.document_integrity import DocumentIntegrityValidator, IntegrityReport
+from services.engine_protocol import DecisionKind
 from services.json_exporter import JsonExporter
 from services.minimal_pipeline import MinimalPipelineResult
 from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy, PreviewDecision, PreviewPolicyResult
@@ -183,6 +184,13 @@ class AutoRefinementPipeline:
             "auto_accept": preview_result.accepted_count,
             "user_confirm": preview_result.user_confirm_count,
             "reject": preview_result.rejected_count,
+            "auto_apply": sum(1 for decision in preview_result.decisions if decision.decision_kind == DecisionKind.AUTO_APPLY),
+            "requires_external_decision": sum(
+                1
+                for decision in preview_result.decisions
+                if decision.decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION
+            ),
+            "auto_reject": sum(1 for decision in preview_result.decisions if decision.decision_kind == DecisionKind.AUTO_REJECT),
         }
         integrity = {
             "success": integrity_report.success,
@@ -230,8 +238,15 @@ def _decision_to_dict(decision: PreviewDecision) -> dict[str, Any]:
     return {
         "command": json.loads(json.dumps(decision.command)),
         "decision": decision.decision,
+        "decision_kind": None if decision.decision_kind is None else decision.decision_kind.value,
         "reason": decision.reason,
         "risk_flags": list(decision.risk_flags),
+        "risk_level": decision.risk_level.value,
+        "policy_feedback": None if decision.policy_feedback is None else decision.policy_feedback.to_dict(),
+        "external_decision_request": None
+        if decision.external_decision_request is None
+        else decision.external_decision_request.to_dict(),
+        "policy_result": None if decision.policy_result is None else decision.policy_result.to_dict(),
         "preview_result": _preview_result_to_dict(preview_result),
     }
 

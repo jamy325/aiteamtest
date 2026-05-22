@@ -91,6 +91,21 @@ class RiskLevel(_StringEnum):
             return NotImplemented
         return self.sort_key < other.sort_key
 
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, RiskLevel):
+            return NotImplemented
+        return self.sort_key <= other.sort_key
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, RiskLevel):
+            return NotImplemented
+        return self.sort_key > other.sort_key
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, RiskLevel):
+            return NotImplemented
+        return self.sort_key >= other.sort_key
+
 
 class EngineStatus(_StringEnum):
     COMPLETED = "completed"
