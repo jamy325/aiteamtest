@@ -2,11 +2,11 @@
 
 ## 1. 核心定位
 
-本系统目标不是简单地“根据轮廓点拟合曲线”，而是实现一种接近人工在 Photoshop / Illustrator / CAD 中临摹图形的矢量重建流程。
+本系统目标不是简单地“根据轮廓点拟合曲线”，而是实现一种接近人工在 Photoshop / Illustrator / CAD 中临摹图形的自主矢量重建流程。
 
 核心思想：
 
-AI 负责判断图形语义，传统算法负责精确求解参数，约束系统负责保持几何关系，拓扑系统负责路径连续、闭合和自交检测，坐标系统负责统一计算和导出，用户操作负责最终控制。
+AI / Policy 负责判断图形语义、提出修改意图并决定是否继续自动执行，传统算法负责精确求解参数，约束系统负责保持几何关系，拓扑系统负责路径连续、闭合和自交检测，坐标系统负责统一计算和导出，外部决策消费者只在需要升级时介入。
 
 系统最终应实现：
 
@@ -14,11 +14,11 @@ AI 负责判断图形语义，传统算法负责精确求解参数，约束系�
 2. 自动提取 binary_contours 和 skeleton_contours。
 3. 在 ContourExtractor 后立即将 pixel 坐标转换为 Vector Space。
 4. 自动生成初始矢量草图。
-5. AI 审查当前矢量结果。
+5. AI / Policy 审查当前矢量结果。
 6. AI 只提出“修改意图”，不直接决定精确几何参数。
-7. BreakPointOptimizer 优化切分点。
-8. RefinementEngine 使用 RANSAC、最小二乘、约束优化等方法精确求解。
-9. RefinementFeedback 将算法验证结果反哺 AI。
+7. BatchCommandPlanner 规划可验证的 command proposal。
+8. Preview / Validation 生成 overlay、diff、score、topology 与 constraint 检查结果。
+9. DecisionPolicy 决定 auto apply、auto reject 或 requires_external_decision。
 10. ConstraintGraph 保持水平、垂直、同心、相切、重合、连续性等关系。
 11. GlobalSnappingEngine 推断跨 Path / 跨 Object 的锚点重合关系。
 12. SharedTangentConstraint 维护相邻段 G1 共切关系。
@@ -26,7 +26,7 @@ AI 负责判断图形语义，传统算法负责精确求解参数，约束系�
 14. SegmentRigidityPolicy 决定拓扑修正时优先移动哪些几何段。
 15. AlphaAwareStyleAnalyzer 处理颜色、透明度和背景污染。
 16. Scorer 使用距离场、复杂度惩罚、约束违规、拓扑错误等指标评分。
-17. 用户可锁定、辅助分段、拖点、回滚。
+17. 外部 override 可锁定、辅助分段、拖点、回滚，但不是主流程依赖。
 18. 最终导出 SVG / DXF / JSON。
 
 ---
@@ -56,7 +56,7 @@ AI 负责判断图形语义，传统算法负责精确求解参数，约束系�
 
 正确方向：
 
-位图 → 轮廓点 → 坐标标准化 → 初始矢量 → AI 语义审查 → 切分点优化 → 鲁棒算法精化 → 共享切线约束 → 约束校正 → 全局锚点吸附 → 拓扑闭合与自交检测 → 评分验证 → 用户确认 → 导出。
+位图 → 轮廓点 → 坐标标准化 → 初始矢量 → AI / Policy 审查 → 命令规划 → Preview / Validation → DecisionPolicy → Auto Apply / Auto Reject / Requires External Decision → 导出。
 
 ---
 
@@ -120,7 +120,7 @@ GlobalSnappingEngine 推断 coincident 约束
   ↓
 生成 Distance Field Diff 图
   ↓
-AI 审查并提出单个或批量修改意图
+AI / Policy 审查并提出单个或批量修改意图
   ↓
 BreakPointOptimizer 优化切分范围
   ↓
@@ -142,7 +142,7 @@ ConstraintGraph 约束校正
   ↓
 Scorer 评分验证
   ↓
-用户确认 / 自动迭代
+DecisionPolicy：Auto Apply / Auto Reject / Requires External Decision
   ↓
 导出 SVG / DXF / JSON
 ```
@@ -329,9 +329,9 @@ detect_self_intersection(path)
 
 ---
 
-### 4.7 用户操作优先于 AI
+### 4.7 External Override 与 Policy 优先级
 
-用户手动锁定的内容，AI 不能修改。
+外部 override 手动锁定的内容，AI 不能修改；但主流程默认应由自动策略推进，而不是等待 UI 点击。
 
 支持：
 
@@ -340,8 +340,8 @@ detect_self_intersection(path)
 3. 锁定几何类型
 4. 锁定控制点
 5. 锁定约束
-6. 撤销 AI 修改
-7. 用户确认后再应用 AI 建议
+6. 撤销或回滚 AI 修改
+7. 对高风险提议输出 requires_external_decision，而不是默认阻塞全部引擎流程
 
 ---
 
@@ -841,7 +841,7 @@ epsilon = 1px ~ 3px 转换后的 Vector Space 距离
 2. soft coincident 先记录，不强制吸附。
 3. hard coincident 可直接吸附。
 4. 高 confidence 可自动应用。
-5. 中低 confidence 交给 AI 或用户确认。
+5. 中低 confidence 交给 AI / Policy 或 external decision consumer。
 6. 跨 Object 吸附需要更谨慎，避免误合并。
 
 ---
@@ -1380,16 +1380,17 @@ AI 不直接拟合曲线，而是做：
 2. 当前 overlay 图
 3. Distance Field Diff 图
 4. 当前 VectorDocument JSON
-5. 每段 fit_error
-6. 每段 complexity_score
-7. 每段 constraint violation
-8. topology_status
-9. self_intersection_count
-10. coordinate_system
-11. 用户锁定信息
-12. RefinementFeedback
-13. alpha / color variance
-14. 当前可用工具列表
+5. shape candidates
+6. proposed_commands
+7. preview_summary
+8. score breakdown（包括每段 fit_error、complexity_score）
+9. constraint violation
+10. topology_status / self_intersection_count
+11. coordinate_system
+12. 用户锁定信息与 external override 状态
+13. RefinementFeedback
+14. alpha / color variance
+15. 当前可用工具列表
 
 ---
 
@@ -1718,9 +1719,9 @@ rollback_batch_on_failure = false
 
 ---
 
-## 29. 用户交互设计
+## 29. Optional Consumer 交互设计
 
-### 29.1 必须支持
+### 29.1 可选消费者应支持
 
 1. 选择图片
 2. 自动拟合
@@ -1737,8 +1738,8 @@ rollback_batch_on_failure = false
 13. 查看 shared tangent 约束
 14. 查看 self-intersection 标记
 15. AI 审查
-16. 应用 AI 建议
-17. 批量应用 AI 建议
+16. 对 decision queue 执行 apply / reject / escalate
+17. 批量批准或拒绝 AI / Policy 建议
 18. 撤销
 19. 导出 SVG / DXF / JSON
 
@@ -1797,7 +1798,7 @@ rollback_batch_on_failure = false
     - coincident
 22. 增加 JSON 导出当前矢量结构。
 23. 增加 overlay 图导出。
-24. 增加 AI 审查按钮。
+24. 增加 AI 审查入口（UI 可选，CLI / service / batch workflow 也可触发）。
 
 ---
 
@@ -2013,7 +2014,7 @@ rollback_batch_on_failure = false
 
 ---
 
-## 33. 第一版 UI 建议
+## 33. 第一版 Optional UI Consumer 建议
 
 右侧面板：
 
@@ -2021,8 +2022,8 @@ rollback_batch_on_failure = false
 [选择图片]
 [自动拟合]
 [AI 审查]
-[应用 AI 建议]
-[批量应用 AI 建议]
+[批准待决建议]
+[批量处理待决建议]
 [自动优化 3 轮]
 [撤销]
 [导出 SVG]
@@ -2075,9 +2076,9 @@ RANSAC 内点率：0.86
 11. Distance Field Diff 图导出。
 12. AI 审查 Prompt。
 13. AI 返回 issues。
-14. UI 展示 AI 建议。
+14. optional UI / CLI 展示 AI issues、proposed_commands 和 decision queue。
 
-这一步不需要 AI 自动修改路径，但已经可以验证系统底座是否正确。
+这一步不要求 fully autonomous apply，但已经可以验证系统底座、AI review 输入输出和 external decision consumer 连接方式是否正确。
 
 ---
 
@@ -2105,7 +2106,7 @@ RANSAC 内点率：0.86
 18. lock_segment
 19. undo
 
-AI 输出 proposed_commands，用户点击应用后由算法精化执行。
+AI 输出 proposed_commands 后，可由 DecisionPolicy 自动执行，或在高风险场景升级给 external decision consumer 再由算法精化执行。
 
 ---
 
@@ -2113,12 +2114,11 @@ AI 输出 proposed_commands，用户点击应用后由算法精化执行。
 
 最终系统工作方式：
 
-1. 用户导入图片。
+1. 输入参考图片。
 2. 系统自动生成初始矢量。
-3. 用户选中某个轮廓。
-4. 系统显示淡黄色原始轮廓和拟合曲线。
-5. 用户点击 AI 审查。
-6. AI 标出：
+3. 系统生成 overlay、diff、candidates 和 preview summary。
+4. AI / Policy 审查结构化上下文。
+5. AI 标出：
    - 哪里应为圆
    - 哪里应为圆弧
    - 哪里应为直线
@@ -2133,18 +2133,18 @@ AI 输出 proposed_commands，用户点击应用后由算法精化执行。
    - 哪些连接点应共享切线
    - 哪里颜色可能是渐变
    - 哪里存在透明度混合
-7. 用户点击应用。
-8. 系统优化切分点。
-9. 系统用 RANSAC 和最小二乘重新精确拟合。
-10. SharedTangentOptimizer 处理共切连接。
-11. RefinementFeedback 判断提议是否有效。
-12. GlobalSnappingEngine 推断跨路径 coincident 约束。
-13. TopologyEngine 根据刚性策略修正路径闭合。
-14. SelfIntersectionDetector 检查自交。
-15. ConstraintGraph 修正几何关系。
-16. Scorer 验证修改收益。
-17. 用户局部拖点或锁定。
-18. 最终导出 SVG / DXF / JSON。
+6. BreakPointOptimizer 优化切分点。
+7. 系统用 RANSAC 和最小二乘重新精确拟合。
+8. SharedTangentOptimizer 处理共切连接。
+9. RefinementFeedback 判断提议是否有效。
+10. GlobalSnappingEngine 推断跨路径 coincident 约束。
+11. TopologyEngine 根据刚性策略修正路径闭合。
+12. SelfIntersectionDetector 检查自交。
+13. ConstraintGraph 修正几何关系。
+14. Scorer 验证修改收益。
+15. DecisionPolicy 选择 auto apply、auto reject 或 requires_external_decision。
+16. external consumer 仅在升级场景下介入 override / approve / reject。
+17. 最终导出 SVG / DXF / JSON。
 
 ---
 
@@ -2154,7 +2154,7 @@ AI 输出 proposed_commands，用户点击应用后由算法精化执行。
 
 正确设计是：
 
-AI 像人工设计师一样理解图形结构，提出修改意图；BreakPointOptimizer 优化物理切分点；RANSAC 和最小二乘根据这些意图精确计算几何参数；SharedTangentOptimizer 保证 G1 共切连接的同步优化；RefinementFeedback 将算法结果反哺 AI；ConstraintGraph 保持整体几何一致性；GlobalSnappingEngine 推断跨路径锚点重合关系；TopologyEngine 基于 SegmentRigidityPolicy 保证路径闭合和混合路径连接；SelfIntersectionDetector 防止路径自交；CoordinateTransformer 保证显示、计算和导出坐标一致；VectorDocument 保持纯数据化；AlphaAwareStyleAnalyzer 降低颜色与透明度采样误差；复杂度惩罚防止过拟合；Distance Field Diff 提供客观评分；用户锁定和回滚保证可控性。
+AI 像人工设计师一样理解图形结构，提出修改意图；BreakPointOptimizer 优化物理切分点；RANSAC 和最小二乘根据这些意图精确计算几何参数；SharedTangentOptimizer 保证 G1 共切连接的同步优化；RefinementFeedback 将算法结果反哺 AI；ConstraintGraph 保持整体几何一致性；GlobalSnappingEngine 推断跨路径锚点重合关系；TopologyEngine 基于 SegmentRigidityPolicy 保证路径闭合和混合路径连接；SelfIntersectionDetector 防止路径自交；CoordinateTransformer 保证显示、计算和导出坐标一致；VectorDocument 保持纯数据化；AlphaAwareStyleAnalyzer 降低颜色与透明度采样误差；复杂度惩罚防止过拟合；Distance Field Diff 提供客观评分；external override、锁定和回滚提供可控性。
 
 最终核心公式：
 
@@ -2172,5 +2172,5 @@ AI 像人工设计师一样理解图形结构，提出修改意图；BreakPointO
 + Alpha 感知样式分析
 + 批量提议执行
 + 复杂度惩罚
-+ 人工可控
++ 策略控制与外部 override
 = 高质量矢量重建
