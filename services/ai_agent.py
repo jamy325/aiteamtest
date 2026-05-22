@@ -45,6 +45,10 @@ Inputs available to you:
 - available_tools
 - alpha_notes
 - color_notes
+- policy_feedback
+- rejection_memory
+- forbidden_repeated_commands
+- retry_budget
 
 When describing issues or commands:
 - inspect algorithm candidates first and explain why a candidate should or should not be trusted
@@ -73,6 +77,10 @@ class AIReviewInput:
     candidates: tuple[dict[str, Any], ...] = ()
     proposed_commands_from_algorithm: tuple[dict[str, Any], ...] = ()
     preview_summary: dict[str, Any] | None = None
+    policy_feedback: tuple[dict[str, Any], ...] = ()
+    rejection_memory: tuple[dict[str, Any], ...] = ()
+    forbidden_repeated_commands: tuple[str, ...] = ()
+    retry_budget: dict[str, Any] | None = None
     user_locked_ids: tuple[str, ...] = ()
     available_tools: tuple[str, ...] = ()
     alpha_notes: str | None = None

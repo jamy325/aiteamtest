@@ -145,6 +145,61 @@ def test_ai_review_service_supports_adapter_and_legacy_responder_paths() -> None
     assert captured["review_input"] == review_input
 
 
+def test_ai_review_input_payload_includes_rejection_feedback_context() -> None:
+    captured: dict[str, object] = {}
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        captured["prompt"] = prompt
+        captured["review_input"] = review_input
+        return {
+            "summary": "Use rejection feedback to avoid repeating invalid commands.",
+            "issues": [],
+            "proposed_commands": [],
+        }
+
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_feedback"},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+        preview_summary={"iteration": 2},
+        policy_feedback=(
+            {
+                "reason_code": "self_intersection_increase",
+                "message": "Previous proposal introduced self intersections.",
+                "metrics_delta": {"self_intersection_delta": 1},
+                "policy_hint": "avoid this replacement pattern",
+                "retry_allowed": True,
+                "retry_constraints": {"max_retry_per_target": 2},
+                "forbidden_repeated_commands": ["propose_replace_path_with_circle:path_1"],
+            },
+        ),
+        rejection_memory=(
+            {
+                "target": "path_1",
+                "tool": "propose_replace_path_with_circle",
+                "reason_code": "self_intersection_increase",
+                "retry_count": 1,
+                "last_metrics_delta": {"self_intersection_delta": 1},
+            },
+        ),
+        forbidden_repeated_commands=("propose_replace_path_with_circle:path_1",),
+        retry_budget={"max_iterations": 3, "max_retry_per_target": 2},
+    )
+
+    AIReviewService(responder=responder).run_review(review_input)
+
+    assert captured["review_input"] == review_input
+    assert "policy_feedback" in str(captured["prompt"])
+    assert "rejection_memory" in str(captured["prompt"])
+    assert "forbidden_repeated_commands" in str(captured["prompt"])
+
+
 def test_ai_review_flow_rejects_invalid_schema_response() -> None:
     def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
         return {
