@@ -521,3 +521,77 @@ def test_auto_refinement_pipeline_aggregates_path_retry_budget_across_tools() ->
         decision.policy_feedback and decision.policy_feedback.reason_code == "path_retry_budget_exceeded"
         for decision in result.preview_decisions
     )
+
+
+def test_auto_refinement_pipeline_marks_unresolved_when_stalled_after_prior_feedback() -> None:
+    round_index = {"value": 0}
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        index = round_index["value"]
+        round_index["value"] += 1
+        if index == 0:
+            return {
+                "summary": "First round proposes one command.",
+                "issues": [],
+                "proposed_commands": [
+                    {
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_1",
+                        "reason": "first round",
+                        "confidence": 0.78,
+                        "requires_user_confirmation": True,
+                    }
+                ],
+            }
+        return {
+            "summary": "Second round has no new proposals.",
+            "issues": [],
+            "proposed_commands": [],
+        }
+
+    feedback = PolicyFeedback(
+        reason_code="low_inlier_ratio",
+        message="Preview inlier ratio is too low.",
+        metrics_delta={"inlier_ratio": 0.42},
+        policy_hint="do not retry unchanged proposal",
+        retry_allowed=True,
+        retry_constraints={"min_inlier_ratio": 0.6},
+    )
+    preview_policy = _SequentialRejectingPreviewPolicy(
+        [
+            (
+                PreviewDecision(
+                    command={
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_1",
+                        "reason": "first round",
+                        "confidence": 0.78,
+                        "requires_user_confirmation": True,
+                    },
+                    preview_result=_policy_preview_result(command_id="cmd_stalled_feedback", path_id="path_1"),
+                    decision="reject",
+                    reason="Preview inlier ratio is too low.",
+                    risk_flags=("low_inlier_ratio",),
+                    decision_kind=DecisionKind.AUTO_REJECT,
+                    risk_level=RiskLevel.MEDIUM,
+                    policy_feedback=feedback,
+                ),
+            ),
+        ]
+    )
+
+    pipeline = AutoRefinementPipeline(
+        shape_candidate_detector=_EmptyDetector(),
+        proposed_command_planner=_EmptyPlanner(),
+        preview_policy=preview_policy,
+        ai_review_service=AIReviewService(responder=responder),
+        config=AutoRefinementPipelineConfig(
+            max_iterations=3,
+            max_stalled_rounds=5,
+        ),
+    )
+
+    result = pipeline.run_with_ai_review(_rectangle_document())
+
+    assert result.report.policy_feedback
+    assert result.report.status == EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS.value

@@ -278,7 +278,7 @@ class AutoRefinementPipeline:
             if not candidate_commands and not algorithm_commands:
                 break
 
-        if iteration_count >= self.config.max_iterations and collected_feedback and final_status == EngineStatus.COMPLETED:
+        if collected_feedback and final_status == EngineStatus.COMPLETED:
             final_status = EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS
 
         integrity_report = self.integrity_validator.validate(current_document)
