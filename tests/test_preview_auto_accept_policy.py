@@ -13,6 +13,7 @@ from services.command_preview import (
     ExportImpactSummary,
 )
 from services.document_integrity import DocumentIntegrityValidator, IntegrityIssue, IntegrityReport
+from services.engine_protocol import AutonomyLevel, DecisionKind, RiskLevel
 from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy, PreviewAndAutoAcceptPolicyConfig
 
 
@@ -169,6 +170,9 @@ def test_preview_auto_accept_policy_auto_accepts_high_confidence_circle_preview(
     assert result.rejected_count == 0
     assert result.user_confirm_count == 0
     assert result.decisions[0].decision == "auto_accept"
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_APPLY
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "auto_apply"
     assert result.final_document.document_id == "doc_policy:auto_circle"
 
 
@@ -196,6 +200,10 @@ def test_preview_auto_accept_policy_marks_low_confidence_preview_for_user_confir
     assert result.accepted_count == 0
     assert result.user_confirm_count == 1
     assert result.decisions[0].decision == "user_confirm"
+    assert result.decisions[0].decision_kind is DecisionKind.REQUIRES_EXTERNAL_DECISION
+    assert result.decisions[0].external_decision_request is not None
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "requires_external_decision"
     assert "medium_confidence" in result.decisions[0].risk_flags
     assert result.final_document == document
 
@@ -222,6 +230,9 @@ def test_preview_auto_accept_policy_rejects_preview_failure() -> None:
 
     assert result.rejected_count == 1
     assert result.decisions[0].decision == "reject"
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "dry_run_failed"
     assert result.decisions[0].risk_flags == ("preview_failed",)
     assert result.final_document == document
 
@@ -252,11 +263,12 @@ def test_preview_auto_accept_policy_rejects_topology_regression() -> None:
 
     assert result.rejected_count == 1
     assert result.decisions[0].decision == "reject"
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
     assert result.decisions[0].risk_flags == ("topology_regression",)
     assert result.final_document == document
 
 
-def test_preview_auto_accept_policy_does_not_auto_accept_locked_target_failures() -> None:
+def test_preview_auto_accept_policy_rejects_locked_target_failures() -> None:
     document = _document()
     command = {
         "command_id": "locked_target",
@@ -275,12 +287,11 @@ def test_preview_auto_accept_policy_does_not_auto_accept_locked_target_failures(
         preview_service=preview_service,
         command_executor=FakeCommandExecutor(lambda command, doc: _execution_result(command["command_id"], doc, success=False, reason="locked path")),
         integrity_validator=FakeIntegrityValidator(),
-        config=PreviewAndAutoAcceptPolicyConfig(locked_target_decision="user_confirm"),
     ).evaluate_commands([command], document)
 
-    assert result.accepted_count == 0
-    assert result.user_confirm_count == 1
-    assert result.decisions[0].decision == "user_confirm"
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision == "reject"
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
     assert "locked_target" in result.decisions[0].risk_flags
 
 
@@ -342,6 +353,11 @@ def test_preview_auto_accept_policy_rejects_integrity_failures_and_applies_auto_
     ).evaluate_commands(commands, document)
 
     assert [decision.decision for decision in result.decisions] == ["auto_accept", "reject", "auto_accept"]
+    assert [decision.decision_kind for decision in result.decisions] == [
+        DecisionKind.AUTO_APPLY,
+        DecisionKind.AUTO_REJECT,
+        DecisionKind.AUTO_APPLY,
+    ]
     assert result.accepted_count == 2
     assert result.rejected_count == 1
     assert result.final_document.document_id == "doc_policy:auto_1:auto_2"
@@ -402,5 +418,202 @@ def test_preview_auto_accept_policy_handles_batch_commands_without_mutating_on_r
     ).evaluate_commands([batch_command], document)
 
     assert result.decisions[0].decision == "user_confirm"
+    assert result.decisions[0].decision_kind is DecisionKind.REQUIRES_EXTERNAL_DECISION
     assert "batch_requires_confirmation" in result.decisions[0].risk_flags
     assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_manual_only_never_auto_applies() -> None:
+    document = _document()
+    command = {
+        "command_id": "manual_only",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.95,
+        "requires_user_confirmation": True,
+    }
+    preview_service = FakePreviewService({"manual_only": _preview_result(command_id="manual_only", score_delta=-1.2)})
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:manual_only"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+        config=PreviewAndAutoAcceptPolicyConfig(autonomy_level=AutonomyLevel.MANUAL_ONLY),
+    ).evaluate_commands([command], document)
+
+    assert result.accepted_count == 0
+    assert result.user_confirm_count == 1
+    assert result.decisions[0].decision == "user_confirm"
+    assert result.decisions[0].decision_kind is DecisionKind.REQUIRES_EXTERNAL_DECISION
+    assert result.decisions[0].policy_feedback is not None
+    assert "manual_only_mode" in result.decisions[0].risk_flags
+    assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_escalates_when_risk_level_exceeds_allowed_auto_risk() -> None:
+    document = _document()
+    command = {
+        "command_id": "risk_escalation",
+        "tool": "propose_replace_path_with_bezier",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.96,
+        "requires_user_confirmation": True,
+    }
+    preview_service = FakePreviewService({"risk_escalation": _preview_result(command_id="risk_escalation", score_delta=-1.4)})
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:risk_escalation"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+        config=PreviewAndAutoAcceptPolicyConfig(allowed_auto_risk=RiskLevel.MEDIUM),
+    ).evaluate_commands([command], document)
+
+    assert result.accepted_count == 0
+    assert result.user_confirm_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.REQUIRES_EXTERNAL_DECISION
+    assert result.decisions[0].risk_level is RiskLevel.HIGH
+    assert "risk_level_requires_escalation" in result.decisions[0].risk_flags
+
+
+def test_preview_auto_accept_policy_rejects_low_inlier_ratio() -> None:
+    document = _document()
+    command = {
+        "command_id": "low_inlier",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.9,
+        "requires_user_confirmation": True,
+        "policy_metrics": {
+            "inlier_ratio": 0.42,
+            "rollback_snapshot_created": True,
+        },
+    }
+    preview_service = FakePreviewService({"low_inlier": _preview_result(command_id="low_inlier", score_delta=-1.0)})
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:low_inlier"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "low_inlier_ratio"
+    assert result.decisions[0].risk_flags == ("low_inlier_ratio",)
+
+
+def test_preview_auto_accept_policy_rejects_fit_error_increase_even_with_good_score_and_confidence() -> None:
+    document = _document()
+    command = {
+        "command_id": "fit_error_up",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.95,
+        "requires_user_confirmation": True,
+        "policy_metrics": {
+            "fit_error_delta": 5.0,
+            "rollback_snapshot_created": True,
+        },
+    }
+    preview_service = FakePreviewService({"fit_error_up": _preview_result(command_id="fit_error_up", score_delta=-1.2)})
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:fit_error_up"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "fit_error_increased"
+    assert result.decisions[0].policy_feedback.metrics_delta["fit_error_delta"] == 5.0
+    assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_rejects_complexity_increase_without_edge_gain() -> None:
+    document = _document()
+    command = {
+        "command_id": "complexity_up",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.95,
+        "requires_user_confirmation": True,
+        "policy_metrics": {
+            "complexity_delta": 10.0,
+            "edge_error_delta": -0.001,
+            "rollback_snapshot_created": True,
+        },
+    }
+    preview_service = FakePreviewService({"complexity_up": _preview_result(command_id="complexity_up", score_delta=-1.2)})
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:complexity_up"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "complexity_increase_without_edge_gain"
+    assert result.decisions[0].policy_feedback.metrics_delta["complexity_delta"] == 10.0
+    assert result.decisions[0].policy_feedback.metrics_delta["edge_error_delta"] == -0.001
+    assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_rejects_coordinate_system_inconsistency() -> None:
+    document = _document()
+    command = {
+        "command_id": "coord_bad",
+        "tool": "propose_replace_segment_with_line",
+        "path_id": "path_1",
+        "segment_range": [0, 0],
+        "reason": "intent only",
+        "confidence": 0.94,
+        "requires_user_confirmation": True,
+    }
+    preview_service = FakePreviewService({"coord_bad": _preview_result(command_id="coord_bad", score_delta=-0.9)})
+
+    def handler(command: dict[str, object], doc: VectorDocument) -> CommandExecutionResult:
+        changed_doc = updated(
+            doc,
+            document_id="doc_policy:coord_bad",
+            coordinate_system=CoordinateSystem(internal_space="pixel"),
+        )
+        return _execution_result(str(command["command_id"]), changed_doc)
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=FakeCommandExecutor(handler),
+        integrity_validator=FakeIntegrityValidator(),
+        config=PreviewAndAutoAcceptPolicyConfig(autonomy_level=AutonomyLevel.AUTONOMOUS_FULL),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision == "reject"
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "coordinate_system_inconsistent"
+    assert result.decisions[0].risk_flags == ("coordinate_system_inconsistent",)

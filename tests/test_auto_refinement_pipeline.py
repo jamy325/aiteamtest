@@ -6,6 +6,7 @@ from pathlib import Path
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment
 from services.auto_refinement_pipeline import AutoRefinementPipeline, AutoRefinementPipelineConfig
+from services.engine_protocol import DecisionKind
 from services.minimal_pipeline import MinimalPipeline
 
 
@@ -54,8 +55,10 @@ def test_auto_refinement_pipeline_circle_fixture_auto_accepts_circle_command() -
     assert any(candidate.target_type == "circle" for candidate in result.candidates)
     assert any(command["tool"] == "propose_replace_path_with_circle" for command in result.proposed_commands)
     assert any(decision.decision == "auto_accept" for decision in result.preview_decisions)
+    assert any(decision.decision_kind is DecisionKind.AUTO_APPLY for decision in result.preview_decisions)
     assert result.report.candidate_stats["by_target_type"]["circle"] >= 1
     assert result.report.decision_stats["auto_accept"] >= 1
+    assert result.report.decision_stats["auto_apply"] >= 1
     assert result.refined_document != pipeline_result.document
 
 
@@ -74,6 +77,13 @@ def test_auto_refinement_pipeline_ellipse_fixture_produces_reviewable_decision()
     assert any(command["tool"] == "propose_replace_path_with_ellipse" for command in result.proposed_commands)
     assert result.preview_decisions
     assert {decision.decision for decision in result.preview_decisions} <= {"auto_accept", "user_confirm", "reject"}
+    assert {
+        decision.decision_kind for decision in result.preview_decisions
+    } <= {
+        DecisionKind.AUTO_APPLY,
+        DecisionKind.REQUIRES_EXTERNAL_DECISION,
+        DecisionKind.AUTO_REJECT,
+    }
     assert any(decision.decision in {"auto_accept", "user_confirm"} for decision in result.preview_decisions)
 
 
@@ -113,3 +123,11 @@ def test_auto_refinement_pipeline_dry_run_only_keeps_original_document_and_seria
     assert payload["report"]["score_before"] >= 0.0
     assert payload["report"]["score_after"] >= 0.0
     assert payload["refined_document"]["document_id"] == "circle_auto_dry_run"
+    assert payload["report"]["decision_stats"]["auto_apply"] >= 0
+    assert payload["preview_decisions"]
+    assert payload["preview_decisions"][0]["decision"] in {"auto_accept", "user_confirm", "reject"}
+    assert payload["preview_decisions"][0]["decision_kind"] in {
+        "auto_apply",
+        "requires_external_decision",
+        "auto_reject",
+    }
