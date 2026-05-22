@@ -8,6 +8,7 @@ from services.ai_adapters.file_response import FileResponseVisionAdapter
 from services.ai_adapters.gemini_provider import GeminiVisionAdapter
 from services.ai_adapters.mock import MockVisionAdapter
 from services.ai_adapters.openai_provider import OpenAIVisionAdapter
+from services.ai_adapters.siliconflow_provider import SiliconFlowVisionAdapter
 
 
 def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
@@ -37,6 +38,15 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             api_key=kwargs.get("api_key"),
             client=kwargs.get("client"),
             image_loader=kwargs.get("image_loader"),
+        )
+
+    if normalized_provider == "siliconflow":
+        return SiliconFlowVisionAdapter(
+            model=str(kwargs.get("model", "Qwen/Qwen2.5-VL-7B-Instruct")),
+            api_key=kwargs.get("api_key"),
+            base_url=str(kwargs.get("base_url", "https://api.siliconflow.cn/v1")),
+            client=kwargs.get("client"),
+            image_detail=str(kwargs.get("image_detail", "auto")),
         )
 
     if normalized_provider == "responder":
