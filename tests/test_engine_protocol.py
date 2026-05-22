@@ -128,8 +128,13 @@ def test_decision_policy_result_requires_external_decision_payload() -> None:
 
 def test_engine_status_uses_requires_external_decision_value_and_accepts_legacy_alias() -> None:
     assert EngineStatus.REQUIRES_EXTERNAL_DECISION.value == "requires_external_decision"
+    assert EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS.value == "completed_with_unresolved_regions"
     assert EngineStatus.from_legacy("needs_external_decision") is EngineStatus.REQUIRES_EXTERNAL_DECISION
     assert EngineStatus.from_legacy("requires_external_decision") is EngineStatus.REQUIRES_EXTERNAL_DECISION
+    assert (
+        EngineStatus.from_legacy("completed_with_unresolved_regions")
+        is EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS
+    )
 
 
 def test_risk_levels_are_sortable() -> None:

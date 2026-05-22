@@ -109,6 +109,7 @@ class RiskLevel(_StringEnum):
 
 class EngineStatus(_StringEnum):
     COMPLETED = "completed"
+    COMPLETED_WITH_UNRESOLVED_REGIONS = "completed_with_unresolved_regions"
     REQUIRES_EXTERNAL_DECISION = "requires_external_decision"
     FAILED = "failed"
 
@@ -117,6 +118,7 @@ class EngineStatus(_StringEnum):
         normalized = str(value).strip().lower()
         mapping = {
             "completed": cls.COMPLETED,
+            "completed_with_unresolved_regions": cls.COMPLETED_WITH_UNRESOLVED_REGIONS,
             "failed": cls.FAILED,
             "requires_external_decision": cls.REQUIRES_EXTERNAL_DECISION,
             "needs_external_decision": cls.REQUIRES_EXTERNAL_DECISION,

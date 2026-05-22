@@ -5,9 +5,12 @@ from pathlib import Path
 
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment
+from services.ai_agent import AIReviewInput, AIReviewService
 from services.auto_refinement_pipeline import AutoRefinementPipeline, AutoRefinementPipelineConfig
-from services.engine_protocol import DecisionKind
+from services.command_preview import CommandPreviewResult, ConstraintChangeSummary, ExportImpactSummary
+from services.engine_protocol import DecisionKind, EngineStatus, ExternalDecisionRequest, PolicyFeedback, RiskLevel
 from services.minimal_pipeline import MinimalPipeline
+from services.preview_auto_accept_policy import PreviewDecision, PreviewPolicyResult
 
 
 def _rectangle_document():
@@ -39,6 +42,76 @@ def _rectangle_document():
             ),
         )
     return document
+
+
+def _policy_preview_result(
+    *,
+    command_id: str,
+    path_id: str = "path_1",
+    score_delta: float | None = -0.1,
+    self_intersection_after: int = 0,
+) -> CommandPreviewResult:
+    old_score = 10.0 if score_delta is not None else None
+    predicted_new_score = (old_score + score_delta) if old_score is not None and score_delta is not None else None
+    return CommandPreviewResult(
+        success=score_delta is not None,
+        command_id=command_id,
+        reason=None,
+        old_score=old_score,
+        predicted_new_score=predicted_new_score,
+        score_delta=score_delta,
+        affected_paths=(path_id,),
+        affected_segments=(),
+        topology_status_before={path_id: "open"},
+        topology_status_after={path_id: "open"},
+        self_intersection_count_before={path_id: 0},
+        self_intersection_count_after={path_id: self_intersection_after},
+        segment_type_summary={},
+        constraint_change_summary=ConstraintChangeSummary(
+            before={},
+            after={},
+            delta={},
+            added_constraint_ids=(),
+            removed_constraint_ids=(),
+            changed_constraint_ids=(),
+        ),
+        export_impact_summary=ExportImpactSummary(before={}, after={}, delta={}),
+    )
+
+
+class _EmptyDetector:
+    def detect_candidates(self, document):
+        return ()
+
+
+class _EmptyPlanner:
+    def plan_commands(self, document, candidates):
+        return ()
+
+
+class _SequentialRejectingPreviewPolicy:
+    def __init__(self, decisions):
+        self._decisions = list(decisions)
+        self.calls = 0
+
+    def evaluate_commands(self, commands, document):
+        self.calls += 1
+        if not self._decisions:
+            return PreviewPolicyResult(
+                final_document=document,
+                decisions=(),
+                accepted_count=0,
+                rejected_count=0,
+                user_confirm_count=0,
+            )
+        next_decisions = tuple(self._decisions.pop(0))
+        return PreviewPolicyResult(
+            final_document=document,
+            decisions=next_decisions,
+            accepted_count=sum(1 for item in next_decisions if item.decision == "auto_accept"),
+            rejected_count=sum(1 for item in next_decisions if item.decision == "reject"),
+            user_confirm_count=sum(1 for item in next_decisions if item.decision == "user_confirm"),
+        )
 
 
 def test_auto_refinement_pipeline_circle_fixture_auto_accepts_circle_command() -> None:
@@ -131,3 +204,221 @@ def test_auto_refinement_pipeline_dry_run_only_keeps_original_document_and_seria
         "requires_external_decision",
         "auto_reject",
     }
+
+
+def test_auto_refinement_pipeline_includes_self_intersection_feedback_in_next_ai_review_payload() -> None:
+    captured_inputs: list[AIReviewInput] = []
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        captured_inputs.append(review_input)
+        if len(captured_inputs) == 1:
+            return {
+                "summary": "First try should be rejected for self intersection.",
+                "issues": [],
+                "proposed_commands": [
+                    {
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_1",
+                        "reason": "try circle once",
+                        "confidence": 0.8,
+                        "requires_user_confirmation": True,
+                    }
+                ],
+            }
+        return {
+            "summary": "Stop after feedback arrives.",
+            "issues": [],
+            "proposed_commands": [],
+        }
+
+    feedback = PolicyFeedback(
+        reason_code="self_intersection_increase",
+        message="Preview increases self intersections.",
+        metrics_delta={"self_intersection_delta": 1},
+        policy_hint="avoid repeating this proposal",
+        retry_allowed=True,
+        retry_constraints={"max_retry_per_target": 2},
+        forbidden_repeated_commands=("propose_replace_path_with_circle:path_1",),
+    )
+    preview_policy = _SequentialRejectingPreviewPolicy(
+        [
+            (
+                PreviewDecision(
+                    command={
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_1",
+                        "reason": "try circle once",
+                        "confidence": 0.8,
+                        "requires_user_confirmation": True,
+                    },
+                    preview_result=_policy_preview_result(
+                        command_id="cmd_self_intersection",
+                        path_id="path_1",
+                        self_intersection_after=1,
+                    ),
+                    decision="reject",
+                    reason="Preview increases self intersections.",
+                    risk_flags=("self_intersection_increase",),
+                    decision_kind=DecisionKind.AUTO_REJECT,
+                    risk_level=RiskLevel.MEDIUM_HIGH,
+                    policy_feedback=feedback,
+                ),
+            ),
+        ]
+    )
+
+    pipeline = AutoRefinementPipeline(
+        shape_candidate_detector=_EmptyDetector(),
+        proposed_command_planner=_EmptyPlanner(),
+        preview_policy=preview_policy,
+        ai_review_service=AIReviewService(responder=responder),
+        config=AutoRefinementPipelineConfig(max_iterations=2, max_stalled_rounds=2),
+    )
+
+    result = pipeline.run_with_ai_review(_rectangle_document())
+
+    assert preview_policy.calls == 1
+    assert len(captured_inputs) == 2
+    assert captured_inputs[1].policy_feedback
+    assert captured_inputs[1].policy_feedback[0]["reason_code"] == "self_intersection_increase"
+    assert "propose_replace_path_with_circle:path_1" in captured_inputs[1].forbidden_repeated_commands
+    assert result.report.policy_feedback[0]["reason_code"] == "self_intersection_increase"
+
+
+def test_auto_refinement_pipeline_stops_repeated_low_inlier_ratio_before_infinite_retry() -> None:
+    captured_inputs: list[AIReviewInput] = []
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        captured_inputs.append(review_input)
+        return {
+            "summary": "Keep proposing the same invalid command.",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_replace_path_with_circle",
+                    "path_id": "path_1",
+                    "reason": "same retry",
+                    "confidence": 0.78,
+                    "requires_user_confirmation": True,
+                }
+            ],
+        }
+
+    feedback = PolicyFeedback(
+        reason_code="low_inlier_ratio",
+        message="Preview inlier ratio is too low.",
+        metrics_delta={"inlier_ratio": 0.42},
+        policy_hint="do not retry unchanged proposal",
+        retry_allowed=True,
+        retry_constraints={"min_inlier_ratio": 0.6},
+    )
+    rejecting_decision = PreviewDecision(
+        command={
+            "tool": "propose_replace_path_with_circle",
+            "path_id": "path_1",
+            "reason": "same retry",
+            "confidence": 0.78,
+            "requires_user_confirmation": True,
+        },
+        preview_result=_policy_preview_result(command_id="cmd_low_inlier", path_id="path_1"),
+        decision="reject",
+        reason="Preview inlier ratio is too low.",
+        risk_flags=("low_inlier_ratio",),
+        decision_kind=DecisionKind.AUTO_REJECT,
+        risk_level=RiskLevel.MEDIUM,
+        policy_feedback=feedback,
+    )
+    preview_policy = _SequentialRejectingPreviewPolicy([(rejecting_decision,), (rejecting_decision,)])
+
+    pipeline = AutoRefinementPipeline(
+        shape_candidate_detector=_EmptyDetector(),
+        proposed_command_planner=_EmptyPlanner(),
+        preview_policy=preview_policy,
+        ai_review_service=AIReviewService(responder=responder),
+        config=AutoRefinementPipelineConfig(
+            max_iterations=3,
+            max_retry_per_target=2,
+            max_stalled_rounds=4,
+        ),
+    )
+
+    result = pipeline.run_with_ai_review(_rectangle_document())
+
+    assert preview_policy.calls == 2
+    assert len(captured_inputs) == 3
+    assert any(decision.policy_feedback and decision.policy_feedback.reason_code == "retry_budget_exceeded" for decision in result.preview_decisions)
+    assert result.report.rejection_memory
+    low_inlier_items = [item for item in result.report.rejection_memory if item["reason_code"] == "low_inlier_ratio"]
+    assert low_inlier_items[0]["retry_count"] == 2
+    assert "propose_replace_path_with_circle:path_1" in result.report.forbidden_repeated_commands
+
+
+def test_auto_refinement_pipeline_marks_path_unresolved_after_path_retry_budget() -> None:
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {
+            "summary": "Repeat the same path command.",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_replace_path_with_circle",
+                    "path_id": "path_1",
+                    "reason": "repeat path command",
+                    "confidence": 0.78,
+                    "requires_user_confirmation": True,
+                }
+            ],
+        }
+
+    feedback = PolicyFeedback(
+        reason_code="low_inlier_ratio",
+        message="Preview inlier ratio is too low.",
+        metrics_delta={"inlier_ratio": 0.42},
+        policy_hint="do not retry unchanged proposal",
+        retry_allowed=True,
+        retry_constraints={"min_inlier_ratio": 0.6},
+    )
+    preview_policy = _SequentialRejectingPreviewPolicy(
+        [
+            (
+                PreviewDecision(
+                    command={
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_1",
+                        "reason": "repeat path command",
+                        "confidence": 0.78,
+                        "requires_user_confirmation": True,
+                    },
+                    preview_result=_policy_preview_result(command_id="cmd_path_budget", path_id="path_1"),
+                    decision="reject",
+                    reason="Preview inlier ratio is too low.",
+                    risk_flags=("low_inlier_ratio",),
+                    decision_kind=DecisionKind.AUTO_REJECT,
+                    risk_level=RiskLevel.MEDIUM,
+                    policy_feedback=feedback,
+                ),
+            ),
+        ]
+    )
+
+    pipeline = AutoRefinementPipeline(
+        shape_candidate_detector=_EmptyDetector(),
+        proposed_command_planner=_EmptyPlanner(),
+        preview_policy=preview_policy,
+        ai_review_service=AIReviewService(responder=responder),
+        config=AutoRefinementPipelineConfig(
+            max_iterations=2,
+            max_retry_per_target=5,
+            max_retry_per_path=1,
+            max_stalled_rounds=3,
+        ),
+    )
+
+    result = pipeline.run_with_ai_review(_rectangle_document())
+
+    assert preview_policy.calls == 1
+    assert result.report.status == EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS.value
+    assert "path_1" in result.report.unresolved_targets
+    assert any(
+        decision.policy_feedback and decision.policy_feedback.reason_code == "path_retry_budget_exceeded"
+        for decision in result.preview_decisions
+    )
