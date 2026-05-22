@@ -278,6 +278,9 @@ class AutoRefinementPipeline:
             if not candidate_commands and not algorithm_commands:
                 break
 
+        if iteration_count >= self.config.max_iterations and collected_feedback and final_status == EngineStatus.COMPLETED:
+            final_status = EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS
+
         integrity_report = self.integrity_validator.validate(current_document)
         report = self._build_report(
             candidates=latest_candidates,
@@ -455,7 +458,7 @@ class AutoRefinementPipeline:
             )
             path_id = _command_path_from_target(item.target)
             if path_id:
-                memory_by_path[path_id] = max(memory_by_path.get(path_id, 0), item.retry_count)
+                memory_by_path[path_id] = memory_by_path.get(path_id, 0) + item.retry_count
 
         blocked: list[PreviewDecision] = []
         executable: list[dict[str, Any]] = []
