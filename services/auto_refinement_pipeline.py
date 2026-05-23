@@ -288,9 +288,13 @@ class AutoRefinementPipeline:
             preview_result=PreviewPolicyResult(
                 final_document=current_document,
                 decisions=tuple(all_decisions),
-                accepted_count=sum(1 for decision in all_decisions if decision.decision == "auto_accept"),
-                rejected_count=sum(1 for decision in all_decisions if decision.decision == "reject"),
-                user_confirm_count=sum(1 for decision in all_decisions if decision.decision == "user_confirm"),
+                accepted_count=sum(1 for decision in all_decisions if decision.decision_kind == DecisionKind.AUTO_APPLY),
+                rejected_count=sum(1 for decision in all_decisions if decision.decision_kind == DecisionKind.AUTO_REJECT),
+                user_confirm_count=sum(
+                    1
+                    for decision in all_decisions
+                    if decision.decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION
+                ),
             ),
             score_before=self.scorer.score_document(initial_document).total_score,
             score_after=current_score,
@@ -480,7 +484,6 @@ class AutoRefinementPipeline:
                     _synthetic_decision(
                         command=command,
                         decision_kind=DecisionKind.AUTO_REJECT,
-                        legacy_decision="reject",
                         risk_level=RiskLevel.MEDIUM_HIGH,
                         reason_code="retry_budget_exceeded",
                         message="Retry budget exceeded for target + tool.",
@@ -494,7 +497,6 @@ class AutoRefinementPipeline:
                     _synthetic_decision(
                         command=command,
                         decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
-                        legacy_decision="user_confirm",
                         risk_level=RiskLevel.MEDIUM_HIGH,
                         reason_code="path_retry_budget_exceeded",
                         message="Path retry budget exceeded; mark region unresolved.",
@@ -659,7 +661,6 @@ def _synthetic_decision(
     *,
     command: dict[str, Any],
     decision_kind: DecisionKind,
-    legacy_decision: str,
     risk_level: RiskLevel,
     reason_code: str,
     message: str,
@@ -712,10 +713,9 @@ def _synthetic_decision(
             ),
             export_impact_summary=ExportImpactSummary(before={}, after={}, delta={}),
         ),
-        decision=legacy_decision,  # type: ignore[arg-type]
+        decision_kind=decision_kind,
         reason=message,
         risk_flags=(reason_code,),
-        decision_kind=decision_kind,
         risk_level=risk_level,
         policy_feedback=feedback,
         external_decision_request=external_request,
