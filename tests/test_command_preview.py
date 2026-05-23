@@ -98,6 +98,10 @@ def test_command_preview_returns_success_summary_without_mutating_document() -> 
     assert preview.segment_type_summary["delta"]["polyline"] == -1
     assert preview.segment_type_summary["delta"]["line"] == 1
     assert preview.export_impact_summary.before["json_char_count"] > 0
+    assert preview.algorithm_fitting_confidence is not None
+    assert 0.0 <= preview.algorithm_fitting_confidence <= 1.0
+    assert preview.inlier_ratio is not None
+    assert preview.fit_error is not None
     assert document == original_document
 
 
@@ -110,6 +114,9 @@ def test_command_preview_returns_failure_reason_without_mutating_document() -> N
     assert preview.reason is not None
     assert preview.predicted_new_score is None
     assert preview.score_delta is None
+    assert preview.algorithm_fitting_confidence is None
+    assert preview.inlier_ratio is None
+    assert preview.fit_error is None
     assert preview.segment_type_summary["before"] == preview.segment_type_summary["after"]
     assert preview.export_impact_summary.before == preview.export_impact_summary.after
     assert document == original_document

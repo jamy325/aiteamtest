@@ -57,6 +57,10 @@ class CommandExecutionResult:
     requires_rerender: bool
     fitting_source: str | None = None
     reason: str | None = None
+    algorithm_fitting_confidence: float | None = None
+    inlier_ratio: float | None = None
+    fit_error: float | None = None
+    refinement_feedback_reason: str | None = None
 
 
 class CommandExecutor:
@@ -142,6 +146,13 @@ class CommandExecutor:
                 requires_rerender=True,
                 fitting_source=replacement_segment.metadata.get("executor", {}).get("fitting_source"),
                 reason=None,
+                algorithm_fitting_confidence=self._executor_metric(
+                    replacement_segment,
+                    "algorithm_fitting_confidence",
+                ),
+                inlier_ratio=self._executor_metric(replacement_segment, "inlier_ratio"),
+                fit_error=self._executor_metric(replacement_segment, "fit_error"),
+                refinement_feedback_reason=self._executor_feedback_reason(replacement_segment),
             )
         except (CommandValidationError, KeyError, ValueError) as exc:
             current_path = self._try_path(document, affected_path_id)
@@ -207,6 +218,20 @@ class CommandExecutor:
             )
             if self._should_reject_line_feedback(feedback.reason, refined.rmse):
                 raise ValueError(feedback.reason or feedback.suggestion)
+            confidence_result = self.fitting_confidence_metric.evaluate(
+                FittingConfidenceInputs(
+                    segment_type="line",
+                    inlier_ratio=initial.inlier_ratio,
+                    rmse=refined.rmse,
+                    segment_length=PrecisionUtility.distance_between_points(
+                        self._coerce_point(params["start"]),
+                        self._coerce_point(params["end"]),
+                    ),
+                    parameter_delta=refined.parameter_delta,
+                )
+            )
+            algorithm_fitting_confidence = confidence_result.confidence
+            algorithm_inlier_ratio = initial.inlier_ratio
         elif target_type == "arc":
             ransac = RansacArcFitter(
                 RansacArcConfig(
@@ -241,6 +266,19 @@ class CommandExecutor:
                 arc_coverage,
             ):
                 raise ValueError(feedback.reason or feedback.suggestion)
+            confidence_result = self.fitting_confidence_metric.evaluate(
+                FittingConfidenceInputs(
+                    segment_type="arc",
+                    inlier_ratio=initial.inlier_ratio,
+                    rmse=refined.rmse,
+                    segment_length=arc_coverage * float(params["r"]),
+                    parameter_delta=refined.parameter_delta,
+                    radial_error=initial.fit_error,
+                    arc_angle_coverage=arc_coverage,
+                )
+            )
+            algorithm_fitting_confidence = confidence_result.confidence
+            algorithm_inlier_ratio = initial.inlier_ratio
         elif target_type == "circle":
             ransac = RansacCircleFitter(
                 RansacCircleConfig(
@@ -271,6 +309,18 @@ class CommandExecutor:
                 inlier_ratio=initial.inlier_ratio,
             ):
                 raise ValueError(feedback.reason or feedback.suggestion)
+            confidence_result = self.fitting_confidence_metric.evaluate(
+                FittingConfidenceInputs(
+                    segment_type="circle",
+                    inlier_ratio=initial.inlier_ratio,
+                    rmse=refined.rmse,
+                    segment_length=math.tau * float(refined.params["r"]),
+                    parameter_delta=refined.parameter_delta,
+                    radial_error=initial.fit_error,
+                )
+            )
+            algorithm_fitting_confidence = confidence_result.confidence
+            algorithm_inlier_ratio = initial.inlier_ratio
         elif target_type == "ellipse":
             ransac = RansacEllipseFitter(
                 RansacEllipseConfig(
@@ -296,6 +346,12 @@ class CommandExecutor:
             feedback = self._ellipse_refinement_feedback(refined=refined, fitting_source=fitting_source)
             if self._should_reject_ellipse_feedback(feedback.reason):
                 raise ValueError(feedback.reason or feedback.suggestion)
+            confidence_result = FittingConfidenceResult(
+                confidence=self._ellipse_confidence(refined.inlier_ratio, refined.fit_error),
+                failure_reason=None,
+            )
+            algorithm_fitting_confidence = confidence_result.confidence
+            algorithm_inlier_ratio = refined.inlier_ratio
         else:
             raise ValueError(f"unsupported command target type: {target_type}")
 
@@ -307,6 +363,10 @@ class CommandExecutor:
             "fitting_point_count": len(points),
             "support_point_count": len(support_points),
             "raw_source_point_count": raw_source_point_count,
+            "algorithm_fitting_confidence": algorithm_fitting_confidence,
+            "inlier_ratio": algorithm_inlier_ratio,
+            "fit_error": fit_error,
+            "refinement_feedback_reason": feedback.reason,
         }
         return Segment(
             segment_id=primary_segment.segment_id,
@@ -791,6 +851,22 @@ class CommandExecutor:
 
     def _ensure_no_dangling_constraints(self, document: VectorDocument, removed_segment_ids: tuple[str, ...]) -> None:
         return None
+
+    def _executor_metric(self, segment: Segment, key: str) -> float | None:
+        executor_metadata = segment.metadata.get("executor")
+        if not isinstance(executor_metadata, dict):
+            return None
+        value = executor_metadata.get(key)
+        if not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    def _executor_feedback_reason(self, segment: Segment) -> str | None:
+        executor_metadata = segment.metadata.get("executor")
+        if not isinstance(executor_metadata, dict):
+            return None
+        value = executor_metadata.get("refinement_feedback_reason")
+        return str(value) if isinstance(value, str) else None
 
     def _cleanup_document_integrity(
         self,
