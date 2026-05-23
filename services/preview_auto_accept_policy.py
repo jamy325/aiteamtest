@@ -292,17 +292,15 @@ class PreviewAndAutoAcceptPolicy:
         if blocking_decision is not None:
             return blocking_decision, document
 
-        confidence = float(command.get("confidence", 0.0))
+        algorithm_confidence = self._algorithm_fitting_confidence(preview, command)
         score_improvement = self._score_improvement(preview)
         risk_level = self._risk_level(command)
         policy_metrics = self._policy_metrics(command)
         risk_flags: list[str] = []
         metrics_delta = self._metrics_delta(preview, command)
 
-        if confidence < self.config.min_fitting_confidence:
+        if algorithm_confidence < self.config.min_fitting_confidence:
             risk_flags.append("low_fitting_confidence")
-        elif confidence < max(self.config.auto_accept_min_confidence, self.config.medium_confidence_threshold):
-            risk_flags.append("medium_confidence")
         if score_improvement is None:
             risk_flags.append("missing_score_delta")
         elif score_improvement < self.config.auto_accept_min_score_improvement:
@@ -332,7 +330,7 @@ class PreviewAndAutoAcceptPolicy:
                     command=dict(command),
                     preview_result=preview,
                     decision="auto_accept",
-                    reason="Preview improved score enough and confidence is high.",
+                    reason="Preview improved score enough and algorithm fitting confidence is high.",
                     risk_flags=(),
                     decision_kind=DecisionKind.AUTO_APPLY,
                     risk_level=risk_level,
@@ -345,7 +343,7 @@ class PreviewAndAutoAcceptPolicy:
             reason_code="requires_external_decision",
             message="Preview did not hit reject gates, but did not satisfy auto-apply hard gates.",
             metrics_delta=metrics_delta,
-            policy_hint="review scope, risk, or confidence before applying",
+            policy_hint="review scope, risk, or fitting metrics before applying",
             retry_allowed=True,
             retry_constraints={
                 "allowed_auto_risk": self.config.allowed_auto_risk.value,
@@ -358,7 +356,7 @@ class PreviewAndAutoAcceptPolicy:
                 command=dict(command),
                 preview_result=preview,
                 decision="user_confirm",
-                reason="Preview is safe enough to review, but confidence or score gain is not high enough for auto-accept.",
+                reason="Preview is safe enough to review, but fitting metrics or score gain are not high enough for auto-apply.",
                 risk_flags=tuple(dict.fromkeys(risk_flags or ["needs_review"])),
                 decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
                 risk_level=risk_level,
@@ -572,18 +570,19 @@ class PreviewAndAutoAcceptPolicy:
                 ),
             )
 
-        if float(command.get("confidence", 0.0)) < self.config.min_fitting_confidence:
+        algorithm_confidence = self._algorithm_fitting_confidence(preview, command)
+        if algorithm_confidence < self.config.min_fitting_confidence:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
                 decision="reject",
-                reason="Preview confidence is below the minimum fitting threshold.",
+                reason="Algorithm fitting confidence is below the minimum fitting threshold.",
                 risk_flags=("low_fitting_confidence",),
                 decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="low_fitting_confidence",
-                    message="Preview confidence is below the minimum fitting threshold.",
+                    message="Algorithm fitting confidence is below the minimum fitting threshold.",
                     metrics_delta=metrics_delta,
                     policy_hint="use a narrower scope or simpler primitive",
                     retry_allowed=True,
@@ -591,7 +590,7 @@ class PreviewAndAutoAcceptPolicy:
                 ),
             )
 
-        if float(policy_metrics.get("inlier_ratio", 1.0)) < self.config.min_inlier_ratio:
+        if self._inlier_ratio(preview, command) < self.config.min_inlier_ratio:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
@@ -704,6 +703,30 @@ class PreviewAndAutoAcceptPolicy:
             return dict(raw)
         return {}
 
+    def _algorithm_fitting_confidence(self, preview: CommandPreviewResult, command: dict[str, Any]) -> float:
+        if preview.algorithm_fitting_confidence is not None:
+            return float(preview.algorithm_fitting_confidence)
+        value = self._policy_metrics(command).get("algorithm_fitting_confidence", 0.0)
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
+    def _inlier_ratio(self, preview: CommandPreviewResult, command: dict[str, Any]) -> float:
+        if preview.inlier_ratio is not None:
+            return float(preview.inlier_ratio)
+        value = self._policy_metrics(command).get("inlier_ratio", 1.0)
+        return float(value) if isinstance(value, (int, float)) else 1.0
+
+    def _fit_error(self, preview: CommandPreviewResult, command: dict[str, Any]) -> float | None:
+        if preview.fit_error is not None:
+            return float(preview.fit_error)
+        value = self._policy_metrics(command).get("fit_error")
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def _refinement_feedback_reason(self, preview: CommandPreviewResult, command: dict[str, Any]) -> str | None:
+        if preview.refinement_feedback_reason is not None:
+            return str(preview.refinement_feedback_reason)
+        value = self._policy_metrics(command).get("refinement_feedback_reason")
+        return str(value) if isinstance(value, str) else None
+
     def _metrics_delta(self, preview: CommandPreviewResult, command: dict[str, Any]) -> dict[str, Any]:
         metrics = self._policy_metrics(command)
         return {
@@ -713,7 +736,11 @@ class PreviewAndAutoAcceptPolicy:
             "fit_error_delta": float(metrics.get("fit_error_delta", 0.0)),
             "complexity_delta": float(metrics.get("complexity_delta", 0.0)),
             "edge_error_delta": float(metrics.get("edge_error_delta", 0.0)),
-            "inlier_ratio": float(metrics.get("inlier_ratio", 1.0)),
+            "algorithm_fitting_confidence": self._algorithm_fitting_confidence(preview, command),
+            "ai_command_confidence": float(command.get("confidence", 0.0)),
+            "inlier_ratio": self._inlier_ratio(preview, command),
+            "fit_error": self._fit_error(preview, command),
+            "refinement_feedback_reason": self._refinement_feedback_reason(preview, command),
             "self_intersection_delta": sum(
                 max(preview.self_intersection_count_after.get(path_id, 0) - preview.self_intersection_count_before.get(path_id, 0), 0)
                 for path_id in preview.self_intersection_count_after
@@ -736,6 +763,11 @@ class PreviewAndAutoAcceptPolicy:
             "fit_error_delta": float(self._policy_metrics(command).get("fit_error_delta", 0.0)),
             "complexity_delta": float(self._policy_metrics(command).get("complexity_delta", 0.0)),
             "edge_error_delta": float(self._policy_metrics(command).get("edge_error_delta", 0.0)),
+            "algorithm_fitting_confidence": self._algorithm_fitting_confidence(preview, command),
+            "ai_command_confidence": float(command.get("confidence", 0.0)),
+            "inlier_ratio": self._inlier_ratio(preview, command),
+            "fit_error": self._fit_error(preview, command),
+            "refinement_feedback_reason": self._refinement_feedback_reason(preview, command),
         }
 
     def _edge_error_gain(self, policy_metrics: dict[str, Any]) -> float:

@@ -47,6 +47,10 @@ def _preview_result(
     topology_after: str = "closed",
     self_intersection_before: int = 0,
     self_intersection_after: int = 0,
+    algorithm_fitting_confidence: float | None = 0.92,
+    inlier_ratio: float | None = 0.9,
+    fit_error: float | None = 0.04,
+    refinement_feedback_reason: str | None = None,
 ) -> CommandPreviewResult:
     old_score = 10.0 if score_delta is not None else None
     predicted_new_score = (old_score + score_delta) if score_delta is not None and old_score is not None else None
@@ -73,6 +77,10 @@ def _preview_result(
             changed_constraint_ids=(),
         ),
         export_impact_summary=ExportImpactSummary(before={"json_char_count": 10}, after={"json_char_count": 9}, delta={"json_char_count": -1}),
+        algorithm_fitting_confidence=algorithm_fitting_confidence,
+        inlier_ratio=inlier_ratio,
+        fit_error=fit_error,
+        refinement_feedback_reason=refinement_feedback_reason,
     )
 
 
@@ -142,6 +150,10 @@ def _execution_result(command_id: str, document: VectorDocument, *, success: boo
         requires_rerender=success,
         fitting_source="raw_contour_points" if success else None,
         reason=reason,
+        algorithm_fitting_confidence=0.92 if success else None,
+        inlier_ratio=0.9 if success else None,
+        fit_error=0.04 if success else None,
+        refinement_feedback_reason=None,
     )
 
 
@@ -152,7 +164,7 @@ def test_preview_auto_accept_policy_auto_accepts_high_confidence_circle_preview(
         "tool": "propose_replace_path_with_circle",
         "path_id": "path_1",
         "reason": "intent only",
-        "confidence": 0.94,
+        "confidence": 0.2,
         "requires_user_confirmation": True,
     }
     preview_service = FakePreviewService({"circle_ok": _preview_result(command_id="circle_ok", score_delta=-1.2)})
@@ -176,7 +188,7 @@ def test_preview_auto_accept_policy_auto_accepts_high_confidence_circle_preview(
     assert result.final_document.document_id == "doc_policy:auto_circle"
 
 
-def test_preview_auto_accept_policy_marks_low_confidence_preview_for_user_confirmation() -> None:
+def test_preview_auto_accept_policy_marks_limited_score_preview_for_user_confirmation() -> None:
     document = _document()
     command = {
         "command_id": "circle_review",
@@ -204,7 +216,46 @@ def test_preview_auto_accept_policy_marks_low_confidence_preview_for_user_confir
     assert result.decisions[0].external_decision_request is not None
     assert result.decisions[0].policy_feedback is not None
     assert result.decisions[0].policy_feedback.reason_code == "requires_external_decision"
-    assert "medium_confidence" in result.decisions[0].risk_flags
+    assert "limited_score_improvement" in result.decisions[0].risk_flags
+    assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_rejects_low_algorithm_confidence_even_with_high_ai_confidence() -> None:
+    document = _document()
+    command = {
+        "command_id": "circle_low_algorithm_confidence",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.98,
+        "requires_user_confirmation": True,
+    }
+    preview_service = FakePreviewService(
+        {
+            "circle_low_algorithm_confidence": _preview_result(
+                command_id="circle_low_algorithm_confidence",
+                score_delta=-1.1,
+                algorithm_fitting_confidence=0.31,
+                inlier_ratio=0.91,
+                fit_error=0.03,
+                refinement_feedback_reason="low_confidence",
+            )
+        }
+    )
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:low_algorithm_confidence"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "low_fitting_confidence"
     assert result.final_document == document
 
 
@@ -497,7 +548,15 @@ def test_preview_auto_accept_policy_rejects_low_inlier_ratio() -> None:
             "rollback_snapshot_created": True,
         },
     }
-    preview_service = FakePreviewService({"low_inlier": _preview_result(command_id="low_inlier", score_delta=-1.0)})
+    preview_service = FakePreviewService(
+        {
+            "low_inlier": _preview_result(
+                command_id="low_inlier",
+                score_delta=-1.0,
+                inlier_ratio=0.42,
+            )
+        }
+    )
     executor = FakeCommandExecutor(
         lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:low_inlier"))
     )
