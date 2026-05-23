@@ -47,6 +47,7 @@ class CommandPreviewResult:
     segment_type_summary: dict[str, dict[str, int]]
     constraint_change_summary: ConstraintChangeSummary
     export_impact_summary: ExportImpactSummary
+    preview_document: VectorDocument | None = None
     algorithm_fitting_confidence: float | None = None
     inlier_ratio: float | None = None
     fit_error: float | None = None
@@ -158,6 +159,7 @@ class CommandPreviewService:
             },
             constraint_change_summary=self._constraint_change_summary(before_document, after_document),
             export_impact_summary=self._export_impact_summary(before_document, after_document),
+            preview_document=after_document if execution_result.success else None,
             algorithm_fitting_confidence=execution_result.algorithm_fitting_confidence,
             inlier_ratio=execution_result.inlier_ratio,
             fit_error=execution_result.fit_error,

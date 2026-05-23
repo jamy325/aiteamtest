@@ -264,31 +264,29 @@ class PreviewAndAutoAcceptPolicy:
         preview = self.preview_service.preview(command, document)
         if not preview.success:
             return self._preview_failure_decision(command, preview, document)
-
-        execution_result = self.command_executor.execute(command, document)
-        if not execution_result.success:
+        if preview.preview_document is None:
             return (
                 PreviewDecision(
                     command=dict(command),
                     preview_result=preview,
                     decision="reject",
-                    reason=execution_result.reason or "Command execution failed after successful preview.",
-                    risk_flags=("execution_failed",),
+                    reason="Preview succeeded without producing a committable preview document.",
+                    risk_flags=("missing_preview_document",),
                     decision_kind=DecisionKind.AUTO_REJECT,
                     risk_level=self._risk_level(command),
                     policy_feedback=PolicyFeedback(
-                        reason_code="execution_failed",
-                        message=execution_result.reason or "Command execution failed after successful preview.",
+                        reason_code="missing_preview_document",
+                        message="Preview succeeded without producing a committable preview document.",
                         metrics_delta={},
-                        policy_hint="inspect execution failure before retry",
+                        policy_hint="repair preview generation before retry",
                         retry_allowed=True,
                     ),
                 ),
                 document,
             )
 
-        integrity_report = self.integrity_validator.validate(execution_result.document)
-        blocking_decision = self._blocking_decision(command, preview, integrity_report, document, execution_result.document)
+        integrity_report = self.integrity_validator.validate(preview.preview_document)
+        blocking_decision = self._blocking_decision(command, preview, integrity_report, document, preview.preview_document)
         if blocking_decision is not None:
             return blocking_decision, document
 
@@ -336,7 +334,7 @@ class PreviewAndAutoAcceptPolicy:
                     risk_level=risk_level,
                     policy_feedback=feedback,
                 ),
-                execution_result.document,
+                preview.preview_document,
             )
 
         feedback = PolicyFeedback(
