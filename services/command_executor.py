@@ -99,7 +99,7 @@ class CommandExecutor:
 
             path = self._path_by_id(document, validation.target_path_id)
             target_segments = tuple(self._segment_by_id(document, segment_id) for segment_id in validation.target_segment_ids)
-            self._ensure_no_dangling_constraints(document, validation.target_segment_ids[1:])
+            self._ensure_no_dangling_constraints(document, validation.target_segment_ids)
             sampled_points = self._sample_segment_range(target_segments)
             fit_points, fitting_source, raw_source_point_count = self._fit_points_for_command(
                 command,
@@ -849,8 +849,41 @@ class CommandExecutor:
         replaced_document = updated(document, paths=tuple(paths), segments=tuple(updated_segments))
         return self._cleanup_document_integrity(replaced_document, original_document=document)
 
-    def _ensure_no_dangling_constraints(self, document: VectorDocument, removed_segment_ids: tuple[str, ...]) -> None:
-        return None
+    def _ensure_no_dangling_constraints(self, document: VectorDocument, target_segment_ids: tuple[str, ...]) -> None:
+        if len(target_segment_ids) <= 1:
+            return
+        target_segments = tuple(self._segment_by_id(document, segment_id) for segment_id in target_segment_ids)
+        removed_segment_ids = tuple(segment.segment_id for segment in target_segments[1:])
+        preserved_anchor_ids = {
+            anchor_id
+            for anchor_id in (
+                target_segments[0].anchors[0] if target_segments[0].anchors else None,
+                target_segments[-1].anchors[-1] if target_segments[-1].anchors else None,
+            )
+            if anchor_id is not None
+        }
+        removed_anchor_ids = tuple(
+            dict.fromkeys(
+                anchor_id
+                for segment in target_segments
+                for anchor_id in segment.anchors
+                if anchor_id not in preserved_anchor_ids
+            )
+        )
+        removed_target_ids = set(removed_segment_ids) | set(removed_anchor_ids)
+        removed_constraint_ids = tuple(
+            dict.fromkeys(
+                constraint.constraint_id
+                for constraint in document.constraints
+                if set(constraint.targets) & removed_target_ids
+            )
+        )
+        self._raise_for_locked_cleanup_entities(
+            document,
+            removed_segment_ids=removed_segment_ids,
+            removed_anchor_ids=removed_anchor_ids,
+            removed_constraint_ids=removed_constraint_ids,
+        )
 
     def _executor_metric(self, segment: Segment, key: str) -> float | None:
         executor_metadata = segment.metadata.get("executor")
@@ -917,6 +950,12 @@ class CommandExecutor:
             for constraint in original_document.constraints
             if constraint.constraint_id not in remaining_constraint_ids
         )
+        self._raise_for_locked_cleanup_entities(
+            original_document,
+            removed_segment_ids=removed_segment_ids,
+            removed_anchor_ids=removed_anchor_ids,
+            removed_constraint_ids=removed_constraint_ids,
+        )
 
         objects = tuple(
             updated(
@@ -949,6 +988,29 @@ class CommandExecutor:
             constraints=constraints,
             metadata=metadata,
         )
+
+    def _raise_for_locked_cleanup_entities(
+        self,
+        document: VectorDocument,
+        *,
+        removed_segment_ids: tuple[str, ...],
+        removed_anchor_ids: tuple[str, ...],
+        removed_constraint_ids: tuple[str, ...],
+    ) -> None:
+        removed_segment_id_set = set(removed_segment_ids)
+        for segment in document.segments:
+            if segment.segment_id in removed_segment_id_set and segment.locked:
+                raise ValueError(f"locked segment cannot be cleaned up: {segment.segment_id}")
+
+        removed_anchor_id_set = set(removed_anchor_ids)
+        for anchor in document.anchors:
+            if anchor.anchor_id in removed_anchor_id_set and anchor.locked:
+                raise ValueError(f"locked anchor cannot be cleaned up: {anchor.anchor_id}")
+
+        removed_constraint_id_set = set(removed_constraint_ids)
+        for constraint in document.constraints:
+            if constraint.constraint_id in removed_constraint_id_set and constraint.locked:
+                raise ValueError(f"locked_constraint_modified: {constraint.constraint_id}")
 
     def _path_by_id(self, document: VectorDocument, path_id: str) -> Path:
         path = self._try_path(document, path_id)

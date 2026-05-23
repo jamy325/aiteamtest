@@ -309,6 +309,68 @@ def test_command_preview_failure_keeps_constraint_summary_unchanged() -> None:
     assert document == original_document
 
 
+def test_command_preview_rejects_locked_constraint_cleanup_without_mutating_document() -> None:
+    document = create_document(
+        document_id="doc_locked_constraint_cleanup_preview",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(
+        document,
+        VectorPath(path_id="path_1", closed=False, segments=("path_1_seg_1", "path_1_seg_2")),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            "path_1_seg_1",
+            "path_1",
+            "polyline",
+            {"points": [[0.0, 0.0], [2.0, 0.0]]},
+            anchors=("a0", "a1"),
+        ),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            "path_1_seg_2",
+            "path_1",
+            "polyline",
+            {"points": [[2.0, 0.0], [4.0, 0.0]]},
+            anchors=("a1", "a2"),
+        ),
+    )
+    document = add_anchor(document, Anchor("a0", "path_1", (0.0, 0.0)))
+    document = add_anchor(document, Anchor("a1", "path_1", (2.0, 0.0)))
+    document = add_anchor(document, Anchor("a2", "path_1", (4.0, 0.0)))
+    document = add_constraint(
+        document,
+        Constraint("c_keep", "coincident", targets=("path_1_seg_2", "a1"), locked=True),
+    )
+    original_document = document
+
+    preview = CommandPreviewService().preview(
+        {
+            "command_id": "locked_constraint_cleanup",
+            "tool": "propose_replace_segment_with_line",
+            "path_id": "path_1",
+            "segment_range": [0, 1],
+            "reason": "intent only",
+            "confidence": 0.8,
+            "requires_user_confirmation": True,
+        },
+        document,
+    )
+
+    assert preview.success is False
+    assert "locked constraint" in (preview.reason or "") or "locked_constraint" in (preview.reason or "")
+    assert preview.preview_document is None
+    assert preview.constraint_change_summary.before == {"coincident": 1}
+    assert preview.constraint_change_summary.after == {"coincident": 1}
+    assert preview.constraint_change_summary.delta == {"coincident": 0}
+    assert document == original_document
+
+
 def test_command_preview_has_no_forbidden_dependencies() -> None:
     source = Path("services/command_preview.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
