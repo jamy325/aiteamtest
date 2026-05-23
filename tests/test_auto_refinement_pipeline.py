@@ -129,6 +129,12 @@ def test_auto_refinement_pipeline_circle_fixture_auto_accepts_circle_command() -
     assert any(command["tool"] == "propose_replace_path_with_circle" for command in result.proposed_commands)
     assert any(decision.decision == "auto_accept" for decision in result.preview_decisions)
     assert any(decision.decision_kind is DecisionKind.AUTO_APPLY for decision in result.preview_decisions)
+    auto_apply_decisions = [
+        decision for decision in result.preview_decisions if decision.decision_kind is DecisionKind.AUTO_APPLY
+    ]
+    assert auto_apply_decisions
+    assert auto_apply_decisions[-1].preview_result.preview_document is not None
+    assert result.refined_document == auto_apply_decisions[-1].preview_result.preview_document
     assert result.report.candidate_stats["by_target_type"]["circle"] >= 1
     assert result.report.decision_stats["auto_accept"] >= 1
     assert result.report.decision_stats["auto_apply"] >= 1

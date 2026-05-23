@@ -51,9 +51,13 @@ def _preview_result(
     inlier_ratio: float | None = 0.9,
     fit_error: float | None = 0.04,
     refinement_feedback_reason: str | None = None,
+    preview_document: VectorDocument | None = None,
+    allow_missing_preview_document: bool = False,
 ) -> CommandPreviewResult:
     old_score = 10.0 if score_delta is not None else None
     predicted_new_score = (old_score + score_delta) if score_delta is not None and old_score is not None else None
+    if success and preview_document is None and not allow_missing_preview_document:
+        preview_document = updated(_document(), document_id=f"preview:{command_id}")
     return CommandPreviewResult(
         success=success,
         command_id=command_id,
@@ -77,6 +81,7 @@ def _preview_result(
             changed_constraint_ids=(),
         ),
         export_impact_summary=ExportImpactSummary(before={"json_char_count": 10}, after={"json_char_count": 9}, delta={"json_char_count": -1}),
+        preview_document=preview_document if success else None,
         algorithm_fitting_confidence=algorithm_fitting_confidence,
         inlier_ratio=inlier_ratio,
         fit_error=fit_error,
@@ -159,6 +164,7 @@ def _execution_result(command_id: str, document: VectorDocument, *, success: boo
 
 def test_preview_auto_accept_policy_auto_accepts_high_confidence_circle_preview() -> None:
     document = _document()
+    preview_document = updated(document, document_id="doc_policy:auto_circle:preview")
     command = {
         "command_id": "circle_ok",
         "tool": "propose_replace_path_with_circle",
@@ -167,9 +173,17 @@ def test_preview_auto_accept_policy_auto_accepts_high_confidence_circle_preview(
         "confidence": 0.2,
         "requires_user_confirmation": True,
     }
-    preview_service = FakePreviewService({"circle_ok": _preview_result(command_id="circle_ok", score_delta=-1.2)})
+    preview_service = FakePreviewService(
+        {
+            "circle_ok": _preview_result(
+                command_id="circle_ok",
+                score_delta=-1.2,
+                preview_document=preview_document,
+            )
+        }
+    )
     executor = FakeCommandExecutor(
-        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:auto_circle"))
+        lambda command, doc: (_ for _ in ()).throw(AssertionError("policy should not re-execute after preview"))
     )
 
     result = PreviewAndAutoAcceptPolicy(
@@ -185,7 +199,7 @@ def test_preview_auto_accept_policy_auto_accepts_high_confidence_circle_preview(
     assert result.decisions[0].decision_kind is DecisionKind.AUTO_APPLY
     assert result.decisions[0].policy_feedback is not None
     assert result.decisions[0].policy_feedback.reason_code == "auto_apply"
-    assert result.final_document.document_id == "doc_policy:auto_circle"
+    assert result.final_document == preview_document
 
 
 def test_preview_auto_accept_policy_marks_limited_score_preview_for_user_confirmation() -> None:
@@ -217,6 +231,42 @@ def test_preview_auto_accept_policy_marks_limited_score_preview_for_user_confirm
     assert result.decisions[0].policy_feedback is not None
     assert result.decisions[0].policy_feedback.reason_code == "requires_external_decision"
     assert "limited_score_improvement" in result.decisions[0].risk_flags
+    assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_rejects_missing_preview_document() -> None:
+    document = _document()
+    command = {
+        "command_id": "missing_preview_document",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.8,
+        "requires_user_confirmation": True,
+    }
+    preview_service = FakePreviewService(
+        {
+            "missing_preview_document": _preview_result(
+                command_id="missing_preview_document",
+                score_delta=-1.0,
+                preview_document=None,
+                allow_missing_preview_document=True,
+            )
+        }
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=FakeCommandExecutor(
+            lambda command, doc: (_ for _ in ()).throw(AssertionError("policy should not re-execute after preview"))
+        ),
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "missing_preview_document"
     assert result.final_document == document
 
 
@@ -391,6 +441,8 @@ def test_preview_auto_accept_policy_rejects_locked_target_failures() -> None:
 
 def test_preview_auto_accept_policy_rejects_integrity_failures_and_applies_auto_accepts_sequentially() -> None:
     document = _document()
+    preview_document_auto_1 = updated(document, document_id="doc_policy:auto_1:preview")
+    preview_document_auto_2 = updated(preview_document_auto_1, document_id="doc_policy:auto_1:auto_2:preview")
     commands = [
         {
             "command_id": "auto_1",
@@ -421,18 +473,22 @@ def test_preview_auto_accept_policy_rejects_integrity_failures_and_applies_auto_
     ]
     preview_service = FakePreviewService(
         {
-            "auto_1": _preview_result(command_id="auto_1", score_delta=-1.0),
+            "auto_1": _preview_result(
+                command_id="auto_1",
+                score_delta=-1.0,
+                preview_document=preview_document_auto_1,
+            ),
             "bad_integrity": _preview_result(command_id="bad_integrity", score_delta=-0.7),
-            "auto_2": _preview_result(command_id="auto_2", score_delta=-0.9),
+            "auto_2": _preview_result(
+                command_id="auto_2",
+                score_delta=-0.9,
+                preview_document=preview_document_auto_2,
+            ),
         }
     )
 
-    def handler(command: dict[str, object], doc: VectorDocument) -> CommandExecutionResult:
-        next_doc = updated(doc, document_id=f"{doc.document_id}:{command['command_id']}")
-        return _execution_result(str(command["command_id"]), next_doc)
-
     integrity_reports = {
-        "doc_policy:auto_1:bad_integrity": IntegrityReport(
+        "preview:bad_integrity": IntegrityReport(
             success=False,
             errors=(IntegrityIssue(code="DANGLING_SEGMENT", message="dangling", affected_ids=("seg_1",)),),
             warnings=(),
@@ -442,7 +498,9 @@ def test_preview_auto_accept_policy_rejects_integrity_failures_and_applies_auto_
 
     result = PreviewAndAutoAcceptPolicy(
         preview_service=preview_service,
-        command_executor=FakeCommandExecutor(handler),
+        command_executor=FakeCommandExecutor(
+            lambda command, doc: (_ for _ in ()).throw(AssertionError("policy should not re-execute after preview"))
+        ),
         integrity_validator=FakeIntegrityValidator(integrity_reports),
     ).evaluate_commands(commands, document)
 
@@ -454,7 +512,7 @@ def test_preview_auto_accept_policy_rejects_integrity_failures_and_applies_auto_
     ]
     assert result.accepted_count == 2
     assert result.rejected_count == 1
-    assert result.final_document.document_id == "doc_policy:auto_1:auto_2"
+    assert result.final_document == preview_document_auto_2
     assert result.decisions[1].risk_flags == ("integrity_failed",)
 
 
@@ -687,6 +745,11 @@ def test_preview_auto_accept_policy_rejects_complexity_increase_without_edge_gai
 
 def test_preview_auto_accept_policy_rejects_coordinate_system_inconsistency() -> None:
     document = _document()
+    changed_preview_document = updated(
+        document,
+        document_id="doc_policy:coord_bad:preview",
+        coordinate_system=CoordinateSystem(internal_space="pixel"),
+    )
     command = {
         "command_id": "coord_bad",
         "tool": "propose_replace_segment_with_line",
@@ -696,19 +759,21 @@ def test_preview_auto_accept_policy_rejects_coordinate_system_inconsistency() ->
         "confidence": 0.94,
         "requires_user_confirmation": True,
     }
-    preview_service = FakePreviewService({"coord_bad": _preview_result(command_id="coord_bad", score_delta=-0.9)})
-
-    def handler(command: dict[str, object], doc: VectorDocument) -> CommandExecutionResult:
-        changed_doc = updated(
-            doc,
-            document_id="doc_policy:coord_bad",
-            coordinate_system=CoordinateSystem(internal_space="pixel"),
-        )
-        return _execution_result(str(command["command_id"]), changed_doc)
+    preview_service = FakePreviewService(
+        {
+            "coord_bad": _preview_result(
+                command_id="coord_bad",
+                score_delta=-0.9,
+                preview_document=changed_preview_document,
+            )
+        }
+    )
 
     result = PreviewAndAutoAcceptPolicy(
         preview_service=preview_service,
-        command_executor=FakeCommandExecutor(handler),
+        command_executor=FakeCommandExecutor(
+            lambda command, doc: (_ for _ in ()).throw(AssertionError("policy should not re-execute after preview"))
+        ),
         integrity_validator=FakeIntegrityValidator(),
         config=PreviewAndAutoAcceptPolicyConfig(autonomy_level=AutonomyLevel.AUTONOMOUS_FULL),
     ).evaluate_commands([command], document)
