@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 from xml.etree import ElementTree as ET
 
@@ -65,6 +66,8 @@ class BenchmarkCaseResult:
     score_after: float
     score_delta: float
     total_score: float
+    metrics: dict[str, float | int] = field(default_factory=dict)
+    artifacts: dict[str, str] = field(default_factory=dict)
     failure_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,8 +97,19 @@ class BenchmarkCaseResult:
             "score_after": self.score_after,
             "score_delta": self.score_delta,
             "total_score": self.total_score,
+            "metrics": dict(self.metrics),
+            "artifacts": dict(self.artifacts),
             "failure_reason": self.failure_reason,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _BenchmarkRunContext:
+    case: BenchmarkCase
+    result: BenchmarkCaseResult
+    document: VectorDocument
+    pipeline: MinimalPipeline
+    pipeline_result: MinimalPipelineResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,12 +204,35 @@ class BenchmarkRunner:
             )
         return tuple(cases)
 
+    def discover_cases(self, manifest_path: str | Path) -> tuple[BenchmarkCase, ...]:
+        return self.load_manifest(manifest_path)
+
     def run_case(
         self,
         case: BenchmarkCase,
         *,
         execute_proposed_commands: bool = False,
     ) -> BenchmarkCaseResult:
+        return self._run_case_context(case, execute_proposed_commands=execute_proposed_commands).result
+
+    def run_acceptance_case(
+        self,
+        case: BenchmarkCase,
+        *,
+        output_dir: str | Path,
+        execute_proposed_commands: bool = False,
+    ) -> BenchmarkCaseResult:
+        context = self._run_case_context(case, execute_proposed_commands=execute_proposed_commands)
+        artifact_paths = self._write_acceptance_artifacts(context, output_dir=output_dir)
+        return replace(context.result, artifacts=artifact_paths)
+
+    def _run_case_context(
+        self,
+        case: BenchmarkCase,
+        *,
+        execute_proposed_commands: bool = False,
+    ) -> _BenchmarkRunContext:
+        runtime_start = perf_counter()
         document_id = case.document_id or f"benchmark_{case.case_id}"
         pipeline = self.pipeline_factory(case)
         pipeline_result = pipeline.run_from_file(case.image_path, document_id=document_id)
@@ -242,37 +279,54 @@ class BenchmarkRunner:
         actual_geometry = self._geometry_counts(document)
         actual_constraints = self._constraint_counts(document)
         export_summary = self._export_summary(document, case.expected_export)
-        stats = self._case_stats(document, score, edge_error)
-        failure_reason = self._failure_reason(case, stats=stats, actual_geometry=geometry_after)
-        success = failure_reason is None
-
-        return BenchmarkCaseResult(
-            case_id=case.case_id,
-            image_path=case.image_path,
-            success=success,
-            document_id=document.document_id,
-            segment_type=case.segment_type,
-            stats=stats,
-            actual_geometry=actual_geometry,
-            geometry_before=geometry_before,
-            geometry_after=geometry_after,
-            geometry_hits=self._count_hits(case.expected_geometry, actual_geometry),
-            actual_constraints=actual_constraints,
-            constraint_hits=self._count_hits(case.expected_constraints, actual_constraints),
+        runtime_ms = (perf_counter() - runtime_start) * 1000.0
+        stats = self._case_stats(
+            document,
+            score,
+            edge_error,
             export_summary=export_summary,
-            command_results=tuple(command_results),
-            auto_refine=case.auto_refine,
-            candidate_counts=candidate_counts,
-            proposed_command_counts=proposed_command_counts,
-            preview_decisions=preview_decisions,
             accepted_count=accepted_count,
             rejected_count=rejected_count,
-            user_confirm_count=user_confirm_count,
-            score_before=before_score.total_score,
-            score_after=score.total_score,
-            score_delta=score_delta,
-            total_score=score.total_score,
-            failure_reason=failure_reason,
+            requires_external_decision_count=user_confirm_count,
+            runtime_ms=runtime_ms,
+        )
+        failure_reason = self._failure_reason(case, metrics=stats, actual_geometry=geometry_after)
+        success = failure_reason is None
+
+        return _BenchmarkRunContext(
+            case=case,
+            result=BenchmarkCaseResult(
+                case_id=case.case_id,
+                image_path=case.image_path,
+                success=success,
+                document_id=document.document_id,
+                segment_type=case.segment_type,
+                stats=stats,
+                actual_geometry=actual_geometry,
+                geometry_before=geometry_before,
+                geometry_after=geometry_after,
+                geometry_hits=self._count_hits(case.expected_geometry, actual_geometry),
+                actual_constraints=actual_constraints,
+                constraint_hits=self._count_hits(case.expected_constraints, actual_constraints),
+                export_summary=export_summary,
+                command_results=tuple(command_results),
+                auto_refine=case.auto_refine,
+                candidate_counts=candidate_counts,
+                proposed_command_counts=proposed_command_counts,
+                preview_decisions=preview_decisions,
+                accepted_count=accepted_count,
+                rejected_count=rejected_count,
+                user_confirm_count=user_confirm_count,
+                score_before=before_score.total_score,
+                score_after=score.total_score,
+                score_delta=score_delta,
+                total_score=score.total_score,
+                metrics=stats,
+                failure_reason=failure_reason,
+            ),
+            document=document,
+            pipeline=pipeline,
+            pipeline_result=pipeline_result,
         )
 
     def run_manifest(
@@ -287,6 +341,28 @@ class BenchmarkRunner:
             for case in cases
         )
         return BenchmarkReport(cases=results, summary=self._summary(results))
+
+    def run_acceptance_manifest(
+        self,
+        manifest: str | Path | Sequence[BenchmarkCase],
+        *,
+        output_dir: str | Path,
+        execute_proposed_commands: bool = False,
+    ) -> BenchmarkReport:
+        cases = self.load_manifest(manifest) if isinstance(manifest, (str, Path)) else tuple(manifest)
+        output_root = Path(output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        results = tuple(
+            self.run_acceptance_case(
+                case,
+                output_dir=output_root,
+                execute_proposed_commands=execute_proposed_commands,
+            )
+            for case in cases
+        )
+        report = BenchmarkReport(cases=results, summary=self._summary(results))
+        (output_root / "acceptance_report.json").write_text(report.to_json(), encoding="utf-8")
+        return report
 
     def _default_pipeline_factory(self, case: BenchmarkCase) -> MinimalPipeline:
         return MinimalPipeline(segment_type=case.segment_type)
@@ -351,16 +427,28 @@ class BenchmarkRunner:
         document: VectorDocument,
         score: ScoreResult,
         edge_error: EdgeErrorResult,
+        *,
+        export_summary: Mapping[str, Any],
+        accepted_count: int,
+        rejected_count: int,
+        requires_external_decision_count: int,
+        runtime_ms: float,
     ) -> dict[str, float | int]:
         geometry_counts = self._geometry_counts(document)
         return {
             "total_score": score.total_score,
             "edge_error": score.breakdown.edge_error_score,
+            "complexity_score": score.breakdown.geometry_complexity_score,
             "geometry_complexity": score.breakdown.geometry_complexity_score,
             "topology_error_count": sum(1 for path in document.paths if path.topology_status == "topology_error"),
             "self_intersection_count": sum(int(path.self_intersection_count) for path in document.paths),
             "segment_count": len(document.segments),
             "control_point_count": self._control_point_count(document),
+            "auto_apply_count": accepted_count,
+            "auto_reject_count": rejected_count,
+            "requires_external_decision_count": requires_external_decision_count,
+            "svg_node_count": int(export_summary["svg"]["element_count"]),
+            "runtime_ms": runtime_ms,
             "line_count": geometry_counts["line"],
             "arc_count": geometry_counts["arc"],
             "circle_count": geometry_counts["circle"],
@@ -383,10 +471,13 @@ class BenchmarkRunner:
         if total_cases == 0:
             return {
                 "total_cases": 0,
+                "overall_pass": True,
+                "failed_case_count": 0,
                 "average_total_score": 0.0,
                 "total_segments": 0,
                 "total_control_points": 0,
                 "geometry_hit_totals": {},
+                "failure_reasons": {},
             }
 
         total_score = sum(float(item.stats["total_score"]) for item in results)
@@ -399,6 +490,8 @@ class BenchmarkRunner:
 
         return {
             "total_cases": total_cases,
+            "overall_pass": all(item.success for item in results),
+            "failed_case_count": sum(1 for item in results if not item.success),
             "average_total_score": total_score / total_cases,
             "total_segments": total_segments,
             "total_control_points": total_control_points,
@@ -408,6 +501,11 @@ class BenchmarkRunner:
             "accepted_count": sum(item.accepted_count for item in results),
             "rejected_count": sum(item.rejected_count for item in results),
             "user_confirm_count": sum(item.user_confirm_count for item in results),
+            "failure_reasons": {
+                item.case_id: item.failure_reason
+                for item in results
+                if item.failure_reason is not None
+            },
         }
 
     def _command_result_payload(self, result: CommandExecutionResult) -> dict[str, Any]:
@@ -453,6 +551,65 @@ class BenchmarkRunner:
         if path.is_absolute():
             return path
         return manifest_dir / path
+
+    def _write_acceptance_artifacts(
+        self,
+        context: _BenchmarkRunContext,
+        *,
+        output_dir: str | Path,
+    ) -> dict[str, str]:
+        case_output_dir = Path(output_dir) / context.case.case_id
+        case_output_dir.mkdir(parents=True, exist_ok=True)
+
+        document_payload = self.json_exporter.export_document(context.document)
+        svg_payload = self.svg_exporter.export_document(context.document)
+        dxf_payload = self.dxf_exporter.export_document(context.document)
+        decision_report = {
+            "case_id": context.result.case_id,
+            "success": context.result.success,
+            "failure_reason": context.result.failure_reason,
+            "decision_counts": {
+                "auto_apply": context.result.accepted_count,
+                "auto_reject": context.result.rejected_count,
+                "requires_external_decision": context.result.user_confirm_count,
+            },
+            "preview_decisions": list(context.result.preview_decisions),
+            "command_results": list(context.result.command_results),
+        }
+        metrics_payload = dict(context.result.metrics)
+
+        artifact_paths = {
+            "document_json": str(case_output_dir / "document.json"),
+            "output_json": str(case_output_dir / "output.json"),
+            "output_svg": str(case_output_dir / "output.svg"),
+            "output_dxf": str(case_output_dir / "output.dxf"),
+            "overlay_png": str(case_output_dir / "overlay.png"),
+            "diff_png": str(case_output_dir / "diff.png"),
+            "decision_report_json": str(case_output_dir / "decision_report.json"),
+            "metrics_json": str(case_output_dir / "metrics.json"),
+        }
+
+        Path(artifact_paths["document_json"]).write_text(document_payload, encoding="utf-8")
+        Path(artifact_paths["output_json"]).write_text(document_payload, encoding="utf-8")
+        Path(artifact_paths["output_svg"]).write_text(svg_payload, encoding="utf-8")
+        Path(artifact_paths["output_dxf"]).write_text(dxf_payload, encoding="utf-8")
+        Path(artifact_paths["decision_report_json"]).write_text(json.dumps(decision_report, indent=2, sort_keys=True), encoding="utf-8")
+        Path(artifact_paths["metrics_json"]).write_text(json.dumps(metrics_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+        if (
+            hasattr(context.pipeline, "export_overlay")
+            and context.pipeline_result.source_image is not None
+        ):
+            context.pipeline.export_overlay(context.document, context.pipeline_result.source_image, artifact_paths["overlay_png"])
+        else:
+            Path(artifact_paths["overlay_png"]).write_bytes(_minimal_png_bytes())
+
+        if hasattr(context.pipeline, "export_distance_field_diff"):
+            context.pipeline.export_distance_field_diff(context.document, artifact_paths["diff_png"])
+        else:
+            Path(artifact_paths["diff_png"]).write_bytes(_minimal_png_bytes())
+
+        return artifact_paths
 
     def _coerce_counts(self, value: object) -> dict[str, int]:
         payload = self._coerce_dict(value)
@@ -500,11 +657,11 @@ class BenchmarkRunner:
         self,
         case: BenchmarkCase,
         *,
-        stats: Mapping[str, float | int],
+        metrics: Mapping[str, float | int],
         actual_geometry: Mapping[str, int],
     ) -> str | None:
         for threshold_name, threshold_value in case.fail_thresholds.items():
-            metric_value = self._threshold_metric_value(threshold_name, stats=stats, actual_geometry=actual_geometry)
+            metric_value = self._threshold_metric_value(threshold_name, metrics=metrics, actual_geometry=actual_geometry)
             if metric_value is None:
                 continue
             if threshold_name.startswith("max_") and float(metric_value) > float(threshold_value):
@@ -517,28 +674,44 @@ class BenchmarkRunner:
         self,
         threshold_name: str,
         *,
-        stats: Mapping[str, float | int],
+        metrics: Mapping[str, float | int],
         actual_geometry: Mapping[str, int],
     ) -> float | int | None:
         if threshold_name == "max_total_score":
-            return stats["total_score"]
+            return metrics["total_score"]
+        if threshold_name == "max_topology_errors":
+            return metrics["topology_error_count"]
+        if threshold_name == "max_self_intersections":
+            return metrics["self_intersection_count"]
+        if threshold_name == "max_requires_external_decision_count":
+            return metrics["requires_external_decision_count"]
         if threshold_name == "max_segment_count":
-            return stats["segment_count"]
+            return metrics["segment_count"]
         if threshold_name.startswith("min_") and threshold_name.endswith("_count"):
             geometry_name = threshold_name[len("min_") : -len("_count")]
             if geometry_name in actual_geometry:
                 return actual_geometry[geometry_name]
-            if threshold_name[len("min_") :] in stats:
-                return stats[threshold_name[len("min_") :]]
+            if threshold_name[len("min_") :] in metrics:
+                return metrics[threshold_name[len("min_") :]]
         if threshold_name.startswith("max_") and threshold_name.endswith("_count"):
             geometry_name = threshold_name[len("max_") : -len("_count")]
             if geometry_name in actual_geometry:
                 return actual_geometry[geometry_name]
-        return stats.get(threshold_name)
+        return metrics.get(threshold_name)
 
 
 def benchmark_report_to_json(report: BenchmarkReport) -> str:
     return report.to_json()
+
+
+def _minimal_png_bytes() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\rIDATx\x9cc`\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
 
 
 __all__ = [
