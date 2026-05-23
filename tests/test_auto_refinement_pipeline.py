@@ -108,9 +108,11 @@ class _SequentialRejectingPreviewPolicy:
         return PreviewPolicyResult(
             final_document=document,
             decisions=next_decisions,
-            accepted_count=sum(1 for item in next_decisions if item.decision == "auto_accept"),
-            rejected_count=sum(1 for item in next_decisions if item.decision == "reject"),
-            user_confirm_count=sum(1 for item in next_decisions if item.decision == "user_confirm"),
+            accepted_count=sum(1 for item in next_decisions if item.decision_kind == DecisionKind.AUTO_APPLY),
+            rejected_count=sum(1 for item in next_decisions if item.decision_kind == DecisionKind.AUTO_REJECT),
+            user_confirm_count=sum(
+                1 for item in next_decisions if item.decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION
+            ),
         )
 
 

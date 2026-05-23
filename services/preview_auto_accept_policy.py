@@ -52,17 +52,21 @@ class PreviewAndAutoAcceptPolicyConfig:
 class PreviewDecision:
     command: dict[str, Any]
     preview_result: CommandPreviewResult | BatchCommandPreviewResult
-    decision: DecisionType
     reason: str
     risk_flags: tuple[str, ...]
     decision_kind: DecisionKind | None = None
+    decision: DecisionType | None = None
     risk_level: RiskLevel = RiskLevel.LOW
     policy_feedback: PolicyFeedback | None = None
     external_decision_request: ExternalDecisionRequest | None = None
     policy_result: DecisionPolicyResult | None = None
 
     def __post_init__(self) -> None:
-        decision_kind = self.decision_kind or _decision_kind_from_legacy(self.decision)
+        decision_kind = self.decision_kind
+        if decision_kind is None:
+            if self.decision is None:
+                raise ValueError("decision_kind or legacy decision is required")
+            decision_kind = _decision_kind_from_legacy(self.decision)
         policy_feedback = self.policy_feedback
         external_request = self.external_decision_request
         policy_result = self.policy_result
@@ -89,6 +93,7 @@ class PreviewDecision:
             )
 
         object.__setattr__(self, "decision_kind", decision_kind)
+        object.__setattr__(self, "decision", _legacy_decision(decision_kind))
         object.__setattr__(self, "policy_feedback", policy_feedback)
         object.__setattr__(self, "external_decision_request", external_request)
         object.__setattr__(self, "policy_result", policy_result)
@@ -136,9 +141,9 @@ class PreviewAndAutoAcceptPolicy:
         return PreviewPolicyResult(
             final_document=current_document,
             decisions=tuple(decisions),
-            accepted_count=sum(1 for item in decisions if item.decision == "auto_accept"),
-            rejected_count=sum(1 for item in decisions if item.decision == "reject"),
-            user_confirm_count=sum(1 for item in decisions if item.decision == "user_confirm"),
+            accepted_count=sum(1 for item in decisions if item.decision_kind == DecisionKind.AUTO_APPLY),
+            rejected_count=sum(1 for item in decisions if item.decision_kind == DecisionKind.AUTO_REJECT),
+            user_confirm_count=sum(1 for item in decisions if item.decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION),
         )
 
     def _evaluate_batch_command(
@@ -154,7 +159,7 @@ class PreviewAndAutoAcceptPolicy:
         for nested_command in nested_commands:
             nested_decision, next_document = self._evaluate_single_command(nested_command, working_document)
             nested_decisions.append(nested_decision)
-            if nested_decision.decision == "auto_accept":
+            if nested_decision.decision_kind == DecisionKind.AUTO_APPLY:
                 working_document = next_document
 
         if not nested_decisions:
@@ -162,7 +167,7 @@ class PreviewAndAutoAcceptPolicy:
                 PreviewDecision(
                     command=dict(command),
                     preview_result=batch_preview,
-                    decision="reject",
+                    decision_kind=DecisionKind.AUTO_REJECT,
                     reason="Batch command does not contain executable nested commands.",
                     risk_flags=("empty_batch",),
                     risk_level=RiskLevel.MEDIUM_HIGH,
@@ -189,10 +194,9 @@ class PreviewAndAutoAcceptPolicy:
                 PreviewDecision(
                     command=dict(command),
                     preview_result=batch_preview,
-                    decision="auto_accept",
+                    decision_kind=DecisionKind.AUTO_APPLY,
                     reason="All nested preview commands met auto-accept policy.",
                     risk_flags=risk_flags,
-                    decision_kind=DecisionKind.AUTO_APPLY,
                     risk_level=max((decision.risk_level for decision in nested_decisions), default=RiskLevel.LOW),
                     policy_feedback=PolicyFeedback(
                         reason_code="batch_auto_apply",
@@ -218,10 +222,9 @@ class PreviewAndAutoAcceptPolicy:
                 PreviewDecision(
                     command=dict(command),
                     preview_result=batch_preview,
-                    decision="user_confirm",
+                    decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
                     reason="At least one nested command was rejected by preview policy.",
                     risk_flags=tuple(dict.fromkeys(risk_flags + ("batch_contains_reject",))),
-                    decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
                     risk_level=risk_level,
                     policy_feedback=feedback,
                     external_decision_request=self._external_decision_request(
@@ -248,10 +251,9 @@ class PreviewAndAutoAcceptPolicy:
             PreviewDecision(
                 command=dict(command),
                 preview_result=batch_preview,
-                decision="user_confirm",
+                decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
                 reason="Batch contains commands that require user confirmation.",
                 risk_flags=tuple(dict.fromkeys(risk_flags + ("batch_requires_confirmation",))),
-                decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
                 risk_level=risk_level,
                 policy_feedback=feedback,
                 external_decision_request=self._external_decision_request(
@@ -279,10 +281,9 @@ class PreviewAndAutoAcceptPolicy:
                 PreviewDecision(
                     command=dict(command),
                     preview_result=preview,
-                    decision="reject",
+                    decision_kind=DecisionKind.AUTO_REJECT,
                     reason="Preview succeeded without producing a committable preview document.",
                     risk_flags=("missing_preview_document",),
-                    decision_kind=DecisionKind.AUTO_REJECT,
                     risk_level=self._risk_level(command),
                     policy_feedback=PolicyFeedback(
                         reason_code="missing_preview_document",
@@ -337,10 +338,9 @@ class PreviewAndAutoAcceptPolicy:
                 PreviewDecision(
                     command=dict(command),
                     preview_result=preview,
-                    decision="auto_accept",
+                    decision_kind=DecisionKind.AUTO_APPLY,
                     reason="Preview improved score enough and algorithm fitting confidence is high.",
                     risk_flags=(),
-                    decision_kind=DecisionKind.AUTO_APPLY,
                     risk_level=risk_level,
                     policy_feedback=feedback,
                 ),
@@ -363,10 +363,9 @@ class PreviewAndAutoAcceptPolicy:
             PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="user_confirm",
+                decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
                 reason="Preview is safe enough to review, but fitting metrics or score gain are not high enough for auto-apply.",
                 risk_flags=tuple(dict.fromkeys(risk_flags or ["needs_review"])),
-                decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
                 risk_level=risk_level,
                 policy_feedback=feedback,
                 external_decision_request=self._external_decision_request(
@@ -400,10 +399,9 @@ class PreviewAndAutoAcceptPolicy:
                 PreviewDecision(
                     command=dict(command),
                     preview_result=preview,
-                    decision="reject",
+                    decision_kind=DecisionKind.AUTO_REJECT,
                     reason=preview.reason or "Preview modifies a locked constraint.",
                     risk_flags=("locked_constraint", "preview_failed"),
-                    decision_kind=DecisionKind.AUTO_REJECT,
                     risk_level=self._risk_level(command),
                     policy_feedback=feedback,
                 ),
@@ -421,10 +419,9 @@ class PreviewAndAutoAcceptPolicy:
                 PreviewDecision(
                     command=dict(command),
                     preview_result=preview,
-                    decision="reject",
+                    decision_kind=DecisionKind.AUTO_REJECT,
                     reason=preview.reason or "Preview hit locked targets.",
                     risk_flags=("locked_target", "preview_failed"),
-                    decision_kind=DecisionKind.AUTO_REJECT,
                     risk_level=self._risk_level(command),
                     policy_feedback=feedback,
                 ),
@@ -435,10 +432,9 @@ class PreviewAndAutoAcceptPolicy:
             PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason=preview.reason or "Preview failed.",
                 risk_flags=("preview_failed",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=self._risk_level(command),
                 policy_feedback=PolicyFeedback(
                     reason_code=reason_code,
@@ -467,10 +463,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason=self._integrity_reason(integrity_report),
                 risk_flags=("integrity_failed",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="integrity_failed",
@@ -485,10 +480,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview modifies a locked target.",
                 risk_flags=("locked_target",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="locked_target_modified",
@@ -503,10 +497,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview increases self-intersection risk.",
                 risk_flags=("self_intersection_increase",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="self_intersection_increase",
@@ -521,10 +514,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview worsens topology status.",
                 risk_flags=("topology_regression",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="topology_regression",
@@ -539,10 +531,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview regresses the document score.",
                 risk_flags=("score_regression",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="score_regression",
@@ -557,10 +548,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview increases fit error beyond the allowed threshold.",
                 risk_flags=("fit_error_increased",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="fit_error_increased",
@@ -581,10 +571,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview increases complexity without enough edge-error gain.",
                 risk_flags=("complexity_increase_without_edge_gain",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="complexity_increase_without_edge_gain",
@@ -604,10 +593,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview is missing algorithm fitting confidence.",
                 risk_flags=("missing_algorithm_fitting_confidence",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="missing_algorithm_fitting_confidence",
@@ -622,10 +610,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Algorithm fitting confidence is below the minimum fitting threshold.",
                 risk_flags=("low_fitting_confidence",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="low_fitting_confidence",
@@ -641,10 +628,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview inlier ratio is below the minimum threshold.",
                 risk_flags=("low_inlier_ratio",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="low_inlier_ratio",
@@ -660,10 +646,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview increases constraint violations beyond the allowed threshold.",
                 risk_flags=("constraint_violation_increase",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="constraint_violation_increase",
@@ -681,10 +666,9 @@ class PreviewAndAutoAcceptPolicy:
             return PreviewDecision(
                 command=dict(command),
                 preview_result=preview,
-                decision="reject",
+                decision_kind=DecisionKind.AUTO_REJECT,
                 reason="Preview changes the coordinate system unexpectedly.",
                 risk_flags=("coordinate_system_inconsistent",),
-                decision_kind=DecisionKind.AUTO_REJECT,
                 risk_level=risk_level,
                 policy_feedback=PolicyFeedback(
                     reason_code="coordinate_system_inconsistent",
@@ -846,6 +830,10 @@ class PreviewAndAutoAcceptPolicy:
 
 def _decision_kind_from_legacy(value: DecisionType) -> DecisionKind:
     return DecisionKind.from_legacy(value)
+
+
+def _legacy_decision(value: DecisionKind) -> DecisionType:
+    return value.to_legacy()  # type: ignore[return-value]
 
 
 def _forbidden_repeated_commands(command: dict[str, Any], risk_flags: list[str]) -> tuple[str, ...]:

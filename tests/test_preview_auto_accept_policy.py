@@ -15,7 +15,7 @@ from services.command_preview import (
 )
 from services.document_integrity import DocumentIntegrityValidator, IntegrityIssue, IntegrityReport
 from services.engine_protocol import AutonomyLevel, DecisionKind, RiskLevel
-from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy, PreviewAndAutoAcceptPolicyConfig
+from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy, PreviewAndAutoAcceptPolicyConfig, PreviewDecision
 
 
 def _document(document_id: str = "doc_policy") -> VectorDocument:
@@ -161,6 +161,37 @@ def _execution_result(command_id: str, document: VectorDocument, *, success: boo
         fit_error=0.04 if success else None,
         refinement_feedback_reason=None,
     )
+
+
+def test_preview_decision_normalizes_legacy_decision_to_decision_kind() -> None:
+    preview_decision = PreviewDecision(
+        command={"command_id": "legacy_preview", "tool": "propose_replace_path_with_circle", "path_id": "path_1"},
+        preview_result=_preview_result(
+            command_id="legacy_preview",
+            success=False,
+            reason="fit failed",
+            score_delta=None,
+        ),
+        decision="reject",
+        reason="fit failed",
+        risk_flags=("preview_failed",),
+    )
+
+    assert preview_decision.decision == "reject"
+    assert preview_decision.decision_kind is DecisionKind.AUTO_REJECT
+
+
+def test_preview_decision_accepts_decision_kind_only_and_keeps_legacy_output() -> None:
+    preview_decision = PreviewDecision(
+        command={"command_id": "kind_only", "tool": "propose_replace_path_with_circle", "path_id": "path_1"},
+        preview_result=_preview_result(command_id="kind_only"),
+        decision_kind=DecisionKind.AUTO_APPLY,
+        reason="kind only",
+        risk_flags=(),
+    )
+
+    assert preview_decision.decision_kind is DecisionKind.AUTO_APPLY
+    assert preview_decision.decision == "auto_accept"
 
 
 def test_preview_auto_accept_policy_auto_accepts_high_confidence_circle_preview() -> None:
