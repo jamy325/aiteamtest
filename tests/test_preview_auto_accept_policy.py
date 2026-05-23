@@ -502,6 +502,42 @@ def test_preview_auto_accept_policy_rejects_locked_target_failures() -> None:
     assert "locked_target" in result.decisions[0].risk_flags
 
 
+def test_preview_auto_accept_policy_rejects_locked_constraint_failures() -> None:
+    document = _document()
+    command = {
+        "command_id": "locked_constraint",
+        "tool": "propose_replace_segment_with_line",
+        "path_id": "path_1",
+        "segment_range": [0, 1],
+        "reason": "intent only",
+        "confidence": 0.95,
+        "requires_user_confirmation": True,
+    }
+    preview_service = FakePreviewService(
+        {
+            "locked_constraint": _preview_result(
+                command_id="locked_constraint",
+                success=False,
+                reason="locked_constraint_modified: c_keep",
+                score_delta=None,
+            )
+        }
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=FakeCommandExecutor(lambda command, doc: _execution_result(command["command_id"], doc, success=False, reason="locked constraint")),
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "locked_constraint_modified"
+    assert result.decisions[0].risk_flags == ("locked_constraint", "preview_failed")
+    assert result.final_document == document
+
+
 def test_preview_auto_accept_policy_rejects_integrity_failures_and_applies_auto_accepts_sequentially() -> None:
     document = _document()
     preview_document_auto_1 = updated(document, document_id="doc_policy:auto_1:preview")

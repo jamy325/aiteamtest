@@ -388,6 +388,27 @@ class PreviewAndAutoAcceptPolicy:
         document: VectorDocument,
     ) -> tuple[PreviewDecision, VectorDocument]:
         reason_text = (preview.reason or "").lower()
+        if "locked constraint" in reason_text or "locked_constraint" in reason_text:
+            feedback = PolicyFeedback(
+                reason_code="locked_constraint_modified",
+                message=preview.reason or "Preview modifies a locked constraint.",
+                metrics_delta=self._metrics_delta(preview, command),
+                policy_hint="preserve locked constraints",
+                retry_allowed=False,
+            )
+            return (
+                PreviewDecision(
+                    command=dict(command),
+                    preview_result=preview,
+                    decision="reject",
+                    reason=preview.reason or "Preview modifies a locked constraint.",
+                    risk_flags=("locked_constraint", "preview_failed"),
+                    decision_kind=DecisionKind.AUTO_REJECT,
+                    risk_level=self._risk_level(command),
+                    policy_feedback=feedback,
+                ),
+                document,
+            )
         if "locked " in reason_text or "locked_" in reason_text:
             feedback = PolicyFeedback(
                 reason_code="locked_target_modified",

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from core.document import add_path, add_segment, create_document
-from core.types import CoordinateSystem, Path as VectorPath, Segment
+from core.document import add_anchor, add_constraint, add_path, add_segment, create_document
+from core.types import Anchor, Constraint, CoordinateSystem, Path as VectorPath, Segment, updated
 from services.command_executor import CommandExecutor
 
 
@@ -35,12 +35,61 @@ def _build_polyline_document(
     return document
 
 
-def _command(tool: str, *, path_id: str = "path_1", command_id: str | None = None) -> dict[str, object]:
+def _build_two_segment_document(
+    *,
+    path_id: str = "path_1",
+    locked_segment_ids: set[str] | None = None,
+    locked_anchor_ids: set[str] | None = None,
+) -> object:
+    locked_segment_ids = locked_segment_ids or set()
+    locked_anchor_ids = locked_anchor_ids or set()
+    document = create_document(
+        document_id=f"doc_{path_id}_two_segment",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(document, VectorPath(path_id=path_id, closed=False))
+    document = add_segment(
+        document,
+        Segment(
+            segment_id=f"{path_id}_seg_1",
+            path_id=path_id,
+            type="polyline",
+            params={"points": [[0.0, 0.0], [2.0, 0.0]]},
+            anchors=("a0", "a1"),
+            locked=f"{path_id}_seg_1" in locked_segment_ids,
+        ),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            segment_id=f"{path_id}_seg_2",
+            path_id=path_id,
+            type="polyline",
+            params={"points": [[2.0, 0.0], [4.0, 0.0]]},
+            anchors=("a1", "a2"),
+            locked=f"{path_id}_seg_2" in locked_segment_ids,
+        ),
+    )
+    document = add_anchor(document, Anchor("a0", path_id, (0.0, 0.0), locked="a0" in locked_anchor_ids))
+    document = add_anchor(document, Anchor("a1", path_id, (2.0, 0.0), locked="a1" in locked_anchor_ids))
+    document = add_anchor(document, Anchor("a2", path_id, (4.0, 0.0), locked="a2" in locked_anchor_ids))
+    return document
+
+
+def _command(
+    tool: str,
+    *,
+    path_id: str = "path_1",
+    command_id: str | None = None,
+    segment_range: tuple[int, int] = (0, 0),
+) -> dict[str, object]:
     return {
         "command_id": command_id or tool,
         "tool": tool,
         "path_id": path_id,
-        "segment_range": [0, 0],
+        "segment_range": [segment_range[0], segment_range[1]],
         "reason": "intent only",
         "confidence": 0.8,
         "requires_user_confirmation": True,
@@ -233,6 +282,67 @@ def test_command_executor_surfaces_validation_failure() -> None:
     assert result.success is False
     assert "locked path" in (result.reason or "")
     assert result.document == document
+
+
+def test_command_executor_rejects_locked_segment_cleanup_target() -> None:
+    document = _build_two_segment_document(locked_segment_ids={"path_1_seg_2"})
+    executor = CommandExecutor()
+
+    result = executor.execute(
+        _command("propose_replace_segment_with_line", segment_range=(0, 1), command_id="locked_segment_cleanup"),
+        document,
+    )
+
+    assert result.success is False
+    assert "locked segment" in (result.reason or "")
+    assert result.document == document
+
+
+def test_command_executor_rejects_locked_anchor_cleanup_target() -> None:
+    document = _build_two_segment_document(locked_anchor_ids={"a1"})
+    executor = CommandExecutor()
+
+    result = executor.execute(
+        _command("propose_replace_segment_with_line", segment_range=(0, 1), command_id="locked_anchor_cleanup"),
+        document,
+    )
+
+    assert result.success is False
+    assert "locked anchor" in (result.reason or "")
+    assert result.document == document
+
+
+def test_command_executor_rejects_locked_constraint_cleanup_target() -> None:
+    document = add_constraint(
+        _build_two_segment_document(),
+        Constraint("c_keep", "coincident", targets=("path_1_seg_2", "a1"), locked=True),
+    )
+    executor = CommandExecutor()
+
+    result = executor.execute(
+        _command("propose_replace_segment_with_line", segment_range=(0, 1), command_id="locked_constraint_cleanup"),
+        document,
+    )
+
+    assert result.success is False
+    assert "locked constraint" in (result.reason or "") or "locked_constraint" in (result.reason or "")
+    assert result.document == document
+
+
+def test_command_executor_cleanup_does_not_silently_remove_locked_constraint() -> None:
+    document = add_constraint(
+        _build_two_segment_document(),
+        Constraint("c_keep", "coincident", targets=("path_1_seg_2", "a1"), locked=True),
+    )
+    cleaned_candidate = updated(
+        document,
+        paths=(updated(document.paths[0], segments=("path_1_seg_1",)),),
+        segments=(document.segments[0],),
+    )
+    executor = CommandExecutor()
+
+    with pytest.raises(ValueError, match="locked_constraint_modified"):
+        executor._cleanup_document_integrity(cleaned_candidate, original_document=document)
 
 
 def test_command_executor_has_no_forbidden_dependencies() -> None:
