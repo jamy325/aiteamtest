@@ -19,6 +19,16 @@ from services.engine_protocol import (
 
 DecisionType = Literal["auto_accept", "user_confirm", "reject"]
 
+_TOPOLOGY_STATUS_RANK = {
+    "closed": 0,
+    "open": 1,
+    "unknown": 2,
+    "gap_detected": 3,
+    "topology_error": 4,
+    "self_intersected": 5,
+    "invalid": 6,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PreviewAndAutoAcceptPolicyConfig:
@@ -681,13 +691,7 @@ class PreviewAndAutoAcceptPolicy:
         return False
 
     def _topology_rank(self, status: str | None) -> int:
-        order = {
-            "closed": 0,
-            "open": 1,
-            "unknown": 1,
-            "topology_error": 2,
-        }
-        return order.get(status or "unknown", 1)
+        return _TOPOLOGY_STATUS_RANK.get(status or "unknown", _TOPOLOGY_STATUS_RANK["unknown"])
 
     def _score_improvement(self, preview: CommandPreviewResult) -> float | None:
         if preview.score_delta is None:

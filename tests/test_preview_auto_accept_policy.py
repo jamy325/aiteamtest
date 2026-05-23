@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import pytest
 
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment, VectorDocument, updated
@@ -381,7 +382,22 @@ def test_preview_auto_accept_policy_rejects_preview_failure() -> None:
     assert result.final_document == document
 
 
-def test_preview_auto_accept_policy_rejects_topology_regression() -> None:
+@pytest.mark.parametrize(
+    ("topology_before", "topology_after"),
+    [
+        ("closed", "gap_detected"),
+        ("closed", "topology_error"),
+        ("closed", "self_intersected"),
+        ("closed", "invalid"),
+        ("open", "self_intersected"),
+        ("open", "invalid"),
+        ("unknown", "invalid"),
+    ],
+)
+def test_preview_auto_accept_policy_rejects_topology_regression(
+    topology_before: str,
+    topology_after: str,
+) -> None:
     document = _document()
     command = {
         "command_id": "topology_bad",
@@ -393,7 +409,14 @@ def test_preview_auto_accept_policy_rejects_topology_regression() -> None:
         "requires_user_confirmation": True,
     }
     preview_service = FakePreviewService(
-        {"topology_bad": _preview_result(command_id="topology_bad", score_delta=-0.8, topology_before="closed", topology_after="topology_error")}
+        {
+            "topology_bad": _preview_result(
+                command_id="topology_bad",
+                score_delta=-0.8,
+                topology_before=topology_before,
+                topology_after=topology_after,
+            )
+        }
     )
     executor = FakeCommandExecutor(
         lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:topology_bad"))
@@ -409,6 +432,46 @@ def test_preview_auto_accept_policy_rejects_topology_regression() -> None:
     assert result.decisions[0].decision == "reject"
     assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
     assert result.decisions[0].risk_flags == ("topology_regression",)
+    assert result.final_document == document
+
+
+def test_preview_auto_accept_policy_rejects_self_intersection_increase_independently_of_topology_status() -> None:
+    document = _document()
+    command = {
+        "command_id": "self_intersection_bad",
+        "tool": "propose_replace_segment_with_line",
+        "path_id": "path_1",
+        "segment_range": [0, 0],
+        "reason": "intent only",
+        "confidence": 0.93,
+        "requires_user_confirmation": True,
+    }
+    preview_service = FakePreviewService(
+        {
+            "self_intersection_bad": _preview_result(
+                command_id="self_intersection_bad",
+                score_delta=-0.8,
+                topology_before="closed",
+                topology_after="closed",
+                self_intersection_before=0,
+                self_intersection_after=1,
+            )
+        }
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=FakeCommandExecutor(
+            lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:self_intersection_bad"))
+        ),
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "self_intersection_increase"
+    assert result.decisions[0].risk_flags == ("self_intersection_increase",)
     assert result.final_document == document
 
 
