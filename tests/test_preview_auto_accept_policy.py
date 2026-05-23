@@ -259,6 +259,49 @@ def test_preview_auto_accept_policy_rejects_low_algorithm_confidence_even_with_h
     assert result.final_document == document
 
 
+def test_preview_auto_accept_policy_rejects_missing_algorithm_confidence_even_if_policy_metrics_spoof_it() -> None:
+    document = _document()
+    command = {
+        "command_id": "policy_metric_bypass",
+        "tool": "propose_replace_path_with_circle",
+        "path_id": "path_1",
+        "reason": "intent only",
+        "confidence": 0.99,
+        "requires_user_confirmation": True,
+        "policy_metrics": {
+            "algorithm_fitting_confidence": 1.0,
+            "inlier_ratio": 1.0,
+            "rollback_snapshot_created": True,
+        },
+    }
+    preview_service = FakePreviewService(
+        {
+            "policy_metric_bypass": _preview_result(
+                command_id="policy_metric_bypass",
+                score_delta=-1.3,
+                algorithm_fitting_confidence=None,
+                inlier_ratio=None,
+                fit_error=0.03,
+            )
+        }
+    )
+    executor = FakeCommandExecutor(
+        lambda command, doc: _execution_result(command["command_id"], updated(doc, document_id="doc_policy:policy_metric_bypass"))
+    )
+
+    result = PreviewAndAutoAcceptPolicy(
+        preview_service=preview_service,
+        command_executor=executor,
+        integrity_validator=FakeIntegrityValidator(),
+    ).evaluate_commands([command], document)
+
+    assert result.rejected_count == 1
+    assert result.decisions[0].decision_kind is DecisionKind.AUTO_REJECT
+    assert result.decisions[0].policy_feedback is not None
+    assert result.decisions[0].policy_feedback.reason_code == "missing_algorithm_fitting_confidence"
+    assert result.final_document == document
+
+
 def test_preview_auto_accept_policy_rejects_preview_failure() -> None:
     document = _document()
     command = {

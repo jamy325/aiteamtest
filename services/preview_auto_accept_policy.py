@@ -292,14 +292,14 @@ class PreviewAndAutoAcceptPolicy:
         if blocking_decision is not None:
             return blocking_decision, document
 
-        algorithm_confidence = self._algorithm_fitting_confidence(preview, command)
+        algorithm_confidence = self._algorithm_fitting_confidence(preview)
         score_improvement = self._score_improvement(preview)
         risk_level = self._risk_level(command)
         policy_metrics = self._policy_metrics(command)
         risk_flags: list[str] = []
         metrics_delta = self._metrics_delta(preview, command)
 
-        if algorithm_confidence < self.config.min_fitting_confidence:
+        if algorithm_confidence is not None and algorithm_confidence < self.config.min_fitting_confidence:
             risk_flags.append("low_fitting_confidence")
         if score_improvement is None:
             risk_flags.append("missing_score_delta")
@@ -570,7 +570,25 @@ class PreviewAndAutoAcceptPolicy:
                 ),
             )
 
-        algorithm_confidence = self._algorithm_fitting_confidence(preview, command)
+        algorithm_confidence = self._algorithm_fitting_confidence(preview)
+        if algorithm_confidence is None:
+            return PreviewDecision(
+                command=dict(command),
+                preview_result=preview,
+                decision="reject",
+                reason="Preview is missing algorithm fitting confidence.",
+                risk_flags=("missing_algorithm_fitting_confidence",),
+                decision_kind=DecisionKind.AUTO_REJECT,
+                risk_level=risk_level,
+                policy_feedback=PolicyFeedback(
+                    reason_code="missing_algorithm_fitting_confidence",
+                    message="Preview is missing algorithm fitting confidence.",
+                    metrics_delta=metrics_delta,
+                    policy_hint="recompute deterministic fitting metrics before retry",
+                    retry_allowed=True,
+                ),
+            )
+
         if algorithm_confidence < self.config.min_fitting_confidence:
             return PreviewDecision(
                 command=dict(command),
@@ -703,11 +721,10 @@ class PreviewAndAutoAcceptPolicy:
             return dict(raw)
         return {}
 
-    def _algorithm_fitting_confidence(self, preview: CommandPreviewResult, command: dict[str, Any]) -> float:
-        if preview.algorithm_fitting_confidence is not None:
-            return float(preview.algorithm_fitting_confidence)
-        value = self._policy_metrics(command).get("algorithm_fitting_confidence", 0.0)
-        return float(value) if isinstance(value, (int, float)) else 0.0
+    def _algorithm_fitting_confidence(self, preview: CommandPreviewResult) -> float | None:
+        if preview.algorithm_fitting_confidence is None:
+            return None
+        return float(preview.algorithm_fitting_confidence)
 
     def _inlier_ratio(self, preview: CommandPreviewResult, command: dict[str, Any]) -> float:
         if preview.inlier_ratio is not None:
@@ -736,7 +753,7 @@ class PreviewAndAutoAcceptPolicy:
             "fit_error_delta": float(metrics.get("fit_error_delta", 0.0)),
             "complexity_delta": float(metrics.get("complexity_delta", 0.0)),
             "edge_error_delta": float(metrics.get("edge_error_delta", 0.0)),
-            "algorithm_fitting_confidence": self._algorithm_fitting_confidence(preview, command),
+            "algorithm_fitting_confidence": self._algorithm_fitting_confidence(preview),
             "ai_command_confidence": float(command.get("confidence", 0.0)),
             "inlier_ratio": self._inlier_ratio(preview, command),
             "fit_error": self._fit_error(preview, command),
@@ -763,7 +780,7 @@ class PreviewAndAutoAcceptPolicy:
             "fit_error_delta": float(self._policy_metrics(command).get("fit_error_delta", 0.0)),
             "complexity_delta": float(self._policy_metrics(command).get("complexity_delta", 0.0)),
             "edge_error_delta": float(self._policy_metrics(command).get("edge_error_delta", 0.0)),
-            "algorithm_fitting_confidence": self._algorithm_fitting_confidence(preview, command),
+            "algorithm_fitting_confidence": self._algorithm_fitting_confidence(preview),
             "ai_command_confidence": float(command.get("confidence", 0.0)),
             "inlier_ratio": self._inlier_ratio(preview, command),
             "fit_error": self._fit_error(preview, command),
