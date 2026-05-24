@@ -194,17 +194,25 @@ class _FakeAutoRefinementPipeline:
 
 def test_acceptance_benchmark_repository_manifest_discovers_required_cases() -> None:
     cases = BenchmarkRunner().discover_cases(Path("benchmarks/acceptance_manifest.json"))
-    case_ids = {case.case_id for case in cases}
+    by_case_id = {case.case_id: case for case in cases}
 
     assert len(cases) >= 15
     assert {
         "circle_auto_apply",
         "ellipse_auto_apply",
         "line_arc_outline",
-        "transparent_png_proxy",
+        "hole_region",
+        "transparent_png",
+        "colored_logo",
         "dxf_unit_guard",
         "bezier_fallback_guard",
-    }.issubset(case_ids)
+    }.issubset(by_case_id)
+    assert by_case_id["line_arc_outline"].coverage_level == "real"
+    assert by_case_id["hole_region"].coverage_level == "real"
+    assert by_case_id["transparent_png"].coverage_level == "real"
+    assert by_case_id["bezier_fallback_guard"].coverage_level == "real"
+    assert by_case_id["bezier_fallback_guard"].timeout_seconds is not None
+    assert by_case_id["concentric_circles_proxy"].coverage_level == "proxy"
 
 
 def test_acceptance_benchmark_writes_required_artifacts_and_metrics(tmp_path: Path) -> None:
@@ -292,6 +300,50 @@ def test_acceptance_benchmark_manifest_reports_overall_pass_fail_and_failure_rea
     assert report.summary["failed_case_count"] == 1
     assert "case_fail" in report.summary["failure_reasons"]
     assert (tmp_path / "suite" / "acceptance_report.json").exists()
+
+
+def test_acceptance_benchmark_manifest_continues_after_case_timeout(tmp_path: Path, monkeypatch) -> None:
+    image_path = tmp_path / "timeout_case.png"
+    _write_case_image(image_path, shape="rectangle")
+    manifest_path = tmp_path / "timeout_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "case_id": "slow_case",
+                        "image_path": str(image_path),
+                        "timeout_seconds": 0.01,
+                        "expected_geometry": {"line": 1},
+                    },
+                    {
+                        "case_id": "fast_case",
+                        "image_path": str(image_path),
+                        "expected_geometry": {"line": 1},
+                        "fail_thresholds": {"max_total_score": 500},
+                    },
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def _raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=0.01)
+
+    monkeypatch.setattr("services.benchmark_runner.subprocess.run", _raise_timeout)
+
+    report = BenchmarkRunner().run_acceptance_manifest(manifest_path, output_dir=tmp_path / "suite")
+
+    assert report.summary["total_cases"] == 2
+    assert report.summary["failed_case_count"] == 1
+    assert report.summary["overall_pass"] is False
+    assert report.summary["failure_reasons"]["slow_case"] == "case_timeout_exceeded: slow_case"
+    assert report.cases[0].success is False
+    assert report.cases[0].failure_reason == "case_timeout_exceeded: slow_case"
+    assert Path(report.cases[0].artifacts["metrics_json"]).exists()
+    assert report.cases[1].success is True
 
 
 def test_acceptance_benchmark_cli_writes_suite_report(tmp_path: Path) -> None:
