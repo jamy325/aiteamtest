@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from core.types import VectorDocument
 from services.command_executor import CommandExecutor
@@ -46,6 +46,25 @@ class PreviewAndAutoAcceptPolicyConfig:
     max_affected_segments: int = 24
     medium_confidence_threshold: float = 0.73
     batch_child_reject_decision: DecisionType = "user_confirm"
+
+    @classmethod
+    def from_quality_profile(
+        cls,
+        profile: Mapping[str, Any],
+        **overrides: Any,
+    ) -> "PreviewAndAutoAcceptPolicyConfig":
+        thresholds = profile.get("recommended_thresholds") if isinstance(profile, Mapping) else None
+        if not isinstance(thresholds, Mapping):
+            thresholds = {}
+        config_values: dict[str, Any] = {}
+        min_algorithm_confidence = thresholds.get("min_algorithm_confidence")
+        if isinstance(min_algorithm_confidence, (int, float)) and not isinstance(min_algorithm_confidence, bool):
+            config_values["min_fitting_confidence"] = float(min_algorithm_confidence)
+        min_inlier_ratio = thresholds.get("min_inlier_ratio")
+        if isinstance(min_inlier_ratio, (int, float)) and not isinstance(min_inlier_ratio, bool):
+            config_values["min_inlier_ratio"] = float(min_inlier_ratio)
+        config_values.update(overrides)
+        return cls(**config_values)
 
 
 @dataclass(frozen=True, slots=True)

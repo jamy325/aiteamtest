@@ -1,0 +1,90 @@
+{
+  "bezier_fallback": {
+    "profile_name": "bezier_fallback",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  },
+  "circle": {
+    "profile_name": "circle",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  },
+  "ellipse": {
+    "profile_name": "ellipse",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  },
+  "line_arc": {
+    "profile_name": "line_arc",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  },
+  "logo": {
+    "profile_name": "logo",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  },
+  "mechanical": {
+    "profile_name": "mechanical",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  },
+  "noisy_scan": {
+    "profile_name": "noisy_scan",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  },
+  "transparent": {
+    "profile_name": "transparent",
+    "recommended_thresholds": {
+      "max_complexity_score": 0.0,
+      "max_edge_error": 0.0,
+      "max_requires_external_decision_count": 0,
+      "max_total_score": 0.0,
+      "min_algorithm_confidence": 0.55,
+      "min_inlier_ratio": 0.6
+    }
+  }
+}
