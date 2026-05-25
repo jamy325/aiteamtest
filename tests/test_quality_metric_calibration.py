@@ -276,3 +276,32 @@ def test_quality_metric_calibration_profile_injection_helpers(tmp_path: Path) ->
     assert calibrated_case.fail_thresholds["max_edge_error"] == profiles["circle"]["recommended_thresholds"]["max_edge_error"]
     assert calibrated_case.fail_thresholds["max_complexity_score"] == profiles["circle"]["recommended_thresholds"]["max_complexity_score"]
     assert calibrated_case.fail_thresholds["max_requires_external_decision_count"] == profiles["circle"]["recommended_thresholds"]["max_requires_external_decision_count"]
+
+
+def test_benchmark_runner_quality_profile_preserves_manual_fail_threshold_overrides() -> None:
+    profiles = {
+        "circle": {
+            "recommended_thresholds": {
+                "max_total_score": 10.0,
+                "max_edge_error": 1.0,
+                "max_complexity_score": 2.0,
+                "max_requires_external_decision_count": 0,
+            }
+        }
+    }
+    case = BenchmarkCase(
+        case_id="manual_override_case",
+        image_path="dummy.png",
+        quality_profile="circle",
+        fail_thresholds={
+            "max_total_score": 999.0,
+            "max_edge_error": 99.0,
+        },
+    )
+
+    calibrated = BenchmarkRunner().apply_quality_profile(case, profiles)
+
+    assert calibrated.fail_thresholds["max_total_score"] == 999.0
+    assert calibrated.fail_thresholds["max_edge_error"] == 99.0
+    assert calibrated.fail_thresholds["max_complexity_score"] == 2.0
+    assert calibrated.fail_thresholds["max_requires_external_decision_count"] == 0

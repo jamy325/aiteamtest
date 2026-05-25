@@ -256,11 +256,12 @@ class BenchmarkRunner:
         thresholds = profile.get("recommended_thresholds")
         if not isinstance(thresholds, Mapping):
             return case
-        merged_thresholds = dict(case.fail_thresholds)
+        merged_thresholds: dict[str, float | int] = {}
         for key in ("max_total_score", "max_edge_error", "max_complexity_score", "max_requires_external_decision_count"):
             value = thresholds.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 merged_thresholds[key] = value
+        merged_thresholds.update(case.fail_thresholds)
         return replace(case, fail_thresholds=merged_thresholds)
 
     def run_case(
