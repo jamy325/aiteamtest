@@ -1,0 +1,174 @@
+{
+  "cases": [
+    {
+      "case_id": "circle_auto_apply",
+      "image_path": "../test_images/circle/test_input_circle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["circle"],
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"circle": 1},
+      "fail_thresholds": {"min_circle_count": 1, "max_total_score": 500}
+    },
+    {
+      "case_id": "concentric_circles_proxy",
+      "image_path": "../test_images/circle/test_input_circle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["circle"],
+      "coverage_level": "proxy",
+      "timeout_seconds": 20,
+      "expected_geometry": {"circle": 1},
+      "fail_thresholds": {"min_circle_count": 1, "max_requires_external_decision_count": 4}
+    },
+    {
+      "case_id": "line_arc_outline",
+      "image_path": "fixtures/line_arc_combo.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["line", "arc"],
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"line": 1},
+      "fail_thresholds": {"min_line_count": 1, "max_segment_count": 200}
+    },
+    {
+      "case_id": "ellipse_auto_apply",
+      "image_path": "../test_images/ellipse/test_input_ellipse.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["ellipse"],
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"ellipse": 1},
+      "fail_thresholds": {"min_ellipse_count": 1, "max_total_score": 500}
+    },
+    {
+      "case_id": "rectangle_outline",
+      "image_path": "../test_images/benchmark_rectangle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["rectangle", "line"],
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"line": 4},
+      "fail_thresholds": {"min_line_count": 4, "max_segment_count": 48}
+    },
+    {
+      "case_id": "square_outline_proxy",
+      "image_path": "../test_images/benchmark_rectangle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["rectangle", "line"],
+      "coverage_level": "proxy",
+      "timeout_seconds": 20,
+      "expected_geometry": {"line": 4},
+      "fail_thresholds": {"min_line_count": 4, "max_topology_errors": 0}
+    },
+    {
+      "case_id": "mechanical_outline_proxy",
+      "image_path": "fixtures/line_arc_combo.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["line", "arc"],
+      "coverage_level": "proxy",
+      "timeout_seconds": 20,
+      "expected_geometry": {"line": 1},
+      "fail_thresholds": {"min_line_count": 1, "max_self_intersections": 0}
+    },
+    {
+      "case_id": "logo_outline_proxy",
+      "image_path": "fixtures/colored_logo.png",
+      "segment_type": "line",
+      "auto_refine": false,
+      "coverage_level": "proxy",
+      "timeout_seconds": 20,
+      "expected_geometry": {"line": 1},
+      "fail_thresholds": {"min_line_count": 1, "max_topology_errors": 0}
+    },
+    {
+      "case_id": "hole_region",
+      "image_path": "fixtures/hole_ring.png",
+      "segment_type": "line",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"line": 2},
+      "fail_thresholds": {"min_line_count": 2, "max_topology_errors": 0}
+    },
+    {
+      "case_id": "self_intersection_guard",
+      "image_path": "../test_images/bezier/test_input_bezier_fallback.png",
+      "segment_type": "bezier",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"bezier": 1},
+      "fail_thresholds": {"min_bezier_count": 1, "max_circle_count": 0, "max_ellipse_count": 0, "max_self_intersections": 4}
+    },
+    {
+      "case_id": "noisy_scan_proxy",
+      "image_path": "../test_images/bezier/test_input_bezier_fallback.png",
+      "segment_type": "bezier",
+      "auto_refine": false,
+      "coverage_level": "proxy",
+      "timeout_seconds": 20,
+      "expected_geometry": {"bezier": 1},
+      "fail_thresholds": {"min_bezier_count": 1, "max_circle_count": 0, "max_ellipse_count": 0, "max_segment_count": 500}
+    },
+    {
+      "case_id": "broken_contour_proxy",
+      "image_path": "../test_images/bezier/test_input_bezier_fallback.png",
+      "segment_type": "bezier",
+      "auto_refine": false,
+      "coverage_level": "proxy",
+      "timeout_seconds": 20,
+      "expected_geometry": {"bezier": 1},
+      "fail_thresholds": {"min_bezier_count": 1, "max_circle_count": 0, "max_ellipse_count": 0, "max_requires_external_decision_count": 32}
+    },
+    {
+      "case_id": "transparent_png",
+      "image_path": "fixtures/transparent_circle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["circle"],
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"circle": 1},
+      "fail_thresholds": {"max_topology_errors": 0, "max_requires_external_decision_count": 8}
+    },
+    {
+      "case_id": "colored_logo",
+      "image_path": "fixtures/colored_logo.png",
+      "segment_type": "line",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"line": 1},
+      "fail_thresholds": {"min_line_count": 1, "max_topology_errors": 0}
+    },
+    {
+      "case_id": "dxf_unit_guard",
+      "image_path": "../test_images/circle/test_input_circle.png",
+      "segment_type": "line",
+      "auto_refine": true,
+      "auto_refine_target_types": ["circle"],
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"circle": 1},
+      "expected_export": {"dxf": {"unit": "px"}},
+      "fail_thresholds": {"min_circle_count": 1, "max_topology_errors": 0}
+    },
+    {
+      "case_id": "bezier_fallback_guard",
+      "image_path": "../test_images/bezier/test_input_bezier_fallback.png",
+      "segment_type": "bezier",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "expected_geometry": {"bezier": 1},
+      "fail_thresholds": {"min_bezier_count": 1, "max_circle_count": 0, "max_ellipse_count": 0, "max_segment_count": 500}
+    }
+  ]
+}

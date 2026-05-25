@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 from xml.etree import ElementTree as ET
 
@@ -36,6 +40,8 @@ class BenchmarkCase:
     auto_refine_target_types: tuple[str, ...] = ()
     auto_refine_dry_run_only: bool = False
     fail_thresholds: dict[str, float | int] = field(default_factory=dict)
+    coverage_level: str = "real"
+    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +71,8 @@ class BenchmarkCaseResult:
     score_after: float
     score_delta: float
     total_score: float
+    metrics: dict[str, float | int] = field(default_factory=dict)
+    artifacts: dict[str, str] = field(default_factory=dict)
     failure_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,8 +102,19 @@ class BenchmarkCaseResult:
             "score_after": self.score_after,
             "score_delta": self.score_delta,
             "total_score": self.total_score,
+            "metrics": dict(self.metrics),
+            "artifacts": dict(self.artifacts),
             "failure_reason": self.failure_reason,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _BenchmarkRunContext:
+    case: BenchmarkCase
+    result: BenchmarkCaseResult
+    document: VectorDocument
+    pipeline: MinimalPipeline
+    pipeline_result: MinimalPipelineResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +191,8 @@ class BenchmarkRunner:
             auto_refine_target_types = self._coerce_string_tuple(item.get("auto_refine_target_types") or item.get("target_types"))
             auto_refine_dry_run_only = bool(item.get("auto_refine_dry_run_only", False))
             fail_thresholds = self._coerce_numeric_dict(item.get("fail_thresholds"))
+            coverage_level = str(item.get("coverage_level", "real"))
+            timeout_seconds = None if item.get("timeout_seconds") is None else float(item["timeout_seconds"])
             cases.append(
                 BenchmarkCase(
                     case_id=str(case_id),
@@ -186,9 +207,14 @@ class BenchmarkRunner:
                     auto_refine_target_types=auto_refine_target_types,
                     auto_refine_dry_run_only=auto_refine_dry_run_only,
                     fail_thresholds=fail_thresholds,
+                    coverage_level=coverage_level,
+                    timeout_seconds=timeout_seconds,
                 )
             )
         return tuple(cases)
+
+    def discover_cases(self, manifest_path: str | Path) -> tuple[BenchmarkCase, ...]:
+        return self.load_manifest(manifest_path)
 
     def run_case(
         self,
@@ -196,6 +222,48 @@ class BenchmarkRunner:
         *,
         execute_proposed_commands: bool = False,
     ) -> BenchmarkCaseResult:
+        return self._run_case_context(case, execute_proposed_commands=execute_proposed_commands).result
+
+    def run_acceptance_case(
+        self,
+        case: BenchmarkCase,
+        *,
+        output_dir: str | Path,
+        execute_proposed_commands: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> BenchmarkCaseResult:
+        effective_timeout = case.timeout_seconds if timeout_seconds is None else timeout_seconds
+        if effective_timeout is not None and effective_timeout > 0:
+            return self._run_acceptance_case_with_timeout(
+                case,
+                output_dir=output_dir,
+                execute_proposed_commands=execute_proposed_commands,
+                timeout_seconds=effective_timeout,
+            )
+        return self._run_acceptance_case_inline(
+            case,
+            output_dir=output_dir,
+            execute_proposed_commands=execute_proposed_commands,
+        )
+
+    def _run_acceptance_case_inline(
+        self,
+        case: BenchmarkCase,
+        *,
+        output_dir: str | Path,
+        execute_proposed_commands: bool = False,
+    ) -> BenchmarkCaseResult:
+        context = self._run_case_context(case, execute_proposed_commands=execute_proposed_commands)
+        artifact_paths = self._write_acceptance_artifacts(context, output_dir=output_dir)
+        return replace(context.result, artifacts=artifact_paths)
+
+    def _run_case_context(
+        self,
+        case: BenchmarkCase,
+        *,
+        execute_proposed_commands: bool = False,
+    ) -> _BenchmarkRunContext:
+        runtime_start = perf_counter()
         document_id = case.document_id or f"benchmark_{case.case_id}"
         pipeline = self.pipeline_factory(case)
         pipeline_result = pipeline.run_from_file(case.image_path, document_id=document_id)
@@ -242,37 +310,54 @@ class BenchmarkRunner:
         actual_geometry = self._geometry_counts(document)
         actual_constraints = self._constraint_counts(document)
         export_summary = self._export_summary(document, case.expected_export)
-        stats = self._case_stats(document, score, edge_error)
-        failure_reason = self._failure_reason(case, stats=stats, actual_geometry=geometry_after)
-        success = failure_reason is None
-
-        return BenchmarkCaseResult(
-            case_id=case.case_id,
-            image_path=case.image_path,
-            success=success,
-            document_id=document.document_id,
-            segment_type=case.segment_type,
-            stats=stats,
-            actual_geometry=actual_geometry,
-            geometry_before=geometry_before,
-            geometry_after=geometry_after,
-            geometry_hits=self._count_hits(case.expected_geometry, actual_geometry),
-            actual_constraints=actual_constraints,
-            constraint_hits=self._count_hits(case.expected_constraints, actual_constraints),
+        runtime_ms = (perf_counter() - runtime_start) * 1000.0
+        stats = self._case_stats(
+            document,
+            score,
+            edge_error,
             export_summary=export_summary,
-            command_results=tuple(command_results),
-            auto_refine=case.auto_refine,
-            candidate_counts=candidate_counts,
-            proposed_command_counts=proposed_command_counts,
-            preview_decisions=preview_decisions,
             accepted_count=accepted_count,
             rejected_count=rejected_count,
-            user_confirm_count=user_confirm_count,
-            score_before=before_score.total_score,
-            score_after=score.total_score,
-            score_delta=score_delta,
-            total_score=score.total_score,
-            failure_reason=failure_reason,
+            requires_external_decision_count=user_confirm_count,
+            runtime_ms=runtime_ms,
+        )
+        failure_reason = self._failure_reason(case, metrics=stats, actual_geometry=geometry_after)
+        success = failure_reason is None
+
+        return _BenchmarkRunContext(
+            case=case,
+            result=BenchmarkCaseResult(
+                case_id=case.case_id,
+                image_path=case.image_path,
+                success=success,
+                document_id=document.document_id,
+                segment_type=case.segment_type,
+                stats=stats,
+                actual_geometry=actual_geometry,
+                geometry_before=geometry_before,
+                geometry_after=geometry_after,
+                geometry_hits=self._count_hits(case.expected_geometry, actual_geometry),
+                actual_constraints=actual_constraints,
+                constraint_hits=self._count_hits(case.expected_constraints, actual_constraints),
+                export_summary=export_summary,
+                command_results=tuple(command_results),
+                auto_refine=case.auto_refine,
+                candidate_counts=candidate_counts,
+                proposed_command_counts=proposed_command_counts,
+                preview_decisions=preview_decisions,
+                accepted_count=accepted_count,
+                rejected_count=rejected_count,
+                user_confirm_count=user_confirm_count,
+                score_before=before_score.total_score,
+                score_after=score.total_score,
+                score_delta=score_delta,
+                total_score=score.total_score,
+                metrics=stats,
+                failure_reason=failure_reason,
+            ),
+            document=document,
+            pipeline=pipeline,
+            pipeline_result=pipeline_result,
         )
 
     def run_manifest(
@@ -287,6 +372,33 @@ class BenchmarkRunner:
             for case in cases
         )
         return BenchmarkReport(cases=results, summary=self._summary(results))
+
+    def run_acceptance_manifest(
+        self,
+        manifest: str | Path | Sequence[BenchmarkCase],
+        *,
+        output_dir: str | Path,
+        execute_proposed_commands: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> BenchmarkReport:
+        cases = self.load_manifest(manifest) if isinstance(manifest, (str, Path)) else tuple(manifest)
+        output_root = Path(output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        results = []
+        for case in cases:
+            try:
+                result = self.run_acceptance_case(
+                    case,
+                    output_dir=output_root,
+                    execute_proposed_commands=execute_proposed_commands,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                result = self._exception_result(case, output_root=output_root, message=f"case_execution_failed: {case.case_id}: {exc}")
+            results.append(result)
+        report = BenchmarkReport(cases=tuple(results), summary=self._summary(results))
+        (output_root / "acceptance_report.json").write_text(report.to_json(), encoding="utf-8")
+        return report
 
     def _default_pipeline_factory(self, case: BenchmarkCase) -> MinimalPipeline:
         return MinimalPipeline(segment_type=case.segment_type)
@@ -340,6 +452,7 @@ class BenchmarkRunner:
             "dxf": {
                 "entity_count": self._dxf_entity_count(dxf_payload),
                 "entity_counts": dict(dxf_report["entity_counts"]),
+                "unit": document.coordinate_system.unit,
             },
         }
         if expected_export:
@@ -351,16 +464,28 @@ class BenchmarkRunner:
         document: VectorDocument,
         score: ScoreResult,
         edge_error: EdgeErrorResult,
+        *,
+        export_summary: Mapping[str, Any],
+        accepted_count: int,
+        rejected_count: int,
+        requires_external_decision_count: int,
+        runtime_ms: float,
     ) -> dict[str, float | int]:
         geometry_counts = self._geometry_counts(document)
         return {
             "total_score": score.total_score,
             "edge_error": score.breakdown.edge_error_score,
+            "complexity_score": score.breakdown.geometry_complexity_score,
             "geometry_complexity": score.breakdown.geometry_complexity_score,
             "topology_error_count": sum(1 for path in document.paths if path.topology_status == "topology_error"),
             "self_intersection_count": sum(int(path.self_intersection_count) for path in document.paths),
             "segment_count": len(document.segments),
             "control_point_count": self._control_point_count(document),
+            "auto_apply_count": accepted_count,
+            "auto_reject_count": rejected_count,
+            "requires_external_decision_count": requires_external_decision_count,
+            "svg_node_count": int(export_summary["svg"]["element_count"]),
+            "runtime_ms": runtime_ms,
             "line_count": geometry_counts["line"],
             "arc_count": geometry_counts["arc"],
             "circle_count": geometry_counts["circle"],
@@ -383,15 +508,21 @@ class BenchmarkRunner:
         if total_cases == 0:
             return {
                 "total_cases": 0,
+                "overall_pass": True,
+                "failed_case_count": 0,
                 "average_total_score": 0.0,
                 "total_segments": 0,
                 "total_control_points": 0,
                 "geometry_hit_totals": {},
+                "failure_reasons": {},
             }
 
-        total_score = sum(float(item.stats["total_score"]) for item in results)
-        total_segments = sum(int(item.stats["segment_count"]) for item in results)
-        total_control_points = sum(int(item.stats["control_point_count"]) for item in results)
+        total_score = sum(float(item.stats.get("total_score", item.metrics.get("total_score", 0.0))) for item in results)
+        total_segments = sum(int(item.stats.get("segment_count", item.metrics.get("segment_count", 0))) for item in results)
+        total_control_points = sum(
+            int(item.stats.get("control_point_count", item.metrics.get("control_point_count", 0)))
+            for item in results
+        )
         geometry_hit_totals: dict[str, int] = {}
         for item in results:
             for key, value in item.geometry_hits.items():
@@ -399,6 +530,8 @@ class BenchmarkRunner:
 
         return {
             "total_cases": total_cases,
+            "overall_pass": all(item.success for item in results),
+            "failed_case_count": sum(1 for item in results if not item.success),
             "average_total_score": total_score / total_cases,
             "total_segments": total_segments,
             "total_control_points": total_control_points,
@@ -408,6 +541,11 @@ class BenchmarkRunner:
             "accepted_count": sum(item.accepted_count for item in results),
             "rejected_count": sum(item.rejected_count for item in results),
             "user_confirm_count": sum(item.user_confirm_count for item in results),
+            "failure_reasons": {
+                item.case_id: item.failure_reason
+                for item in results
+                if item.failure_reason is not None
+            },
         }
 
     def _command_result_payload(self, result: CommandExecutionResult) -> dict[str, Any]:
@@ -454,6 +592,110 @@ class BenchmarkRunner:
             return path
         return manifest_dir / path
 
+    def _run_acceptance_case_with_timeout(
+        self,
+        case: BenchmarkCase,
+        *,
+        output_dir: str | Path,
+        execute_proposed_commands: bool,
+        timeout_seconds: float,
+    ) -> BenchmarkCaseResult:
+        output_root = Path(output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f"acceptance_case_{case.case_id}_") as temp_dir:
+            temp_root = Path(temp_dir)
+            case_json_path = temp_root / "case.json"
+            result_json_path = temp_root / "result.json"
+            case_json_path.write_text(json.dumps(self._case_to_dict(case), indent=2, sort_keys=True), encoding="utf-8")
+            command = [
+                sys.executable,
+                str(Path("scripts") / "run_acceptance_benchmark.py"),
+                "--worker-case-json",
+                str(case_json_path),
+                "--worker-output-dir",
+                str(output_root),
+                "--worker-result-json",
+                str(result_json_path),
+            ]
+            if execute_proposed_commands:
+                command.append("--execute-proposed-commands")
+            try:
+                subprocess.run(
+                    command,
+                    cwd=str(Path(__file__).resolve().parents[1]),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                return self._timeout_result(case, output_root=output_root, timeout_seconds=timeout_seconds)
+            except subprocess.CalledProcessError as exc:
+                message = exc.stderr.strip() or exc.stdout.strip() or f"worker_failed: {case.case_id}"
+                return self._exception_result(case, output_root=output_root, message=message)
+            return self._benchmark_case_result_from_dict(
+                json.loads(result_json_path.read_text(encoding="utf-8"))
+            )
+
+    def _write_acceptance_artifacts(
+        self,
+        context: _BenchmarkRunContext,
+        *,
+        output_dir: str | Path,
+    ) -> dict[str, str]:
+        case_output_dir = Path(output_dir) / context.case.case_id
+        case_output_dir.mkdir(parents=True, exist_ok=True)
+
+        document_payload = self.json_exporter.export_document(context.document)
+        svg_payload = self.svg_exporter.export_document(context.document)
+        dxf_payload = self.dxf_exporter.export_document(context.document)
+        decision_report = {
+            "case_id": context.result.case_id,
+            "success": context.result.success,
+            "failure_reason": context.result.failure_reason,
+            "decision_counts": {
+                "auto_apply": context.result.accepted_count,
+                "auto_reject": context.result.rejected_count,
+                "requires_external_decision": context.result.user_confirm_count,
+            },
+            "preview_decisions": list(context.result.preview_decisions),
+            "command_results": list(context.result.command_results),
+        }
+        metrics_payload = dict(context.result.metrics)
+
+        artifact_paths = {
+            "document_json": str(case_output_dir / "document.json"),
+            "output_json": str(case_output_dir / "output.json"),
+            "output_svg": str(case_output_dir / "output.svg"),
+            "output_dxf": str(case_output_dir / "output.dxf"),
+            "overlay_png": str(case_output_dir / "overlay.png"),
+            "diff_png": str(case_output_dir / "diff.png"),
+            "decision_report_json": str(case_output_dir / "decision_report.json"),
+            "metrics_json": str(case_output_dir / "metrics.json"),
+        }
+
+        Path(artifact_paths["document_json"]).write_text(document_payload, encoding="utf-8")
+        Path(artifact_paths["output_json"]).write_text(document_payload, encoding="utf-8")
+        Path(artifact_paths["output_svg"]).write_text(svg_payload, encoding="utf-8")
+        Path(artifact_paths["output_dxf"]).write_text(dxf_payload, encoding="utf-8")
+        Path(artifact_paths["decision_report_json"]).write_text(json.dumps(decision_report, indent=2, sort_keys=True), encoding="utf-8")
+        Path(artifact_paths["metrics_json"]).write_text(json.dumps(metrics_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+        if (
+            hasattr(context.pipeline, "export_overlay")
+            and context.pipeline_result.source_image is not None
+        ):
+            context.pipeline.export_overlay(context.document, context.pipeline_result.source_image, artifact_paths["overlay_png"])
+        else:
+            Path(artifact_paths["overlay_png"]).write_bytes(_minimal_png_bytes())
+
+        if hasattr(context.pipeline, "export_distance_field_diff"):
+            context.pipeline.export_distance_field_diff(context.document, artifact_paths["diff_png"])
+        else:
+            Path(artifact_paths["diff_png"]).write_bytes(_minimal_png_bytes())
+
+        return artifact_paths
+
     def _coerce_counts(self, value: object) -> dict[str, int]:
         payload = self._coerce_dict(value)
         counts: dict[str, int] = {}
@@ -496,15 +738,52 @@ class BenchmarkRunner:
             result[str(key)] = item
         return result
 
+    def _case_to_dict(self, case: BenchmarkCase) -> dict[str, Any]:
+        payload = {
+            "case_id": case.case_id,
+            "image_path": case.image_path,
+            "expected_geometry": dict(case.expected_geometry),
+            "expected_constraints": dict(case.expected_constraints),
+            "expected_export": json.loads(json.dumps(case.expected_export)),
+            "proposed_commands": [dict(command) for command in case.proposed_commands],
+            "segment_type": case.segment_type,
+            "document_id": case.document_id,
+            "auto_refine": case.auto_refine,
+            "auto_refine_target_types": list(case.auto_refine_target_types),
+            "auto_refine_dry_run_only": case.auto_refine_dry_run_only,
+            "fail_thresholds": dict(case.fail_thresholds),
+            "coverage_level": case.coverage_level,
+            "timeout_seconds": case.timeout_seconds,
+        }
+        return payload
+
+    def benchmark_case_from_dict(self, payload: Mapping[str, Any]) -> BenchmarkCase:
+        return BenchmarkCase(
+            case_id=str(payload["case_id"]),
+            image_path=str(payload["image_path"]),
+            expected_geometry=self._coerce_counts(payload.get("expected_geometry")),
+            expected_constraints=self._coerce_counts(payload.get("expected_constraints")),
+            expected_export=self._coerce_dict(payload.get("expected_export")),
+            proposed_commands=self._coerce_command_list(payload.get("proposed_commands")),
+            segment_type=str(payload.get("segment_type", "line")),
+            document_id=str(payload["document_id"]) if payload.get("document_id") is not None else None,
+            auto_refine=bool(payload.get("auto_refine", False)),
+            auto_refine_target_types=self._coerce_string_tuple(payload.get("auto_refine_target_types")),
+            auto_refine_dry_run_only=bool(payload.get("auto_refine_dry_run_only", False)),
+            fail_thresholds=self._coerce_numeric_dict(payload.get("fail_thresholds")),
+            coverage_level=str(payload.get("coverage_level", "real")),
+            timeout_seconds=None if payload.get("timeout_seconds") is None else float(payload["timeout_seconds"]),
+        )
+
     def _failure_reason(
         self,
         case: BenchmarkCase,
         *,
-        stats: Mapping[str, float | int],
+        metrics: Mapping[str, float | int],
         actual_geometry: Mapping[str, int],
     ) -> str | None:
         for threshold_name, threshold_value in case.fail_thresholds.items():
-            metric_value = self._threshold_metric_value(threshold_name, stats=stats, actual_geometry=actual_geometry)
+            metric_value = self._threshold_metric_value(threshold_name, metrics=metrics, actual_geometry=actual_geometry)
             if metric_value is None:
                 continue
             if threshold_name.startswith("max_") and float(metric_value) > float(threshold_value):
@@ -513,32 +792,243 @@ class BenchmarkRunner:
                 return f"{threshold_name} not met: {metric_value} < {threshold_value}"
         return None
 
+    def _benchmark_case_result_from_dict(self, payload: Mapping[str, Any]) -> BenchmarkCaseResult:
+        return BenchmarkCaseResult(
+            case_id=str(payload["case_id"]),
+            image_path=str(payload["image_path"]),
+            success=bool(payload["success"]),
+            document_id=str(payload["document_id"]),
+            segment_type=str(payload["segment_type"]),
+            stats={str(key): value for key, value in dict(payload.get("stats", {})).items()},
+            actual_geometry=self._coerce_counts(payload.get("actual_geometry")),
+            geometry_before=self._coerce_counts(payload.get("geometry_before")),
+            geometry_after=self._coerce_counts(payload.get("geometry_after")),
+            geometry_hits=self._coerce_counts(payload.get("geometry_hits")),
+            actual_constraints=self._coerce_counts(payload.get("actual_constraints")),
+            constraint_hits=self._coerce_counts(payload.get("constraint_hits")),
+            export_summary=self._coerce_dict(payload.get("export_summary")),
+            command_results=tuple(dict(item) for item in payload.get("command_results", ())),
+            auto_refine=bool(payload.get("auto_refine", False)),
+            candidate_counts=self._coerce_dict(payload.get("candidate_counts")),
+            proposed_command_counts=self._coerce_counts(payload.get("proposed_command_counts")),
+            preview_decisions=tuple(self._coerce_dict(item) for item in payload.get("preview_decisions", ())),
+            accepted_count=int(payload.get("accepted_count", 0)),
+            rejected_count=int(payload.get("rejected_count", 0)),
+            user_confirm_count=int(payload.get("user_confirm_count", 0)),
+            score_before=float(payload.get("score_before", 0.0)),
+            score_after=float(payload.get("score_after", 0.0)),
+            score_delta=float(payload.get("score_delta", 0.0)),
+            total_score=float(payload.get("total_score", 0.0)),
+            metrics={str(key): value for key, value in dict(payload.get("metrics", {})).items()},
+            artifacts={str(key): str(value) for key, value in dict(payload.get("artifacts", {})).items()},
+            failure_reason=None if payload.get("failure_reason") is None else str(payload["failure_reason"]),
+        )
+
+    def _timeout_result(
+        self,
+        case: BenchmarkCase,
+        *,
+        output_root: Path,
+        timeout_seconds: float,
+    ) -> BenchmarkCaseResult:
+        failure_reason = f"case_timeout_exceeded: {case.case_id}"
+        artifacts = self._write_failure_artifacts(
+            case,
+            output_root=output_root,
+            failure_reason=failure_reason,
+            runtime_ms=timeout_seconds * 1000.0,
+        )
+        return BenchmarkCaseResult(
+            case_id=case.case_id,
+            image_path=case.image_path,
+            success=False,
+            document_id=case.document_id or f"benchmark_{case.case_id}",
+            segment_type=case.segment_type,
+            stats=self._failure_metrics(runtime_ms=timeout_seconds * 1000.0),
+            actual_geometry={},
+            geometry_before={},
+            geometry_after={},
+            geometry_hits={},
+            actual_constraints={},
+            constraint_hits={},
+            export_summary={},
+            command_results=(),
+            auto_refine=case.auto_refine,
+            candidate_counts={},
+            proposed_command_counts={},
+            preview_decisions=(),
+            accepted_count=0,
+            rejected_count=0,
+            user_confirm_count=0,
+            score_before=0.0,
+            score_after=0.0,
+            score_delta=0.0,
+            total_score=0.0,
+            metrics=self._failure_metrics(runtime_ms=timeout_seconds * 1000.0),
+            artifacts=artifacts,
+            failure_reason=failure_reason,
+        )
+
+    def _exception_result(
+        self,
+        case: BenchmarkCase,
+        *,
+        output_root: Path,
+        message: str,
+    ) -> BenchmarkCaseResult:
+        artifacts = self._write_failure_artifacts(
+            case,
+            output_root=output_root,
+            failure_reason=message,
+            runtime_ms=0.0,
+        )
+        return BenchmarkCaseResult(
+            case_id=case.case_id,
+            image_path=case.image_path,
+            success=False,
+            document_id=case.document_id or f"benchmark_{case.case_id}",
+            segment_type=case.segment_type,
+            stats=self._failure_metrics(runtime_ms=0.0),
+            actual_geometry={},
+            geometry_before={},
+            geometry_after={},
+            geometry_hits={},
+            actual_constraints={},
+            constraint_hits={},
+            export_summary={},
+            command_results=(),
+            auto_refine=case.auto_refine,
+            candidate_counts={},
+            proposed_command_counts={},
+            preview_decisions=(),
+            accepted_count=0,
+            rejected_count=0,
+            user_confirm_count=0,
+            score_before=0.0,
+            score_after=0.0,
+            score_delta=0.0,
+            total_score=0.0,
+            metrics=self._failure_metrics(runtime_ms=0.0),
+            artifacts=artifacts,
+            failure_reason=message,
+        )
+
+    def _failure_metrics(self, *, runtime_ms: float) -> dict[str, float | int]:
+        return {
+            "total_score": 0.0,
+            "edge_error": 0.0,
+            "complexity_score": 0.0,
+            "geometry_complexity": 0.0,
+            "segment_count": 0,
+            "control_point_count": 0,
+            "topology_error_count": 0,
+            "self_intersection_count": 0,
+            "auto_apply_count": 0,
+            "auto_reject_count": 0,
+            "requires_external_decision_count": 0,
+            "svg_node_count": 0,
+            "runtime_ms": runtime_ms,
+            "line_count": 0,
+            "arc_count": 0,
+            "circle_count": 0,
+            "ellipse_count": 0,
+            "source_point_count": 0,
+            "vector_point_count": 0,
+        }
+
+    def _write_failure_artifacts(
+        self,
+        case: BenchmarkCase,
+        *,
+        output_root: Path,
+        failure_reason: str,
+        runtime_ms: float,
+    ) -> dict[str, str]:
+        case_output_dir = output_root / case.case_id
+        case_output_dir.mkdir(parents=True, exist_ok=True)
+        artifacts = {
+            "document_json": str(case_output_dir / "document.json"),
+            "output_json": str(case_output_dir / "output.json"),
+            "output_svg": str(case_output_dir / "output.svg"),
+            "output_dxf": str(case_output_dir / "output.dxf"),
+            "overlay_png": str(case_output_dir / "overlay.png"),
+            "diff_png": str(case_output_dir / "diff.png"),
+            "decision_report_json": str(case_output_dir / "decision_report.json"),
+            "metrics_json": str(case_output_dir / "metrics.json"),
+        }
+        Path(artifacts["document_json"]).write_text("{}", encoding="utf-8")
+        Path(artifacts["output_json"]).write_text("{}", encoding="utf-8")
+        Path(artifacts["output_svg"]).write_text("<svg xmlns=\"http://www.w3.org/2000/svg\"/>", encoding="utf-8")
+        Path(artifacts["output_dxf"]).write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+        Path(artifacts["overlay_png"]).write_bytes(_minimal_png_bytes())
+        Path(artifacts["diff_png"]).write_bytes(_minimal_png_bytes())
+        Path(artifacts["decision_report_json"]).write_text(
+            json.dumps(
+                {
+                    "case_id": case.case_id,
+                    "success": False,
+                    "failure_reason": failure_reason,
+                    "decision_counts": {
+                        "auto_apply": 0,
+                        "auto_reject": 0,
+                        "requires_external_decision": 0,
+                    },
+                    "preview_decisions": [],
+                    "command_results": [],
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        Path(artifacts["metrics_json"]).write_text(
+            json.dumps(self._failure_metrics(runtime_ms=runtime_ms), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return artifacts
+
     def _threshold_metric_value(
         self,
         threshold_name: str,
         *,
-        stats: Mapping[str, float | int],
+        metrics: Mapping[str, float | int],
         actual_geometry: Mapping[str, int],
     ) -> float | int | None:
         if threshold_name == "max_total_score":
-            return stats["total_score"]
+            return metrics["total_score"]
+        if threshold_name == "max_topology_errors":
+            return metrics["topology_error_count"]
+        if threshold_name == "max_self_intersections":
+            return metrics["self_intersection_count"]
+        if threshold_name == "max_requires_external_decision_count":
+            return metrics["requires_external_decision_count"]
         if threshold_name == "max_segment_count":
-            return stats["segment_count"]
+            return metrics["segment_count"]
         if threshold_name.startswith("min_") and threshold_name.endswith("_count"):
             geometry_name = threshold_name[len("min_") : -len("_count")]
             if geometry_name in actual_geometry:
                 return actual_geometry[geometry_name]
-            if threshold_name[len("min_") :] in stats:
-                return stats[threshold_name[len("min_") :]]
+            if threshold_name[len("min_") :] in metrics:
+                return metrics[threshold_name[len("min_") :]]
         if threshold_name.startswith("max_") and threshold_name.endswith("_count"):
             geometry_name = threshold_name[len("max_") : -len("_count")]
             if geometry_name in actual_geometry:
                 return actual_geometry[geometry_name]
-        return stats.get(threshold_name)
+        return metrics.get(threshold_name)
 
 
 def benchmark_report_to_json(report: BenchmarkReport) -> str:
     return report.to_json()
+
+
+def _minimal_png_bytes() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\rIDATx\x9cc`\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
 
 
 __all__ = [
