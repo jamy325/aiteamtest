@@ -1,0 +1,96 @@
+{
+  "cases": {
+    "logo_sample": {
+      "metrics": {
+        "arc_count": 0,
+        "auto_apply_count": 0,
+        "auto_reject_count": 0,
+        "circle_count": 0,
+        "complexity_score": 81.0,
+        "control_point_count": 0,
+        "edge_error": 1.0372229868122604,
+        "ellipse_count": 0,
+        "geometry_complexity": 81.0,
+        "line_count": 81,
+        "requires_external_decision_count": 0,
+        "runtime_ms": 103.71490003308281,
+        "segment_count": 81,
+        "self_intersection_count": 0,
+        "source_point_count": 102,
+        "svg_node_count": 3,
+        "topology_error_count": 0,
+        "total_score": 82.03722298681227,
+        "vector_point_count": 162
+      }
+    },
+    "mechanical_part": {
+      "metrics": {
+        "arc_count": 0,
+        "auto_apply_count": 0,
+        "auto_reject_count": 0,
+        "circle_count": 0,
+        "complexity_score": 191.0,
+        "control_point_count": 0,
+        "edge_error": 8.452661688433922,
+        "ellipse_count": 0,
+        "geometry_complexity": 191.0,
+        "line_count": 191,
+        "requires_external_decision_count": 0,
+        "runtime_ms": 129.06559999100864,
+        "segment_count": 191,
+        "self_intersection_count": 0,
+        "source_point_count": 660,
+        "svg_node_count": 11,
+        "topology_error_count": 0,
+        "total_score": 199.45266168843392,
+        "vector_point_count": 382
+      }
+    },
+    "noisy_scan": {
+      "metrics": {
+        "arc_count": 0,
+        "auto_apply_count": 0,
+        "auto_reject_count": 0,
+        "circle_count": 0,
+        "complexity_score": 180.0,
+        "control_point_count": 0,
+        "edge_error": 6.267101435018993,
+        "ellipse_count": 0,
+        "geometry_complexity": 180.0,
+        "line_count": 180,
+        "requires_external_decision_count": 0,
+        "runtime_ms": 109.17509999126196,
+        "segment_count": 180,
+        "self_intersection_count": 0,
+        "source_point_count": 552,
+        "svg_node_count": 14,
+        "topology_error_count": 0,
+        "total_score": 186.267101435019,
+        "vector_point_count": 360
+      }
+    },
+    "transparent_icon": {
+      "metrics": {
+        "arc_count": 0,
+        "auto_apply_count": 0,
+        "auto_reject_count": 0,
+        "circle_count": 0,
+        "complexity_score": 257.0,
+        "control_point_count": 0,
+        "edge_error": 1.1171977108660662,
+        "ellipse_count": 0,
+        "geometry_complexity": 257.0,
+        "line_count": 257,
+        "requires_external_decision_count": 0,
+        "runtime_ms": 136.07010000851005,
+        "segment_count": 257,
+        "self_intersection_count": 0,
+        "source_point_count": 483,
+        "svg_node_count": 17,
+        "topology_error_count": 0,
+        "total_score": 258.1171977108661,
+        "vector_point_count": 514
+      }
+    }
+  }
+}

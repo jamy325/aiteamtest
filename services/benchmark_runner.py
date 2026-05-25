@@ -40,6 +40,7 @@ class BenchmarkCase:
     auto_refine_target_types: tuple[str, ...] = ()
     auto_refine_dry_run_only: bool = False
     fail_thresholds: dict[str, float | int] = field(default_factory=dict)
+    regression_tolerances: dict[str, float | int] = field(default_factory=dict)
     coverage_level: str = "real"
     timeout_seconds: float | None = None
 
@@ -142,6 +143,15 @@ PipelineFactory = Callable[[BenchmarkCase], MinimalPipeline]
 
 
 class BenchmarkRunner:
+    REGRESSION_METRICS: tuple[str, ...] = (
+        "total_score",
+        "topology_error_count",
+        "self_intersection_count",
+        "requires_external_decision_count",
+        "svg_node_count",
+        "runtime_ms",
+    )
+
     def __init__(
         self,
         *,
@@ -191,6 +201,7 @@ class BenchmarkRunner:
             auto_refine_target_types = self._coerce_string_tuple(item.get("auto_refine_target_types") or item.get("target_types"))
             auto_refine_dry_run_only = bool(item.get("auto_refine_dry_run_only", False))
             fail_thresholds = self._coerce_numeric_dict(item.get("fail_thresholds"))
+            regression_tolerances = self._coerce_numeric_dict(item.get("regression_tolerances"))
             coverage_level = str(item.get("coverage_level", "real"))
             timeout_seconds = None if item.get("timeout_seconds") is None else float(item["timeout_seconds"])
             cases.append(
@@ -207,6 +218,7 @@ class BenchmarkRunner:
                     auto_refine_target_types=auto_refine_target_types,
                     auto_refine_dry_run_only=auto_refine_dry_run_only,
                     fail_thresholds=fail_thresholds,
+                    regression_tolerances=regression_tolerances,
                     coverage_level=coverage_level,
                     timeout_seconds=timeout_seconds,
                 )
@@ -398,6 +410,68 @@ class BenchmarkRunner:
             results.append(result)
         report = BenchmarkReport(cases=tuple(results), summary=self._summary(results))
         (output_root / "acceptance_report.json").write_text(report.to_json(), encoding="utf-8")
+        return report
+
+    def load_regression_baseline(self, baseline_path: str | Path) -> dict[str, Any]:
+        payload = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+        cases = payload.get("cases")
+        if not isinstance(cases, dict):
+            raise ValueError("baseline must contain a cases object")
+        normalized: dict[str, Any] = {}
+        for case_id, case_payload in cases.items():
+            if not isinstance(case_payload, dict):
+                raise ValueError("baseline case entries must be objects")
+            metrics = case_payload.get("metrics")
+            if not isinstance(metrics, dict):
+                raise ValueError("baseline case must contain metrics object")
+            normalized[str(case_id)] = {
+                "metrics": {str(key): value for key, value in metrics.items()},
+            }
+        return normalized
+
+    def run_real_world_regression(
+        self,
+        manifest: str | Path | Sequence[BenchmarkCase],
+        *,
+        baseline_path: str | Path,
+        output_dir: str | Path,
+        execute_proposed_commands: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> BenchmarkReport:
+        cases = self.load_manifest(manifest) if isinstance(manifest, (str, Path)) else tuple(manifest)
+        baseline = self.load_regression_baseline(baseline_path)
+        case_by_id = {case.case_id: case for case in cases}
+        output_root = Path(output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        results: list[BenchmarkCaseResult] = []
+        for case in cases:
+            try:
+                raw_result = self.run_acceptance_case(
+                    case,
+                    output_dir=output_root,
+                    execute_proposed_commands=execute_proposed_commands,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                raw_result = self._exception_result(case, output_root=output_root, message=f"case_execution_failed: {case.case_id}: {exc}")
+            regression_reason = self._compare_regression_metrics(
+                raw_result.metrics,
+                baseline.get(case.case_id),
+                tolerances=case.regression_tolerances,
+            )
+            failure_reason = self._merge_failure_reasons(raw_result.failure_reason, regression_reason)
+            results.append(
+                replace(
+                    raw_result,
+                    success=failure_reason is None,
+                    failure_reason=failure_reason,
+                )
+            )
+        summary = self._summary(results)
+        summary["baseline_path"] = str(baseline_path)
+        summary["regression_metrics"] = list(self.REGRESSION_METRICS)
+        report = BenchmarkReport(cases=tuple(results), summary=summary)
+        (output_root / "real_world_regression_report.json").write_text(report.to_json(), encoding="utf-8")
         return report
 
     def _default_pipeline_factory(self, case: BenchmarkCase) -> MinimalPipeline:
@@ -752,6 +826,7 @@ class BenchmarkRunner:
             "auto_refine_target_types": list(case.auto_refine_target_types),
             "auto_refine_dry_run_only": case.auto_refine_dry_run_only,
             "fail_thresholds": dict(case.fail_thresholds),
+            "regression_tolerances": dict(case.regression_tolerances),
             "coverage_level": case.coverage_level,
             "timeout_seconds": case.timeout_seconds,
         }
@@ -771,9 +846,44 @@ class BenchmarkRunner:
             auto_refine_target_types=self._coerce_string_tuple(payload.get("auto_refine_target_types")),
             auto_refine_dry_run_only=bool(payload.get("auto_refine_dry_run_only", False)),
             fail_thresholds=self._coerce_numeric_dict(payload.get("fail_thresholds")),
+            regression_tolerances=self._coerce_numeric_dict(payload.get("regression_tolerances")),
             coverage_level=str(payload.get("coverage_level", "real")),
             timeout_seconds=None if payload.get("timeout_seconds") is None else float(payload["timeout_seconds"]),
         )
+
+    def _merge_failure_reasons(self, existing: str | None, extra: str | None) -> str | None:
+        if existing is None:
+            return extra
+        if extra is None:
+            return existing
+        return f"{existing}; {extra}"
+
+    def _compare_regression_metrics(
+        self,
+        current_metrics: Mapping[str, float | int],
+        baseline_case: Mapping[str, Any] | None,
+        *,
+        tolerances: Mapping[str, float | int],
+    ) -> str | None:
+        if baseline_case is None:
+            return "baseline_missing_for_case"
+        baseline_metrics = baseline_case.get("metrics")
+        if not isinstance(baseline_metrics, Mapping):
+            return "baseline_metrics_invalid"
+        for metric_name in self.REGRESSION_METRICS:
+            if metric_name not in baseline_metrics:
+                return f"baseline_metric_missing: {metric_name}"
+            current_value = current_metrics.get(metric_name)
+            if current_value is None:
+                return f"current_metric_missing: {metric_name}"
+            baseline_value = baseline_metrics[metric_name]
+            tolerance = float(tolerances.get(metric_name, 0.0))
+            if float(current_value) > float(baseline_value) + tolerance:
+                return (
+                    f"regression_detected: {metric_name} {current_value} > "
+                    f"{baseline_value} + tolerance {tolerance}"
+                )
+        return None
 
     def _failure_reason(
         self,

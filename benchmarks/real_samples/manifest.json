@@ -1,0 +1,68 @@
+{
+  "cases": [
+    {
+      "case_id": "logo_sample",
+      "image_path": "logo_sample.png",
+      "segment_type": "line",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "regression_tolerances": {
+        "total_score": 50.0,
+        "topology_error_count": 0,
+        "self_intersection_count": 0,
+        "requires_external_decision_count": 0,
+        "svg_node_count": 50,
+        "runtime_ms": 5000
+      }
+    },
+    {
+      "case_id": "mechanical_part",
+      "image_path": "mechanical_part.png",
+      "segment_type": "line",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "regression_tolerances": {
+        "total_score": 50.0,
+        "topology_error_count": 0,
+        "self_intersection_count": 0,
+        "requires_external_decision_count": 0,
+        "svg_node_count": 50,
+        "runtime_ms": 5000
+      }
+    },
+    {
+      "case_id": "transparent_icon",
+      "image_path": "transparent_icon.png",
+      "segment_type": "line",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "regression_tolerances": {
+        "total_score": 50.0,
+        "topology_error_count": 0,
+        "self_intersection_count": 0,
+        "requires_external_decision_count": 0,
+        "svg_node_count": 50,
+        "runtime_ms": 5000
+      }
+    },
+    {
+      "case_id": "noisy_scan",
+      "image_path": "noisy_scan.png",
+      "segment_type": "line",
+      "auto_refine": false,
+      "coverage_level": "real",
+      "timeout_seconds": 20,
+      "regression_tolerances": {
+        "total_score": 75.0,
+        "topology_error_count": 0,
+        "self_intersection_count": 0,
+        "requires_external_decision_count": 0,
+        "svg_node_count": 80,
+        "runtime_ms": 5000
+      }
+    }
+  ]
+}
