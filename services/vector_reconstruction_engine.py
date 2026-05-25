@@ -21,8 +21,11 @@ from services.engine_protocol import (
     PolicyFeedback,
     RejectionMemoryItem,
 )
+from services.dxf_exporter import DxfExporter
+from services.json_exporter import JsonExporter
 from services.minimal_pipeline import MinimalPipeline, MinimalPipelineResult
 from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy
+from services.svg_exporter import SvgExporter
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,19 @@ class VectorReconstructionEngineConfig:
     document_id: str = "document_1"
 
 
+@dataclass(frozen=True, slots=True)
+class VectorReconstructionArtifactBundle:
+    engine_result: EngineResult
+    pipeline_result: MinimalPipelineResult
+    document_json: str
+    output_svg: str
+    output_dxf: str
+    overlay_png: bytes
+    diff_png: bytes
+    decision_report: dict[str, Any]
+    metrics: dict[str, Any]
+
+
 class VectorReconstructionEngine:
     def __init__(
         self,
@@ -56,6 +72,9 @@ class VectorReconstructionEngine:
         )
         self.ai_review_service = ai_review_service
         self.config = config or VectorReconstructionEngineConfig()
+        self.json_exporter = JsonExporter()
+        self.svg_exporter = SvgExporter()
+        self.dxf_exporter = DxfExporter()
 
     def run_document(
         self,
@@ -138,6 +157,57 @@ class VectorReconstructionEngine:
             max_iterations=runtime_config.max_iterations,
             dry_run_only=runtime_config.dry_run_only,
             enable_ai_review=runtime_config.enable_ai_review,
+        )
+
+    def run_artifact_bundle(
+        self,
+        image_path: str | Path,
+        *,
+        document_id: str | None = None,
+        target_types: tuple[ShapeCandidateTargetType, ...] | list[ShapeCandidateTargetType] | None = None,
+        autonomy_level: AutonomyLevel | None = None,
+        max_iterations: int | None = None,
+        dry_run_only: bool | None = None,
+        enable_ai_review: bool | None = None,
+    ) -> VectorReconstructionArtifactBundle:
+        runtime_config = self._runtime_config(
+            target_types=target_types,
+            autonomy_level=autonomy_level,
+            max_iterations=max_iterations,
+            dry_run_only=dry_run_only,
+            enable_ai_review=enable_ai_review,
+        )
+        pipeline_result = self.minimal_pipeline.run_from_file(
+            image_path,
+            document_id=document_id or runtime_config.document_id,
+        )
+        engine_result = self.run_pipeline_result(
+            pipeline_result,
+            target_types=runtime_config.target_types,
+            autonomy_level=runtime_config.autonomy_level,
+            max_iterations=runtime_config.max_iterations,
+            dry_run_only=runtime_config.dry_run_only,
+            enable_ai_review=runtime_config.enable_ai_review,
+        )
+        final_document = engine_result.document or pipeline_result.document
+        source_image = pipeline_result.source_image
+        if source_image is None:
+            raise ValueError("pipeline result does not include source_image")
+        decision_report = engine_result.to_dict()
+        return VectorReconstructionArtifactBundle(
+            engine_result=engine_result,
+            pipeline_result=pipeline_result,
+            document_json=self.json_exporter.export_document(final_document),
+            output_svg=self.svg_exporter.export_document(final_document),
+            output_dxf=self.dxf_exporter.export_document(final_document),
+            overlay_png=self.minimal_pipeline.export_overlay(final_document, source_image),
+            diff_png=self.minimal_pipeline.export_distance_field_diff(final_document),
+            decision_report=decision_report,
+            metrics=self._bundle_metrics(
+                engine_result=engine_result,
+                document=final_document,
+                runtime_config=runtime_config,
+            ),
         )
 
     def _runtime_config(
@@ -306,8 +376,37 @@ class VectorReconstructionEngine:
             return EngineStatus.REQUIRES_EXTERNAL_DECISION
         return report_status
 
+    def _bundle_metrics(
+        self,
+        *,
+        engine_result: EngineResult,
+        document: VectorDocument,
+        runtime_config: VectorReconstructionEngineConfig,
+    ) -> dict[str, Any]:
+        report = dict(engine_result.report)
+        return {
+            "status": engine_result.status.value,
+            "document_id": document.document_id,
+            "path_count": len(document.paths),
+            "segment_count": len(document.segments),
+            "constraint_count": len(document.constraints),
+            "autonomy_level": runtime_config.autonomy_level.value,
+            "target_types": list(runtime_config.target_types),
+            "dry_run_only": runtime_config.dry_run_only,
+            "enable_ai_review": runtime_config.enable_ai_review,
+            "max_iterations": runtime_config.max_iterations,
+            "iteration_count": int(report.get("iteration_count", 0)),
+            "score_before": report.get("score_before"),
+            "score_after": report.get("score_after"),
+            "decision_stats": dict(report.get("decision_stats", {})),
+            "integrity": dict(report.get("integrity", {})),
+            "unresolved_targets": list(report.get("unresolved_targets", ())),
+            "errors": list(engine_result.errors),
+        }
+
 
 __all__ = [
+    "VectorReconstructionArtifactBundle",
     "VectorReconstructionEngine",
     "VectorReconstructionEngineConfig",
 ]
