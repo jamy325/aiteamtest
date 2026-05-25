@@ -128,6 +128,19 @@ class EngineStatus(_StringEnum):
         return mapping[normalized]
 
 
+class ExternalDecisionAction(_StringEnum):
+    APPLY = "apply"
+    REJECT = "reject"
+    DEFER = "defer"
+
+
+class ExternalDecisionStatus(_StringEnum):
+    PENDING = "pending"
+    APPLIED = "applied"
+    REJECTED = "rejected"
+    DEFERRED = "deferred"
+
+
 @dataclass(frozen=True, slots=True)
 class PolicyFeedback:
     reason_code: str
@@ -250,6 +263,38 @@ class ExternalDecisionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalDecisionRecord:
+    request: ExternalDecisionRequest
+    status: ExternalDecisionStatus = ExternalDecisionStatus.PENDING
+    preview_document: VectorDocument | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    action_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request": self.request.to_dict(),
+            "status": self.status.value,
+            "preview_document": None if self.preview_document is None else document_to_dict(self.preview_document),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "action_reason": self.action_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ExternalDecisionRecord":
+        preview_document_raw = data.get("preview_document")
+        return cls(
+            request=ExternalDecisionRequest.from_dict(data["request"]),
+            status=ExternalDecisionStatus(str(data.get("status", ExternalDecisionStatus.PENDING.value))),
+            preview_document=None if preview_document_raw is None else document_from_dict(preview_document_raw),
+            created_at=None if data.get("created_at") is None else str(data["created_at"]),
+            updated_at=None if data.get("updated_at") is None else str(data["updated_at"]),
+            action_reason=None if data.get("action_reason") is None else str(data["action_reason"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionPolicyResult:
     decision: DecisionKind
     reason_code: str
@@ -358,7 +403,10 @@ __all__ = [
     "DecisionPolicyResult",
     "EngineResult",
     "EngineStatus",
+    "ExternalDecisionAction",
+    "ExternalDecisionRecord",
     "ExternalDecisionRequest",
+    "ExternalDecisionStatus",
     "PolicyFeedback",
     "RejectionMemoryItem",
     "RiskLevel",
