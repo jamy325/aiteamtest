@@ -18,5 +18,23 @@ dev = [
     "pytest>=8,<9",
 ]
 
+[tool.setuptools.packages.find]
+include = [
+    "core*",
+    "services*",
+    "ui*",
+    "vector_reconstruction*",
+]
+exclude = [
+    "tests*",
+    "test_images*",
+    "benchmarks*",
+    "review*",
+    "docs*",
+    "scripts*",
+    "schemas*",
+    "tools*",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
