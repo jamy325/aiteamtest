@@ -212,6 +212,8 @@ def test_benchmark_result_analyzer_aggregates_metrics_and_worst_case_rankings(tm
     assert report.summary["case_type_counts"]["mechanical"] == 1
 
     assert report.worst_cases["total_score"][0]["case_id"] == "noisy_scan_proxy"
+    assert report.worst_cases["total_score"][0]["metric_missing"] is False
+    assert report.worst_cases["total_score"][0]["rank_reason"] == "metric_value"
     assert report.worst_cases["runtime_ms"][0]["case_id"] == "mechanical_part"
     assert report.case_type_aggregates["noisy_scan"]["failed_case_count"] == 1
     assert report.case_type_aggregates["noisy_scan"]["auto_reject_count"] == 4
@@ -259,6 +261,147 @@ def test_benchmark_result_analyzer_tolerates_missing_files_with_warnings_and_rep
     assert report.cases[0].case_id == "fallback_case"
     assert report.cases[0].success is False
     assert report.cases[0].metrics["runtime_ms"] == 5000.0
+
+
+def test_benchmark_result_analyzer_ranks_failed_case_with_missing_metric_at_front(tmp_path: Path) -> None:
+    suite_dir = tmp_path / "acceptance"
+    suite_dir.mkdir()
+
+    suite_cases = [
+        _write_case(
+            suite_dir,
+            case_id="case_good",
+            metrics=_metrics(
+                total_score=5.5,
+                edge_error=1.0,
+                topology_error_count=0,
+                self_intersection_count=0,
+                requires_external_decision_count=0,
+                runtime_ms=10.0,
+            ),
+            success=True,
+        ),
+        _write_case(
+            suite_dir,
+            case_id="case_bad_high_score",
+            metrics=_metrics(
+                total_score=99.9,
+                edge_error=9.0,
+                topology_error_count=0,
+                self_intersection_count=0,
+                requires_external_decision_count=0,
+                runtime_ms=15.0,
+            ),
+            success=True,
+        ),
+        _write_case(
+            suite_dir,
+            case_id="case_crashed_missing_metrics",
+            metrics=None,
+            success=False,
+            failure_reason="pipeline_crashed",
+        ),
+    ]
+    _write_suite_report(suite_dir, suite_name="acceptance", cases=suite_cases)
+
+    report = BenchmarkResultAnalyzer().analyze(suite_dir, top_k=2)
+
+    entries = report.worst_cases["total_score"]
+    assert entries[0]["case_id"] == "case_crashed_missing_metrics"
+    assert entries[0]["metric_missing"] is True
+    assert entries[0]["metric_value"] is None
+    assert entries[0]["rank_reason"] == "missing_metric_failed_case"
+    assert {entry["case_id"] for entry in entries} == {
+        "case_crashed_missing_metrics",
+        "case_bad_high_score",
+    }
+
+
+def test_benchmark_result_analyzer_marks_success_case_missing_metric_without_coercing_zero(tmp_path: Path) -> None:
+    suite_dir = tmp_path / "acceptance"
+    suite_dir.mkdir()
+
+    partial_metrics = _metrics(
+        total_score=4.0,
+        edge_error=3.0,
+        topology_error_count=0,
+        self_intersection_count=0,
+        requires_external_decision_count=0,
+        runtime_ms=20.0,
+    )
+    del partial_metrics["edge_error"]
+
+    suite_cases = [
+        _write_case(
+            suite_dir,
+            case_id="case_success_missing_edge_error",
+            metrics=partial_metrics,
+            success=True,
+        ),
+        _write_case(
+            suite_dir,
+            case_id="case_normal",
+            metrics=_metrics(
+                total_score=3.0,
+                edge_error=7.0,
+                topology_error_count=0,
+                self_intersection_count=0,
+                requires_external_decision_count=0,
+                runtime_ms=10.0,
+            ),
+            success=True,
+        ),
+    ]
+    _write_suite_report(suite_dir, suite_name="acceptance", cases=suite_cases)
+
+    report = BenchmarkResultAnalyzer().analyze(suite_dir, top_k=2)
+
+    entry = next(item for item in report.worst_cases["edge_error"] if item["case_id"] == "case_success_missing_edge_error")
+    assert entry["metric_missing"] is True
+    assert entry["metric_value"] is None
+    assert entry["rank_reason"] == "missing_metric_success_case"
+    assert any("case_success_missing_edge_error: missing_metric: edge_error" == warning for warning in report.warnings)
+
+
+def test_benchmark_result_analyzer_preserves_higher_is_worse_metric_ordering(tmp_path: Path) -> None:
+    suite_dir = tmp_path / "regression"
+    suite_dir.mkdir()
+
+    suite_cases = [
+        _write_case(
+            suite_dir,
+            case_id="case_low",
+            metrics=_metrics(
+                total_score=1.0,
+                edge_error=1.0,
+                topology_error_count=0,
+                self_intersection_count=0,
+                requires_external_decision_count=0,
+                runtime_ms=5.0,
+            ),
+            success=True,
+        ),
+        _write_case(
+            suite_dir,
+            case_id="case_high",
+            metrics=_metrics(
+                total_score=10.0,
+                edge_error=2.0,
+                topology_error_count=0,
+                self_intersection_count=0,
+                requires_external_decision_count=0,
+                runtime_ms=7.0,
+            ),
+            success=True,
+        ),
+    ]
+    _write_suite_report(suite_dir, suite_name="real_world_regression", cases=suite_cases)
+
+    report = BenchmarkResultAnalyzer().analyze(suite_dir, top_k=2)
+
+    entries = report.worst_cases["total_score"]
+    assert [entry["case_id"] for entry in entries] == ["case_high", "case_low"]
+    assert all(entry["rank_reason"] == "metric_value" for entry in entries)
 
 
 def test_benchmark_result_analyzer_cli_writes_outputs_and_returns_nonzero_on_failure(tmp_path: Path) -> None:

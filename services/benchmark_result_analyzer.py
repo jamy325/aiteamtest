@@ -18,6 +18,11 @@ WORST_CASE_METRICS: tuple[str, ...] = (
     "svg_node_count",
 )
 
+WORST_CASE_METRIC_POLICIES: dict[str, dict[str, str]] = {
+    metric_name: {"direction": "higher_is_worse"}
+    for metric_name in WORST_CASE_METRICS
+}
+
 ARTIFACT_FILENAMES: tuple[str, ...] = (
     "document.json",
     "output.json",
@@ -196,6 +201,9 @@ class BenchmarkResultAnalyzer:
         case_warnings: list[str] = []
         metrics = self._load_metrics(case_dir / "metrics.json", report_case, case_warnings)
         decision_report = self._load_decision_report(case_dir / "decision_report.json", report_case, case_warnings, case_id=case_id)
+        for metric_name in WORST_CASE_METRICS:
+            if metric_name not in metrics:
+                case_warnings.append(f"missing_metric: {metric_name}")
 
         failure_reason = self._optional_string(decision_report.get("failure_reason"))
         if failure_reason is None and report_case is not None:
@@ -383,17 +391,20 @@ class BenchmarkResultAnalyzer:
     def _build_worst_cases(self, cases: Sequence[AnalyzedBenchmarkCase], *, top_k: int) -> dict[str, list[dict[str, Any]]]:
         rankings: dict[str, list[dict[str, Any]]] = {}
         for metric_name in WORST_CASE_METRICS:
+            if metric_name not in WORST_CASE_METRIC_POLICIES:
+                raise ValueError(f"missing worst-case metric policy: {metric_name}")
             ordered = sorted(
                 cases,
-                key=lambda case: float(case.metrics.get(metric_name, 0.0)),
-                reverse=True,
+                key=lambda case: self._worst_case_sort_key(case, metric_name),
             )
             rankings[metric_name] = [
                 {
                     "case_id": case.case_id,
                     "suite_name": case.suite_name,
                     "case_type": case.case_type,
-                    "metric_value": case.metrics.get(metric_name, 0.0),
+                    "metric_value": self._metric_value(case, metric_name),
+                    "metric_missing": metric_name not in case.metrics,
+                    "rank_reason": self._worst_case_rank_reason(case, metric_name),
                     "success": case.success,
                     "failure_reason": case.failure_reason,
                 }
@@ -438,6 +449,7 @@ class BenchmarkResultAnalyzer:
                 lines.append(
                     f"- `{item['case_id']}` ({item['case_type']}, {item['suite_name']}): "
                     f"`{item['metric_value']}`"
+                    f" [{item['rank_reason']}]"
                 )
             lines.append("")
 
@@ -511,6 +523,27 @@ class BenchmarkResultAnalyzer:
 
     def _normalize_reason(self, reason: str) -> str:
         return reason.split(":", 1)[0].strip()
+
+    def _metric_value(self, case: AnalyzedBenchmarkCase, metric_name: str) -> float | int | None:
+        return case.metrics.get(metric_name)
+
+    def _worst_case_rank_reason(self, case: AnalyzedBenchmarkCase, metric_name: str) -> str:
+        if metric_name in case.metrics:
+            return "metric_value"
+        if not case.success:
+            return "missing_metric_failed_case"
+        return "missing_metric_success_case"
+
+    def _worst_case_sort_key(self, case: AnalyzedBenchmarkCase, metric_name: str) -> tuple[int, float]:
+        direction = WORST_CASE_METRIC_POLICIES[metric_name]["direction"]
+        metric_value = self._metric_value(case, metric_name)
+        if metric_value is None:
+            if not case.success:
+                return (0, 0.0)
+            return (2, 0.0)
+        if direction != "higher_is_worse":
+            raise ValueError(f"unsupported worst-case direction: {direction}")
+        return (1, -float(metric_value))
 
     def _optional_string(self, value: object) -> str | None:
         if value is None:
