@@ -41,6 +41,7 @@ class BenchmarkCase:
     auto_refine_dry_run_only: bool = False
     fail_thresholds: dict[str, float | int] = field(default_factory=dict)
     regression_tolerances: dict[str, float | int] = field(default_factory=dict)
+    quality_profile: str | None = None
     coverage_level: str = "real"
     timeout_seconds: float | None = None
 
@@ -202,6 +203,7 @@ class BenchmarkRunner:
             auto_refine_dry_run_only = bool(item.get("auto_refine_dry_run_only", False))
             fail_thresholds = self._coerce_numeric_dict(item.get("fail_thresholds"))
             regression_tolerances = self._coerce_numeric_dict(item.get("regression_tolerances"))
+            quality_profile = str(item["quality_profile"]) if "quality_profile" in item and item.get("quality_profile") is not None else None
             coverage_level = str(item.get("coverage_level", "real"))
             timeout_seconds = None if item.get("timeout_seconds") is None else float(item["timeout_seconds"])
             cases.append(
@@ -219,6 +221,7 @@ class BenchmarkRunner:
                     auto_refine_dry_run_only=auto_refine_dry_run_only,
                     fail_thresholds=fail_thresholds,
                     regression_tolerances=regression_tolerances,
+                    quality_profile=quality_profile,
                     coverage_level=coverage_level,
                     timeout_seconds=timeout_seconds,
                 )
@@ -227,6 +230,38 @@ class BenchmarkRunner:
 
     def discover_cases(self, manifest_path: str | Path) -> tuple[BenchmarkCase, ...]:
         return self.load_manifest(manifest_path)
+
+    def load_quality_profiles(self, profile_path: str | Path) -> dict[str, dict[str, Any]]:
+        path = Path(profile_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("quality profile payload must be an object")
+        return {
+            str(key): dict(value)
+            for key, value in payload.items()
+            if isinstance(value, dict)
+        }
+
+    def apply_quality_profile(
+        self,
+        case: BenchmarkCase,
+        profiles: Mapping[str, Mapping[str, Any]],
+    ) -> BenchmarkCase:
+        profile_name = case.quality_profile
+        if profile_name is None:
+            return case
+        profile = profiles.get(profile_name)
+        if profile is None:
+            return case
+        thresholds = profile.get("recommended_thresholds")
+        if not isinstance(thresholds, Mapping):
+            return case
+        merged_thresholds = dict(case.fail_thresholds)
+        for key in ("max_total_score", "max_edge_error", "max_complexity_score", "max_requires_external_decision_count"):
+            value = thresholds.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                merged_thresholds[key] = value
+        return replace(case, fail_thresholds=merged_thresholds)
 
     def run_case(
         self,
@@ -827,6 +862,7 @@ class BenchmarkRunner:
             "auto_refine_dry_run_only": case.auto_refine_dry_run_only,
             "fail_thresholds": dict(case.fail_thresholds),
             "regression_tolerances": dict(case.regression_tolerances),
+            "quality_profile": case.quality_profile,
             "coverage_level": case.coverage_level,
             "timeout_seconds": case.timeout_seconds,
         }
@@ -847,6 +883,7 @@ class BenchmarkRunner:
             auto_refine_dry_run_only=bool(payload.get("auto_refine_dry_run_only", False)),
             fail_thresholds=self._coerce_numeric_dict(payload.get("fail_thresholds")),
             regression_tolerances=self._coerce_numeric_dict(payload.get("regression_tolerances")),
+            quality_profile=str(payload["quality_profile"]) if payload.get("quality_profile") is not None else None,
             coverage_level=str(payload.get("coverage_level", "real")),
             timeout_seconds=None if payload.get("timeout_seconds") is None else float(payload["timeout_seconds"]),
         )
@@ -1106,6 +1143,10 @@ class BenchmarkRunner:
     ) -> float | int | None:
         if threshold_name == "max_total_score":
             return metrics["total_score"]
+        if threshold_name == "max_edge_error":
+            return metrics["edge_error"]
+        if threshold_name == "max_complexity_score":
+            return metrics["complexity_score"]
         if threshold_name == "max_topology_errors":
             return metrics["topology_error_count"]
         if threshold_name == "max_self_intersections":
