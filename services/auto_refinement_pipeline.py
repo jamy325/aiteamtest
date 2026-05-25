@@ -11,6 +11,7 @@ from services.document_integrity import DocumentIntegrityValidator, IntegrityRep
 from services.engine_protocol import (
     DecisionKind,
     EngineStatus,
+    ExternalDecisionRecord,
     ExternalDecisionRequest,
     PolicyFeedback,
     RejectionMemoryItem,
@@ -93,6 +94,21 @@ class AutoRefinementPipelineResult:
 
     def to_json(self, *, json_exporter: JsonExporter | None = None) -> str:
         return json.dumps(self.to_dict(json_exporter=json_exporter), indent=2, sort_keys=True)
+
+    def external_decision_records(self) -> tuple[ExternalDecisionRecord, ...]:
+        records: list[ExternalDecisionRecord] = []
+        for decision in self.preview_decisions:
+            request = decision.external_decision_request
+            if request is None:
+                continue
+            preview_document = getattr(decision.preview_result, "preview_document", None)
+            records.append(
+                ExternalDecisionRecord(
+                    request=request,
+                    preview_document=preview_document,
+                )
+            )
+        return tuple(records)
 
 
 class AutoRefinementPipeline:

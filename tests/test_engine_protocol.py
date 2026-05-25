@@ -10,7 +10,10 @@ from services.engine_protocol import (
     DecisionPolicyResult,
     EngineResult,
     EngineStatus,
+    ExternalDecisionAction,
+    ExternalDecisionRecord,
     ExternalDecisionRequest,
+    ExternalDecisionStatus,
     PolicyFeedback,
     RejectionMemoryItem,
     RiskLevel,
@@ -198,3 +201,31 @@ def test_engine_result_round_trips_with_document_and_feedback_collections() -> N
     restored = EngineResult.from_dict(payload)
 
     assert restored == result
+
+
+def test_external_decision_record_round_trips_with_preview_document() -> None:
+    feedback = PolicyFeedback(
+        reason_code="requires_external_decision",
+        message="Need external consumer.",
+    )
+    record = ExternalDecisionRecord(
+        request=ExternalDecisionRequest(
+            decision_id="decision_queued_1",
+            reason="Await review.",
+            risk_flags=("high_risk",),
+            available_actions=(ExternalDecisionAction.APPLY.value, ExternalDecisionAction.REJECT.value, ExternalDecisionAction.DEFER.value),
+            command={"tool": "propose_replace_path_with_circle", "path_id": "path_1"},
+            candidate_id="candidate_1",
+            preview_summary={"score_after": 7.5},
+            policy_feedback=feedback,
+        ),
+        status=ExternalDecisionStatus.PENDING,
+        preview_document=_sample_document(),
+        created_at="2026-05-25T00:00:00+00:00",
+        updated_at="2026-05-25T00:00:00+00:00",
+    )
+
+    payload = record.to_dict()
+    restored = ExternalDecisionRecord.from_dict(payload)
+
+    assert restored == record
