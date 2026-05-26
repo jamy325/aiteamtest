@@ -3,8 +3,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from core.document import create_document
-from core.types import CoordinateSystem
+from core.document import add_path, add_segment, create_document
+from core.types import CoordinateSystem, Path as VectorPath, Segment, Style
+from services.distance_field_diff import DistanceFieldDiffResult
 from services.auto_refinement_pipeline import AutoRefinementPipelineResult, AutoRefinementReport
 from services.command_preview import CommandPreviewResult, ConstraintChangeSummary, ExportImpactSummary
 from services.engine_protocol import (
@@ -27,6 +28,63 @@ def _document(document_id: str = "engine_doc"):
         height=80.0,
         coordinate_system=CoordinateSystem(internal_space="vector"),
     )
+
+
+def _stroke_document(document_id: str = "engine_stroke_doc"):
+    document = create_document(
+        document_id=document_id,
+        width=120.0,
+        height=80.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {
+                            "contour_id": "binary_1",
+                            "points": [[10.0, 36.0], [110.0, 36.0], [110.0, 44.0], [10.0, 44.0]],
+                            "coordinate_space": "vector",
+                            "closed": True,
+                            "depth": 0,
+                        }
+                    ],
+                    "skeleton_contours": [
+                        {
+                            "contour_id": "skeleton_1",
+                            "points": [[10.0, 40.0], [110.0, 40.0]],
+                            "coordinate_space": "vector",
+                            "closed": False,
+                        }
+                    ],
+                }
+            }
+        },
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="stroke_path",
+            source="skeleton_contour",
+            segments=("stroke_seg",),
+            style=Style(stroke_width=6.0),
+            metadata={
+                "stroke_width_confidence": 0.9,
+                "endpoint_count": 2,
+                "junction_count": 1,
+                "branch_count": 3,
+            },
+        ),
+    )
+    document = add_segment(
+        document,
+        Segment(
+            segment_id="stroke_seg",
+            path_id="stroke_path",
+            type="line",
+            params={"start": [10.0, 40.0], "end": [110.0, 40.0]},
+        ),
+    )
+    return document
 
 
 def _preview_result(command_id: str, *, path_id: str = "path_1") -> CommandPreviewResult:
@@ -62,8 +120,9 @@ def _auto_result(
     legacy_decision: str = "auto_accept",
     report_status: str = EngineStatus.COMPLETED.value,
     dry_run_only: bool = False,
+    refined_document=None,
 ):
-    document = _document("engine_result_doc")
+    document = refined_document or _document("engine_result_doc")
     command = {
         "tool": "propose_replace_path_with_circle",
         "path_id": "path_1",
@@ -167,6 +226,7 @@ class _FakeMinimalPipeline:
     def __init__(self, result: MinimalPipelineResult) -> None:
         self.result = result
         self.calls: list[tuple[str, str]] = []
+        self.distance_field_diff_renderer = _FakeDistanceFieldDiffRenderer()
 
     def run_from_file(self, image_path, *, document_id="document_1", **kwargs):
         self.calls.append((str(image_path), document_id))
@@ -177,6 +237,20 @@ class _FakeMinimalPipeline:
 
     def export_distance_field_diff(self, document):
         return b"diff"
+
+
+class _FakeDistanceFieldDiffRenderer:
+    def render_diff(self, document):
+        stroke_mask_error = 0.125 if document.document_id == "engine_result_doc" else 0.25
+        return DistanceFieldDiffResult(
+            image=[],
+            missing_edge_error=0.0,
+            overdraw_error=0.0,
+            chamfer_error=0.0,
+            source_point_count=0,
+            vector_point_count=0,
+            stroke_mask_error=stroke_mask_error,
+        )
 
 
 class _RecordingExporter:
@@ -303,14 +377,14 @@ def test_vector_reconstruction_engine_has_no_ui_dependency() -> None:
 
 def test_vector_reconstruction_engine_run_artifact_bundle_propagates_export_mode_and_records_it() -> None:
     pipeline_result = MinimalPipelineResult(
-        document=_document("bundle_doc"),
+        document=_stroke_document("bundle_doc"),
         json_payload="{}",
         extracted_contours=None,  # type: ignore[arg-type]
         source_image="fake-image",
         debug_artifacts=None,
     )
     minimal_pipeline = _FakeMinimalPipeline(pipeline_result)
-    pipeline = _FakeAutoRefinementPipeline(_auto_result())
+    pipeline = _FakeAutoRefinementPipeline(_auto_result(refined_document=_stroke_document("engine_result_doc")))
     engine = VectorReconstructionEngine(
         minimal_pipeline=minimal_pipeline,
         auto_refinement_pipeline=pipeline,
@@ -327,5 +401,11 @@ def test_vector_reconstruction_engine_run_artifact_bundle_propagates_export_mode
     assert dxf_exporter.calls == [("engine_result_doc", "centerline")]
     assert bundle.metrics["export_mode"] == "centerline"
     assert bundle.metrics["processing_contour_source"] == "skeleton"
+    assert bundle.metrics["stroke_width"] == 6.0
+    assert bundle.metrics["stroke_width_confidence"] == 0.9
+    assert bundle.metrics["stroke_mask_error"] == 0.125
+    assert bundle.metrics["stroke_mask_error_score"] == 0.125
     assert bundle.decision_report["metadata"]["export_mode"] == "centerline"
     assert bundle.decision_report["metadata"]["processing_contour_source"] == "skeleton"
+    assert bundle.decision_report["stroke_summary"]["stroke_width"] == 6.0
+    assert bundle.decision_report["report"]["stroke_mask_error"] == 0.125

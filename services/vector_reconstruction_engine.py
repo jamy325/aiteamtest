@@ -11,6 +11,7 @@ from services.auto_refinement_pipeline import (
     AutoRefinementPipelineConfig,
     AutoRefinementPipelineResult,
 )
+from services.distance_field_diff import DistanceFieldDiffResult
 from services.engine_protocol import (
     AutonomyLevel,
     DecisionKind,
@@ -25,6 +26,7 @@ from services.dxf_exporter import DxfExporter
 from services.json_exporter import JsonExporter
 from services.minimal_pipeline import MinimalPipeline, MinimalPipelineResult
 from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy
+from services.scorer import Scorer
 from services.svg_exporter import ExportMode, SvgExporter
 
 
@@ -205,7 +207,17 @@ class VectorReconstructionEngine:
         source_image = pipeline_result.source_image
         if source_image is None:
             raise ValueError("pipeline result does not include source_image")
-        decision_report = engine_result.to_dict()
+        artifact_score_summary = self._artifact_score_summary(
+            before_document=pipeline_result.document,
+            after_document=final_document,
+        )
+        stroke_summary = self._stroke_summary(final_document, artifact_score_summary)
+        decision_report = self._bundle_decision_report(
+            engine_result=engine_result,
+            runtime_config=runtime_config,
+            artifact_score_summary=artifact_score_summary,
+            stroke_summary=stroke_summary,
+        )
         return VectorReconstructionArtifactBundle(
             engine_result=engine_result,
             pipeline_result=pipeline_result,
@@ -219,6 +231,8 @@ class VectorReconstructionEngine:
                 engine_result=engine_result,
                 document=final_document,
                 runtime_config=runtime_config,
+                artifact_score_summary=artifact_score_summary,
+                stroke_summary=stroke_summary,
             ),
         )
 
@@ -401,6 +415,8 @@ class VectorReconstructionEngine:
         engine_result: EngineResult,
         document: VectorDocument,
         runtime_config: VectorReconstructionEngineConfig,
+        artifact_score_summary: dict[str, Any],
+        stroke_summary: dict[str, Any],
     ) -> dict[str, Any]:
         report = dict(engine_result.report)
         return {
@@ -421,13 +437,116 @@ class VectorReconstructionEngine:
             "processed_skeleton_path_count": int(report.get("processing_summary", {}).get("processed_skeleton_path_count", 0)),
             "processing_warnings": list(report.get("processing_summary", {}).get("warnings", ())),
             "iteration_count": int(report.get("iteration_count", 0)),
-            "score_before": report.get("score_before"),
-            "score_after": report.get("score_after"),
+            "score_before": artifact_score_summary["score_before"],
+            "score_after": artifact_score_summary["score_after"],
             "decision_stats": dict(report.get("decision_stats", {})),
             "integrity": dict(report.get("integrity", {})),
             "unresolved_targets": list(report.get("unresolved_targets", ())),
+            "stroke_width": stroke_summary.get("stroke_width"),
+            "stroke_width_confidence": stroke_summary.get("stroke_width_confidence"),
+            "stroke_endpoint_count": stroke_summary.get("stroke_endpoint_count"),
+            "stroke_junction_count": stroke_summary.get("stroke_junction_count"),
+            "stroke_branch_count": stroke_summary.get("stroke_branch_count"),
+            "stroke_mask_error": artifact_score_summary.get("stroke_mask_error"),
+            "stroke_mask_error_score": artifact_score_summary.get("stroke_mask_error_score"),
             "errors": list(engine_result.errors),
         }
+
+    def _bundle_decision_report(
+        self,
+        *,
+        engine_result: EngineResult,
+        runtime_config: VectorReconstructionEngineConfig,
+        artifact_score_summary: dict[str, Any],
+        stroke_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        decision_report = engine_result.to_dict()
+        metadata = dict(decision_report.get("metadata", {}))
+        metadata.update(
+            {
+                "export_mode": runtime_config.export_mode,
+                "processing_contour_source": runtime_config.processing_contour_source,
+                **stroke_summary,
+            }
+        )
+        decision_report["metadata"] = metadata
+        decision_report["stroke_summary"] = dict(stroke_summary)
+        report = dict(decision_report.get("report", {}))
+        report.update(
+            {
+                "score_before": artifact_score_summary["score_before"],
+                "score_after": artifact_score_summary["score_after"],
+                "stroke_mask_error": artifact_score_summary.get("stroke_mask_error"),
+                "stroke_mask_error_score": artifact_score_summary.get("stroke_mask_error_score"),
+            }
+        )
+        decision_report["report"] = report
+        return decision_report
+
+    def _artifact_score_summary(
+        self,
+        *,
+        before_document: VectorDocument,
+        after_document: VectorDocument,
+    ) -> dict[str, Any]:
+        scorer = self._scorer()
+        before_diff = self._stroke_diff_result(before_document)
+        after_diff = self._stroke_diff_result(after_document)
+        before_score = scorer.score_document(
+            before_document,
+            stroke_mask_error=None if before_diff is None else before_diff.stroke_mask_error,
+        )
+        after_score = scorer.score_document(
+            after_document,
+            stroke_mask_error=None if after_diff is None else after_diff.stroke_mask_error,
+        )
+        return {
+            "score_before": before_score.total_score,
+            "score_after": after_score.total_score,
+            "stroke_mask_error": None if after_diff is None else after_diff.stroke_mask_error,
+            "stroke_mask_error_score": after_score.breakdown.stroke_mask_error_score,
+        }
+
+    def _stroke_diff_result(self, document: VectorDocument) -> DistanceFieldDiffResult | None:
+        renderer = getattr(self.minimal_pipeline, "distance_field_diff_renderer", None)
+        if renderer is None or not hasattr(renderer, "render_diff"):
+            return None
+        try:
+            result = renderer.render_diff(document)
+        except Exception:
+            return None
+        return result if isinstance(result, DistanceFieldDiffResult) else None
+
+    def _stroke_summary(
+        self,
+        document: VectorDocument,
+        artifact_score_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        stroke_paths = [path for path in document.paths if path.source == "skeleton_contour"]
+        widths = [
+            float(path.style.stroke_width)
+            for path in stroke_paths
+            if path.style is not None and float(path.style.stroke_width) > 0.0
+        ]
+        confidences = [
+            float(path.metadata["stroke_width_confidence"])
+            for path in stroke_paths
+            if "stroke_width_confidence" in path.metadata
+        ]
+        return {
+            "stroke_width": round(sum(widths) / len(widths), 4) if widths else None,
+            "stroke_width_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+            "stroke_endpoint_count": sum(int(path.metadata.get("endpoint_count", 0)) for path in stroke_paths),
+            "stroke_junction_count": sum(int(path.metadata.get("junction_count", 0)) for path in stroke_paths),
+            "stroke_branch_count": sum(int(path.metadata.get("branch_count", 0)) for path in stroke_paths),
+            "stroke_mask_error": artifact_score_summary.get("stroke_mask_error"),
+        }
+
+    def _scorer(self) -> Scorer:
+        candidate = getattr(self.auto_refinement_pipeline, "scorer", None)
+        if isinstance(candidate, Scorer):
+            return candidate
+        return Scorer()
 
 
 __all__ = [
