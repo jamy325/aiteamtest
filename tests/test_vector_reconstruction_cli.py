@@ -22,6 +22,12 @@ def _write_circle_image(image_path: Path) -> None:
     assert cv2.imwrite(str(image_path), image)
 
 
+def _write_rgba_black_line_image(image_path: Path) -> None:
+    image = np.full((96, 96, 4), 255, dtype=np.uint8)
+    cv2.line(image, (16, 48), (80, 48), (0, 0, 0, 255), thickness=5)
+    assert cv2.imwrite(str(image_path), image)
+
+
 def _bundle(document_id: str = "cli_doc") -> VectorReconstructionArtifactBundle:
     document = create_document(
         document_id=document_id,
@@ -230,3 +236,37 @@ def test_vector_reconstruction_cli_module_run_smoke(tmp_path: Path) -> None:
         "metrics.json",
     ):
         assert (output_dir / name).exists(), name
+
+
+def test_vector_reconstruction_cli_centerline_rgba_output_has_no_non_finite_tokens(tmp_path: Path) -> None:
+    input_path = tmp_path / "rgba_line.png"
+    _write_rgba_black_line_image(input_path)
+    output_dir = tmp_path / "bundle"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vector_reconstruction",
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--autonomy",
+            "autonomous_safe",
+            "--max-iterations",
+            "1",
+            "--export-mode",
+            "centerline",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    forbidden_tokens = ("NaN", "Infinity", "inf")
+    for name in ("document.json", "metrics.json", "decision_report.json", "output.svg", "output.dxf"):
+        payload = (output_dir / name).read_text(encoding="utf-8")
+        assert all(token not in payload for token in forbidden_tokens), name

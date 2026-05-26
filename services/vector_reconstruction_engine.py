@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import math
 from pathlib import Path
 from typing import Any
 
@@ -503,8 +504,8 @@ class VectorReconstructionEngine:
         return {
             "score_before": before_score.total_score,
             "score_after": after_score.total_score,
-            "stroke_mask_error": None if after_diff is None else after_diff.stroke_mask_error,
-            "stroke_mask_error_score": after_score.breakdown.stroke_mask_error_score,
+            "stroke_mask_error": self._finite_or_none(None if after_diff is None else after_diff.stroke_mask_error),
+            "stroke_mask_error_score": self._finite_or_none(after_score.breakdown.stroke_mask_error_score),
         }
 
     def _stroke_diff_result(self, document: VectorDocument) -> DistanceFieldDiffResult | None:
@@ -526,20 +527,22 @@ class VectorReconstructionEngine:
         widths = [
             float(path.style.stroke_width)
             for path in stroke_paths
-            if path.style is not None and float(path.style.stroke_width) > 0.0
+            if path.style is not None and math.isfinite(float(path.style.stroke_width)) and float(path.style.stroke_width) > 0.0
         ]
         confidences = [
             float(path.metadata["stroke_width_confidence"])
             for path in stroke_paths
-            if "stroke_width_confidence" in path.metadata
+            if "stroke_width_confidence" in path.metadata and math.isfinite(float(path.metadata["stroke_width_confidence"]))
         ]
         return {
-            "stroke_width": round(sum(widths) / len(widths), 4) if widths else None,
-            "stroke_width_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+            "stroke_width": self._finite_or_none(round(sum(widths) / len(widths), 4) if widths else None),
+            "stroke_width_confidence": self._finite_or_none(
+                round(sum(confidences) / len(confidences), 4) if confidences else None
+            ),
             "stroke_endpoint_count": sum(int(path.metadata.get("endpoint_count", 0)) for path in stroke_paths),
             "stroke_junction_count": sum(int(path.metadata.get("junction_count", 0)) for path in stroke_paths),
             "stroke_branch_count": sum(int(path.metadata.get("branch_count", 0)) for path in stroke_paths),
-            "stroke_mask_error": artifact_score_summary.get("stroke_mask_error"),
+            "stroke_mask_error": self._finite_or_none(artifact_score_summary.get("stroke_mask_error")),
         }
 
     def _scorer(self) -> Scorer:
@@ -547,6 +550,12 @@ class VectorReconstructionEngine:
         if isinstance(candidate, Scorer):
             return candidate
         return Scorer()
+
+    def _finite_or_none(self, value: float | None) -> float | None:
+        if value is None:
+            return None
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
 
 
 __all__ = [

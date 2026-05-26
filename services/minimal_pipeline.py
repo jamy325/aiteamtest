@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -19,7 +20,7 @@ from services.renderer import Renderer
 from services.resampler import Resampler
 from services.simple_vectorizer import InitialSegmentType, SimpleVectorizer
 from services.skeleton_graph import SkeletonJunction
-from services.stroke_width_estimator import StrokeWidthEstimator
+from services.stroke_width_estimator import StrokeWidthEstimate, StrokeWidthEstimator
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +373,7 @@ class MinimalPipeline:
             if contour is None:
                 continue
             estimate = self.stroke_width_estimator.estimate_for_contour(document, contour, image)
+            estimate = self._finite_stroke_estimate(estimate)
             style = path.style or Style()
             style_metadata = dict(style.metadata)
             style_metadata.update(
@@ -403,6 +405,25 @@ class MinimalPipeline:
                 metadata=metadata,
             )
         return updated(document, paths=tuple(updated_paths))
+
+    def _finite_stroke_estimate(self, estimate: StrokeWidthEstimate) -> StrokeWidthEstimate:
+        stroke_width = float(estimate.stroke_width)
+        confidence = float(estimate.confidence)
+        if math.isfinite(stroke_width) and stroke_width > 0.0:
+            safe_stroke_width = stroke_width
+            safe_reason = estimate.reason
+        else:
+            estimator_config = getattr(self.stroke_width_estimator, "config", None)
+            fallback_width = getattr(estimator_config, "max_default_stroke_width", 1.0)
+            safe_stroke_width = float(fallback_width)
+            safe_reason = "non_finite_stroke_width_guard"
+        safe_confidence = confidence if math.isfinite(confidence) and 0.0 <= confidence <= 1.0 else 0.0
+        return StrokeWidthEstimate(
+            stroke_width=safe_stroke_width,
+            confidence=safe_confidence,
+            reason=safe_reason,
+            sample_count=max(0, int(estimate.sample_count)),
+        )
 
 
 __all__ = ["MinimalPipeline", "MinimalPipelineResult"]

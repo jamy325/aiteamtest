@@ -290,7 +290,7 @@ class SvgExporter:
 
     def _apply_style(self, element: ET.Element, style: Style, *, path_source: str | None = None) -> None:
         if path_source == "skeleton_contour":
-            stroke_width = float(style.stroke_width) if float(style.stroke_width) > 0.0 else 1.0
+            stroke_width = self._safe_stroke_width(style.stroke_width, default=1.0)
             stroke_value = self._color(style.stroke_color) if style.stroke_color is not None else "#000000"
             element.set("fill", "none")
             element.set("stroke", stroke_value)
@@ -306,7 +306,7 @@ class SvgExporter:
         has_fill = style.fill_color is not None
         has_stroke_color = style.stroke_color is not None
         fill_value = "none" if style.fill_color is None else self._color(style.fill_color)
-        stroke_width = float(style.stroke_width)
+        stroke_width = self._safe_stroke_width(style.stroke_width, default=0.0)
 
         if has_stroke_color:
             stroke_value = self._color(style.stroke_color)
@@ -335,12 +335,12 @@ class SvgExporter:
         stroke_widths = [
             float(path.style.stroke_width)
             for path in stroke_paths
-            if path.style is not None and float(path.style.stroke_width) > 0.0
+            if path.style is not None and math.isfinite(float(path.style.stroke_width)) and float(path.style.stroke_width) > 0.0
         ]
         confidences = [
             float(path.metadata["stroke_width_confidence"])
             for path in stroke_paths
-            if "stroke_width_confidence" in path.metadata
+            if "stroke_width_confidence" in path.metadata and math.isfinite(float(path.metadata["stroke_width_confidence"]))
         ]
         endpoint_count = sum(int(path.metadata.get("endpoint_count", 0)) for path in stroke_paths)
         junction_count = sum(int(path.metadata.get("junction_count", 0)) for path in stroke_paths)
@@ -369,8 +369,15 @@ class SvgExporter:
 
     @staticmethod
     def _fmt(value: float) -> str:
+        if not math.isfinite(float(value)):
+            return "0"
         text = f"{float(value):.6f}".rstrip("0").rstrip(".")
         return text if text else "0"
+
+    @staticmethod
+    def _safe_stroke_width(value: float, *, default: float) -> float:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) and parsed > 0.0 else float(default)
 
     @staticmethod
     def _color(color: tuple[int, int, int]) -> str:
