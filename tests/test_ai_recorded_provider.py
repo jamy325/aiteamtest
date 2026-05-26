@@ -97,6 +97,29 @@ def _invalid_schema_response() -> dict[str, object]:
     }
 
 
+def _write_recorded_fixture(
+    fixture_path: Path,
+    *,
+    provider_name: str,
+    model: str,
+    request_fingerprint: str,
+    response: dict[str, object],
+) -> None:
+    fixture_path.write_text(
+        json.dumps(
+            {
+                "provider_name": provider_name,
+                "model": model,
+                "request_fingerprint": request_fingerprint,
+                "recorded_at": "2026-01-01T00:00:00+00:00",
+                "prompt_instructions_sha256": "abc",
+                "response": response,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_recorded_provider_record_writes_fixture_and_replay_hits(tmp_path: Path) -> None:
     review_input = _review_input_with_images(tmp_path)
     prompt = "Test prompt\n\nReview input:\n{}"
@@ -187,18 +210,12 @@ def test_recorded_provider_replay_uses_existing_schema_validation(tmp_path: Path
     prompt = build_review_prompt(review_input)
     fingerprint = build_recorded_request_fingerprint(prompt, review_input)
     fixture_path = tmp_path / "invalid.json"
-    fixture_path.write_text(
-        json.dumps(
-            {
-                "provider_name": "siliconflow",
-                "model": "Qwen/Qwen2.5-VL-7B-Instruct",
-                "request_fingerprint": fingerprint,
-                "recorded_at": "2026-01-01T00:00:00+00:00",
-                "prompt_instructions_sha256": "abc",
-                "response": _invalid_schema_response(),
-            }
-        ),
-        encoding="utf-8",
+    _write_recorded_fixture(
+        fixture_path,
+        provider_name="siliconflow",
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        request_fingerprint=fingerprint,
+        response=_invalid_schema_response(),
     )
     adapter = RecordedVisionProvider(
         provider_name="siliconflow",
@@ -216,18 +233,12 @@ def test_ai_provider_factory_supports_recorded_replay_without_live_api_key(tmp_p
     prompt = build_review_prompt(review_input)
     fingerprint = build_recorded_request_fingerprint(prompt, review_input)
     fixture_path = tmp_path / "openai-recorded.json"
-    fixture_path.write_text(
-        json.dumps(
-            {
-                "provider_name": "openai",
-                "model": "gpt-4.1-mini",
-                "request_fingerprint": fingerprint,
-                "recorded_at": "2026-01-01T00:00:00+00:00",
-                "prompt_instructions_sha256": "abc",
-                "response": _valid_response(),
-            }
-        ),
-        encoding="utf-8",
+    _write_recorded_fixture(
+        fixture_path,
+        provider_name="openai",
+        model="gpt-4.1-mini",
+        request_fingerprint=fingerprint,
+        response=_valid_response(),
     )
 
     adapter = create_vision_adapter(
@@ -239,6 +250,52 @@ def test_ai_provider_factory_supports_recorded_replay_without_live_api_key(tmp_p
     output = AIReviewService(adapter=adapter).run_review(review_input)
 
     assert output.summary == "Recorded provider review succeeded."
+
+
+def test_recorded_provider_detects_provider_mismatch_with_explicit_fixture_path(tmp_path: Path) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    prompt = build_review_prompt(review_input)
+    fingerprint = build_recorded_request_fingerprint(prompt, review_input)
+    fixture_path = tmp_path / "provider-mismatch.json"
+    _write_recorded_fixture(
+        fixture_path,
+        provider_name="openai",
+        model="gpt-4.1-mini",
+        request_fingerprint=fingerprint,
+        response=_valid_response(),
+    )
+    provider = RecordedVisionProvider(
+        provider_name="gemini",
+        model="gpt-4.1-mini",
+        mode="replay",
+        fixture_path=fixture_path,
+    )
+
+    with pytest.raises(ValueError, match="provider mismatch"):
+        provider.review(prompt, review_input)
+
+
+def test_recorded_provider_detects_model_mismatch_with_explicit_fixture_path(tmp_path: Path) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    prompt = build_review_prompt(review_input)
+    fingerprint = build_recorded_request_fingerprint(prompt, review_input)
+    fixture_path = tmp_path / "model-mismatch.json"
+    _write_recorded_fixture(
+        fixture_path,
+        provider_name="openai",
+        model="gpt-4.1-mini",
+        request_fingerprint=fingerprint,
+        response=_valid_response(),
+    )
+    provider = RecordedVisionProvider(
+        provider_name="openai",
+        model="gpt-4.1",
+        mode="replay",
+        fixture_path=fixture_path,
+    )
+
+    with pytest.raises(ValueError, match="model mismatch"):
+        provider.review(prompt, review_input)
 
 
 def test_ai_provider_factory_record_mode_requires_explicit_live_enable(tmp_path: Path) -> None:

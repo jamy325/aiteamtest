@@ -139,6 +139,18 @@ class RecordedVisionProvider(VisionReviewAdapter):
         response = payload.get("response")
         if not isinstance(response, dict):
             raise ValueError(f"Recorded AI fixture response must be a JSON object: {fixture_path}")
+        recorded_provider = str(payload.get("provider_name", "")).strip().lower()
+        if recorded_provider != self.provider_name:
+            raise ValueError(
+                "Recorded AI fixture provider mismatch: "
+                f"expected {self.provider_name}, found {recorded_provider}"
+            )
+        recorded_model = str(payload.get("model", ""))
+        if recorded_model != self.model:
+            raise ValueError(
+                "Recorded AI fixture model mismatch: "
+                f"expected {self.model}, found {recorded_model}"
+            )
         recorded_fingerprint = payload.get("request_fingerprint")
         if recorded_fingerprint != expected_fingerprint:
             raise ValueError(
@@ -146,8 +158,8 @@ class RecordedVisionProvider(VisionReviewAdapter):
                 f"expected {expected_fingerprint}, found {recorded_fingerprint}"
             )
         return RecordedFixtureMetadata(
-            provider_name=str(payload.get("provider_name", self.provider_name)),
-            model=str(payload.get("model", self.model)),
+            provider_name=recorded_provider,
+            model=recorded_model,
             request_fingerprint=str(recorded_fingerprint),
             recorded_at=str(payload.get("recorded_at", "")),
             prompt_instructions_sha256=str(payload.get("prompt_instructions_sha256", "")),
