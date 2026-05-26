@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from typing import Any
 
@@ -22,7 +22,7 @@ from services.minimal_pipeline import MinimalPipelineResult
 from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy, PreviewDecision, PreviewPolicyResult
 from services.proposed_command_planner import ProposedCommandPlanner
 from services.scorer import Scorer
-from services.shape_candidate_detector import ShapeCandidate, ShapeCandidateDetector
+from services.shape_candidate_detector import ProcessingContourSource, ShapeCandidate, ShapeCandidateDetector
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +30,7 @@ class AutoRefinementPipelineConfig:
     target_types: tuple[ShapeCandidateTargetType, ...] = ()
     dry_run_only: bool = False
     evaluate_batch_commands: bool = False
+    processing_contour_source: ProcessingContourSource = "all"
     max_iterations: int = 3
     max_proposals_per_round: int = 8
     improvement_epsilon: float = 0.1
@@ -47,6 +48,7 @@ class AutoRefinementReport:
     score_after: float
     integrity: dict[str, Any]
     dry_run_only: bool
+    processing_summary: dict[str, Any] = field(default_factory=lambda: _default_processing_summary())
     target_types: tuple[str, ...] = ()
     status: str = EngineStatus.COMPLETED.value
     iteration_count: int = 1
@@ -60,6 +62,7 @@ class AutoRefinementReport:
             "candidate_stats": json.loads(json.dumps(self.candidate_stats)),
             "command_stats": json.loads(json.dumps(self.command_stats)),
             "decision_stats": dict(self.decision_stats),
+            "processing_summary": json.loads(json.dumps(self.processing_summary)),
             "score_before": self.score_before,
             "score_after": self.score_after,
             "integrity": json.loads(json.dumps(self.integrity)),
@@ -72,6 +75,18 @@ class AutoRefinementReport:
             "forbidden_repeated_commands": list(self.forbidden_repeated_commands),
             "unresolved_targets": list(self.unresolved_targets),
         }
+
+
+def _default_processing_summary() -> dict[str, Any]:
+    return {
+        "processing_contour_source": "all",
+        "processed_path_count": 0,
+        "processed_binary_path_count": 0,
+        "processed_skeleton_path_count": 0,
+        "available_binary_path_count": 0,
+        "available_skeleton_path_count": 0,
+        "warnings": [],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +185,11 @@ class AutoRefinementPipeline:
         effective_dry_run = self.config.dry_run_only if dry_run_only is None else bool(dry_run_only)
 
         score_before = self.scorer.score_document(document).total_score
-        detected_candidates = self.shape_candidate_detector.detect_candidates(document)
+        processing_summary = self._processing_summary(document)
+        detected_candidates = self.shape_candidate_detector.detect_candidates(
+            document,
+            contour_source=self.config.processing_contour_source,
+        )
         candidates = self._filter_candidates(detected_candidates, selected_target_types)
         proposed_commands = self.proposed_command_planner.plan_commands(document, candidates)
         evaluation_commands = self._evaluation_commands(proposed_commands)
@@ -183,6 +202,7 @@ class AutoRefinementPipeline:
             candidates=candidates,
             proposed_commands=proposed_commands,
             preview_result=policy_result,
+            processing_summary=processing_summary,
             score_before=score_before,
             score_after=score_after,
             integrity_report=integrity_report,
@@ -225,7 +245,11 @@ class AutoRefinementPipeline:
 
         for iteration in range(1, self.config.max_iterations + 1):
             iteration_count = iteration
-            detected_candidates = self.shape_candidate_detector.detect_candidates(current_document)
+            processing_summary = self._processing_summary(current_document)
+            detected_candidates = self.shape_candidate_detector.detect_candidates(
+                current_document,
+                contour_source=self.config.processing_contour_source,
+            )
             latest_candidates = self._filter_candidates(detected_candidates, selected_target_types)
             algorithm_commands = self.proposed_command_planner.plan_commands(current_document, latest_candidates)
             review_input = self._build_ai_review_input(
@@ -312,6 +336,7 @@ class AutoRefinementPipeline:
                     if decision.decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION
                 ),
             ),
+            processing_summary=processing_summary,
             score_before=self.scorer.score_document(initial_document).total_score,
             score_after=current_score,
             integrity_report=integrity_report,
@@ -356,6 +381,7 @@ class AutoRefinementPipeline:
         candidates: tuple[ShapeCandidate, ...],
         proposed_commands: tuple[dict[str, Any], ...],
         preview_result: PreviewPolicyResult,
+        processing_summary: dict[str, Any],
         score_before: float,
         score_after: float,
         integrity_report: IntegrityReport,
@@ -403,6 +429,7 @@ class AutoRefinementPipeline:
             candidate_stats=candidate_stats,
             command_stats=command_stats,
             decision_stats=decision_stats,
+            processing_summary=processing_summary,
             score_before=score_before,
             score_after=score_after,
             integrity=integrity,
@@ -455,6 +482,34 @@ class AutoRefinementPipeline:
             self_intersection_count=_aggregate_self_intersection_count(document),
             coordinate_system=self.json_exporter.export_to_dict(document)["coordinate_system"],
         )
+
+    def _processing_summary(self, document: VectorDocument) -> dict[str, Any]:
+        available_binary_path_count = sum(1 for path in document.paths if path.source == "binary_contour")
+        available_skeleton_path_count = sum(1 for path in document.paths if path.source == "skeleton_contour")
+        if self.config.processing_contour_source == "binary":
+            processed_binary_path_count = available_binary_path_count
+            processed_skeleton_path_count = 0
+        elif self.config.processing_contour_source == "skeleton":
+            processed_binary_path_count = 0
+            processed_skeleton_path_count = available_skeleton_path_count
+        else:
+            processed_binary_path_count = available_binary_path_count
+            processed_skeleton_path_count = available_skeleton_path_count
+        processed_path_count = processed_binary_path_count + processed_skeleton_path_count
+        warnings: list[str] = []
+        if processed_path_count == 0:
+            warnings.append(
+                f"no paths matched processing_contour_source={self.config.processing_contour_source}"
+            )
+        return {
+            "processing_contour_source": self.config.processing_contour_source,
+            "processed_path_count": processed_path_count,
+            "processed_binary_path_count": processed_binary_path_count,
+            "processed_skeleton_path_count": processed_skeleton_path_count,
+            "available_binary_path_count": available_binary_path_count,
+            "available_skeleton_path_count": available_skeleton_path_count,
+            "warnings": warnings,
+        }
 
     def _limit_commands(
         self,

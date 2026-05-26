@@ -44,6 +44,59 @@ def _rectangle_document():
     return document
 
 
+def _mixed_source_rectangle_document():
+    document = create_document(
+        document_id="doc_mixed_pipeline",
+        width=240.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="binary_rect_path",
+            closed=True,
+            source="binary_contour",
+            segments=("binary_0", "binary_1", "binary_2", "binary_3"),
+        ),
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="skeleton_rect_path",
+            closed=True,
+            source="skeleton_contour",
+            segments=("skeleton_0", "skeleton_1", "skeleton_2", "skeleton_3"),
+        ),
+    )
+    binary_corners = ((20.0, 20.0), (100.0, 20.0), (100.0, 80.0), (20.0, 80.0))
+    skeleton_corners = ((120.0, 20.0), (200.0, 20.0), (200.0, 80.0), (120.0, 80.0))
+    for index in range(4):
+        binary_start = binary_corners[index]
+        binary_end = binary_corners[(index + 1) % 4]
+        skeleton_start = skeleton_corners[index]
+        skeleton_end = skeleton_corners[(index + 1) % 4]
+        document = add_segment(
+            document,
+            Segment(
+                segment_id=f"binary_{index}",
+                path_id="binary_rect_path",
+                type="line",
+                params={"start": [binary_start[0], binary_start[1]], "end": [binary_end[0], binary_end[1]]},
+            ),
+        )
+        document = add_segment(
+            document,
+            Segment(
+                segment_id=f"skeleton_{index}",
+                path_id="skeleton_rect_path",
+                type="line",
+                params={"start": [skeleton_start[0], skeleton_start[1]], "end": [skeleton_end[0], skeleton_end[1]]},
+            ),
+        )
+    return document
+
+
 def _policy_preview_result(
     *,
     command_id: str,
@@ -80,7 +133,7 @@ def _policy_preview_result(
 
 
 class _EmptyDetector:
-    def detect_candidates(self, document):
+    def detect_candidates(self, document, *, contour_source="all"):
         return ()
 
 
@@ -181,6 +234,40 @@ def test_auto_refinement_pipeline_rectangle_document_generates_line_or_batch_com
     assert result.preview_decisions
     assert result.report.command_stats["total"] >= 1
     assert result.report.decision_stats["auto_accept"] + result.report.decision_stats["user_confirm"] + result.report.decision_stats["reject"] == len(result.preview_decisions)
+
+
+def test_auto_refinement_pipeline_centerline_mode_only_processes_skeleton_paths() -> None:
+    document = _mixed_source_rectangle_document()
+    result = AutoRefinementPipeline(
+        config=AutoRefinementPipelineConfig(processing_contour_source="skeleton"),
+    ).run(
+        document,
+        target_types=("rectangle", "line"),
+    )
+
+    assert result.candidates
+    assert {candidate.path_id for candidate in result.candidates} == {"skeleton_rect_path"}
+    assert {command["path_id"] for command in result.proposed_commands if "path_id" in command} == {"skeleton_rect_path"}
+    assert result.report.processing_summary["processing_contour_source"] == "skeleton"
+    assert result.report.processing_summary["processed_binary_path_count"] == 0
+    assert result.report.processing_summary["processed_skeleton_path_count"] == 1
+
+
+def test_auto_refinement_pipeline_outline_mode_only_processes_binary_paths() -> None:
+    document = _mixed_source_rectangle_document()
+    result = AutoRefinementPipeline(
+        config=AutoRefinementPipelineConfig(processing_contour_source="binary"),
+    ).run(
+        document,
+        target_types=("rectangle", "line"),
+    )
+
+    assert result.candidates
+    assert {candidate.path_id for candidate in result.candidates} == {"binary_rect_path"}
+    assert {command["path_id"] for command in result.proposed_commands if "path_id" in command} == {"binary_rect_path"}
+    assert result.report.processing_summary["processing_contour_source"] == "binary"
+    assert result.report.processing_summary["processed_binary_path_count"] == 1
+    assert result.report.processing_summary["processed_skeleton_path_count"] == 0
 
 
 def test_auto_refinement_pipeline_dry_run_only_keeps_original_document_and_serializes() -> None:

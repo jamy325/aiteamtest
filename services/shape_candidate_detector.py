@@ -22,6 +22,8 @@ from services.refiner import (
 )
 from services.segment_sampler import SegmentSampler
 
+ProcessingContourSource = str
+
 
 @dataclass(frozen=True, slots=True)
 class ShapeCandidateDetectorConfig:
@@ -121,10 +123,17 @@ class ShapeCandidateDetector:
         self.circle_precise_fitter = PreciseCircleFitter()
         self.arc_precise_fitter = PreciseArcFitter()
 
-    def detect_candidates(self, document: VectorDocument) -> tuple[ShapeCandidate, ...]:
+    def detect_candidates(
+        self,
+        document: VectorDocument,
+        *,
+        contour_source: ProcessingContourSource = "all",
+    ) -> tuple[ShapeCandidate, ...]:
         candidates: list[ShapeCandidate] = []
 
         for path in document.paths:
+            if not _path_matches_processing_contour_source(path, contour_source):
+                continue
             segments = self._path_segments(document, path)
             if not segments:
                 continue
@@ -1073,4 +1082,14 @@ def _arc_angle_coverage(params: dict[str, object]) -> float:
     return sweep
 
 
-__all__ = ["ShapeCandidateDetector", "ShapeCandidateDetectorConfig"]
+def _path_matches_processing_contour_source(path: Path, contour_source: ProcessingContourSource) -> bool:
+    if contour_source == "all":
+        return True
+    if contour_source == "binary":
+        return path.source == "binary_contour"
+    if contour_source == "skeleton":
+        return path.source == "skeleton_contour"
+    raise ValueError(f"unsupported processing contour source: {contour_source}")
+
+
+__all__ = ["ProcessingContourSource", "ShapeCandidateDetector", "ShapeCandidateDetectorConfig"]
