@@ -10,10 +10,36 @@ from services.ai_adapters.gemini_provider import GeminiVisionAdapter
 from services.ai_adapters.mock import MockVisionAdapter
 from services.ai_adapters.openai_provider import OpenAIVisionAdapter
 from services.ai_adapters.siliconflow_provider import SiliconFlowVisionAdapter
+from services.ai_recorded_provider import DEFAULT_RECORDED_FIXTURE_DIR, RecordedVisionProvider
 
 
 def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
     normalized_provider = str(provider).strip().lower()
+    recorded_mode = kwargs.pop("recorded_mode", None)
+
+    if recorded_mode is not None:
+        normalized_mode = str(recorded_mode).strip().lower()
+        if normalized_mode not in {"record", "replay"}:
+            raise ValueError("recorded_mode must be `record` or `replay`")
+
+        fixture_path = kwargs.pop("fixture_path", None)
+        fixtures_dir = Path(kwargs.pop("fixtures_dir", DEFAULT_RECORDED_FIXTURE_DIR))
+        allow_live = bool(kwargs.pop("allow_live", False))
+        live_adapter = kwargs.pop("live_adapter", None)
+        model = str(kwargs.get("model") or "")
+
+        if normalized_mode == "record" and live_adapter is None:
+            live_adapter = create_vision_adapter(provider, **kwargs)
+
+        return RecordedVisionProvider(
+            provider_name=provider,
+            model=model or getattr(live_adapter, "model", "unknown-model"),
+            mode=normalized_mode,
+            live_adapter=live_adapter,
+            fixtures_dir=fixtures_dir,
+            fixture_path=fixture_path,
+            allow_live=allow_live,
+        )
 
     if normalized_provider == "mock":
         if "response" not in kwargs:

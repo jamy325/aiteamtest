@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from jsonschema import ValidationError
 
+from services.ai_adapters import create_vision_adapter as create_public_vision_adapter
 from services.ai_agent import AIReviewInput, AIReviewService, build_review_prompt
 from services.ai_provider_factory import create_vision_adapter
 from services.ai_recorded_provider import (
@@ -252,6 +253,30 @@ def test_ai_provider_factory_supports_recorded_replay_without_live_api_key(tmp_p
     assert output.summary == "Recorded provider review succeeded."
 
 
+def test_public_ai_adapters_factory_supports_recorded_replay_without_live_api_key(tmp_path: Path) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    prompt = build_review_prompt(review_input)
+    fingerprint = build_recorded_request_fingerprint(prompt, review_input)
+    fixture_path = tmp_path / "public-openai-recorded.json"
+    _write_recorded_fixture(
+        fixture_path,
+        provider_name="openai",
+        model="gpt-4.1-mini",
+        request_fingerprint=fingerprint,
+        response=_valid_response(),
+    )
+
+    adapter = create_public_vision_adapter(
+        "openai",
+        recorded_mode="replay",
+        model="gpt-4.1-mini",
+        fixture_path=fixture_path,
+    )
+    output = AIReviewService(adapter=adapter).run_review(review_input)
+
+    assert output.summary == "Recorded provider review succeeded."
+
+
 def test_recorded_provider_detects_provider_mismatch_with_explicit_fixture_path(tmp_path: Path) -> None:
     review_input = _review_input_with_images(tmp_path)
     prompt = build_review_prompt(review_input)
@@ -296,6 +321,24 @@ def test_recorded_provider_detects_model_mismatch_with_explicit_fixture_path(tmp
 
     with pytest.raises(ValueError, match="model mismatch"):
         provider.review(prompt, review_input)
+
+
+def test_recorded_provider_record_validates_schema_before_writing_fixture(tmp_path: Path) -> None:
+    review_input = _review_input_with_images(tmp_path)
+    fixtures_dir = tmp_path / "fixtures"
+    adapter = RecordedVisionProvider(
+        provider_name="openai",
+        model="gpt-4.1-mini",
+        mode="record",
+        live_adapter=_StubLiveAdapter(_invalid_schema_response()),
+        fixtures_dir=fixtures_dir,
+        allow_live=True,
+    )
+
+    with pytest.raises(ValidationError):
+        adapter.review(build_review_prompt(review_input), review_input)
+
+    assert not fixtures_dir.exists()
 
 
 def test_ai_provider_factory_record_mode_requires_explicit_live_enable(tmp_path: Path) -> None:

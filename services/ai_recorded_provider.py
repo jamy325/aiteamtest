@@ -101,7 +101,10 @@ class RecordedVisionProvider(VisionReviewAdapter):
         if self.live_adapter is None:
             raise ProviderConfigurationError("Recorded provider record mode requires a configured live adapter")
 
-        response = dict(self.live_adapter.review(prompt, review_input))
+        from services.ai_agent import normalize_ai_review_response, validate_ai_review_response
+
+        response = normalize_ai_review_response(self.live_adapter.review(prompt, review_input))
+        validate_ai_review_response(response)
         fixture = RecordedFixtureMetadata(
             provider_name=self.provider_name,
             model=self.model,
