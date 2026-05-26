@@ -71,8 +71,8 @@ Current quality gating combines:
 
 Seed quality profiles live in:
 
-- [configs/quality_profiles.json](/d:/works/curve-fitting-ai-agent/configs/quality_profiles.json)
-- [configs/release_candidate_quality_profile.sample.json](/d:/works/curve-fitting-ai-agent/configs/release_candidate_quality_profile.sample.json)
+- [configs/quality_profiles.json](../configs/quality_profiles.json)
+- [configs/release_candidate_quality_profile.sample.json](../configs/release_candidate_quality_profile.sample.json)
 
 These profiles are intentionally conservative templates. Manifest-level thresholds remain the source of truth for benchmark pass/fail overrides.
 
@@ -91,7 +91,7 @@ Recommended provider modes:
 
 Example provider template:
 
-- [configs/release_candidate_ai_provider.sample.json](/d:/works/curve-fitting-ai-agent/configs/release_candidate_ai_provider.sample.json)
+- [configs/release_candidate_ai_provider.sample.json](../configs/release_candidate_ai_provider.sample.json)
 
 Live record mode must be explicitly enabled. Default quickstart and default pytest must not require network access or real API keys.
 
@@ -99,7 +99,7 @@ Live record mode must be explicitly enabled. Default quickstart and default pyte
 
 Use the sample benchmark template as a release-candidate starting point:
 
-- [configs/release_candidate_benchmark.sample.json](/d:/works/curve-fitting-ai-agent/configs/release_candidate_benchmark.sample.json)
+- [configs/release_candidate_benchmark.sample.json](../configs/release_candidate_benchmark.sample.json)
 
 The acceptance suite writes per-case artifacts plus a suite summary. The regression suite compares current outputs against a committed baseline.
 
@@ -107,12 +107,12 @@ The acceptance suite writes per-case artifacts plus a suite summary. The regress
 
 Bundled lightweight inputs:
 
-- [samples/inputs/circle_quickstart.png](/d:/works/curve-fitting-ai-agent/samples/inputs/circle_quickstart.png)
-- [samples/inputs/ellipse_quickstart.png](/d:/works/curve-fitting-ai-agent/samples/inputs/ellipse_quickstart.png)
+- [samples/inputs/circle_quickstart.png](../samples/inputs/circle_quickstart.png)
+- [samples/inputs/ellipse_quickstart.png](../samples/inputs/ellipse_quickstart.png)
 
 Expected artifact notes:
 
-- [samples/expected_artifacts.md](/d:/works/curve-fitting-ai-agent/samples/expected_artifacts.md)
+- [samples/expected_artifacts.md](../samples/expected_artifacts.md)
 
 ## Known Limitations
 

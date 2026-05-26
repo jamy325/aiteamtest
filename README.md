@@ -77,11 +77,11 @@ The standard CLI is intentionally offline-first. It does not require network acc
 
 ## Sample Inputs And Configs
 
-- Sample inputs: [samples/inputs/circle_quickstart.png](/d:/works/curve-fitting-ai-agent/samples/inputs/circle_quickstart.png), [samples/inputs/ellipse_quickstart.png](/d:/works/curve-fitting-ai-agent/samples/inputs/ellipse_quickstart.png)
-- Expected artifact notes: [samples/expected_artifacts.md](/d:/works/curve-fitting-ai-agent/samples/expected_artifacts.md)
-- Quality profile template: [configs/release_candidate_quality_profile.sample.json](/d:/works/curve-fitting-ai-agent/configs/release_candidate_quality_profile.sample.json)
-- AI provider replay template: [configs/release_candidate_ai_provider.sample.json](/d:/works/curve-fitting-ai-agent/configs/release_candidate_ai_provider.sample.json)
-- Benchmark template: [configs/release_candidate_benchmark.sample.json](/d:/works/curve-fitting-ai-agent/configs/release_candidate_benchmark.sample.json)
+- Sample inputs: [samples/inputs/circle_quickstart.png](samples/inputs/circle_quickstart.png), [samples/inputs/ellipse_quickstart.png](samples/inputs/ellipse_quickstart.png)
+- Expected artifact notes: [samples/expected_artifacts.md](samples/expected_artifacts.md)
+- Quality profile template: [configs/release_candidate_quality_profile.sample.json](configs/release_candidate_quality_profile.sample.json)
+- AI provider replay template: [configs/release_candidate_ai_provider.sample.json](configs/release_candidate_ai_provider.sample.json)
+- Benchmark template: [configs/release_candidate_benchmark.sample.json](configs/release_candidate_benchmark.sample.json)
 
 ## Benchmarks
 
@@ -111,4 +111,4 @@ The repo supports provider-neutral AI review adapters, including recorded replay
 - `recorded_mode="replay"`: replay a recorded provider response without API keys
 - `recorded_mode="record"`: explicitly gated live record mode
 
-See [docs/ai_review.md](/d:/works/curve-fitting-ai-agent/docs/ai_review.md) and [docs/release_candidate.md](/d:/works/curve-fitting-ai-agent/docs/release_candidate.md) for the release-candidate packaging details.
+See [docs/ai_review.md](docs/ai_review.md) and [docs/release_candidate.md](docs/release_candidate.md) for the release-candidate packaging details.

@@ -42,6 +42,16 @@ def test_release_candidate_docs_reference_existing_samples_and_configs() -> None
     assert (ROOT / "samples" / "inputs" / "ellipse_quickstart.png").is_file()
 
 
+def test_release_candidate_docs_do_not_include_machine_local_absolute_links() -> None:
+    readme = _read_text(ROOT / "README.md")
+    release_doc = _read_text(ROOT / "docs" / "release_candidate.md")
+    combined = f"{readme}\n{release_doc}"
+
+    assert "/d:/works" not in combined.lower()
+    assert "c:/" not in combined.lower()
+    assert "file://" not in combined.lower()
+
+
 def test_release_candidate_sample_configs_are_valid_json() -> None:
     quality_profile = json.loads(_read_text(ROOT / "configs" / "release_candidate_quality_profile.sample.json"))
     ai_provider = json.loads(_read_text(ROOT / "configs" / "release_candidate_ai_provider.sample.json"))
