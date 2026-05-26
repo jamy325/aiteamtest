@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from core.document import add_path, add_segment, create_document
-from core.types import CoordinateSystem, Path as VectorPath, Segment
+from core.types import CoordinateSystem, Path as VectorPath, Segment, Style
 from services.distance_field_diff import DistanceFieldDiffOptions, DistanceFieldDiffRenderer
 
 
@@ -159,6 +159,57 @@ def _arc_diff_document() -> object:
     return document
 
 
+def _stroke_mask_document(*, stroke_width: float) -> object:
+    document = create_document(
+        document_id="doc_stroke_mask",
+        width=64.0,
+        height=64.0,
+        coordinate_system=CoordinateSystem(
+            unit="px",
+            precision=4,
+            view_box=(0.0, 0.0, 64.0, 64.0),
+        ),
+        metadata={
+            "pipeline": {
+                "source_contours": {
+                    "binary_contours": [
+                        {
+                            "contour_id": "binary_stroke_band",
+                            "points": [[8.0, 28.0], [56.0, 28.0], [56.0, 36.0], [8.0, 36.0]],
+                            "coordinate_space": "vector",
+                            "closed": True,
+                            "depth": 0,
+                        }
+                    ],
+                    "skeleton_contours": [
+                        {
+                            "contour_id": "skeleton_stroke_band",
+                            "points": [[8.0, 32.0], [56.0, 32.0]],
+                            "coordinate_space": "vector",
+                            "closed": False,
+                        }
+                    ],
+                }
+            }
+        },
+    )
+    path = VectorPath(
+        path_id="stroke_path",
+        source="skeleton_contour",
+        style=Style(stroke_width=stroke_width),
+        metadata={"stroke_semantic": "centerline"},
+    )
+    segment = Segment(
+        segment_id="segment_stroke",
+        path_id="stroke_path",
+        type="line",
+        params={"start": [8.0, 32.0], "end": [56.0, 32.0]},
+    )
+    document = add_path(document, path)
+    document = add_segment(document, segment)
+    return document
+
+
 def test_distance_field_diff_renderer_generates_missing_and_overdraw_image() -> None:
     document = _diff_document()
     renderer = DistanceFieldDiffRenderer()
@@ -219,6 +270,17 @@ def test_distance_field_diff_renderer_samples_arc_segments() -> None:
     assert result.vector_point_count > 2
     assert result.source_point_count == 6
     assert result.image[24, 44].sum() > 0 or result.image[25, 44].sum() > 0
+
+
+def test_distance_field_diff_renderer_reports_stroke_mask_error_for_centerline_width_mismatch() -> None:
+    renderer = DistanceFieldDiffRenderer()
+
+    matching = renderer.render_diff(_stroke_mask_document(stroke_width=8.0))
+    mismatched = renderer.render_diff(_stroke_mask_document(stroke_width=1.0))
+
+    assert matching.stroke_mask_error >= 0.0
+    assert mismatched.stroke_mask_error >= 0.0
+    assert matching.stroke_mask_error < mismatched.stroke_mask_error
 
 
 def test_distance_field_diff_renderer_does_not_mutate_document() -> None:

@@ -176,6 +176,10 @@ class HtmlQualityReportGenerator:
             self._metrics_table(metrics),
             "</section>",
             "<section>",
+            "<h2>Stroke Summary</h2>",
+            self._stroke_summary(metrics=metrics, output_document=output_document),
+            "</section>",
+            "<section>",
             "<h2>Decision Summary</h2>",
             self._decision_counts_block(decision_counts),
             "</section>",
@@ -364,6 +368,36 @@ class HtmlQualityReportGenerator:
                     value = len(value)
                 keys.append(f"<li>{escape(str(key))}: <strong>{escape(str(value))}</strong></li>")
         return "<ul>" + "".join(keys or ["<li>No document summary fields available.</li>"]) + "</ul>"
+
+    def _stroke_summary(self, *, metrics: Mapping[str, Any], output_document: Mapping[str, Any]) -> str:
+        metric_items: list[str] = []
+        for key in ("stroke_width", "stroke_width_confidence", "stroke_mask_error"):
+            if key in metrics:
+                metric_items.append(f"<li>{escape(key)}: <strong>{escape(str(metrics[key]))}</strong></li>")
+
+        paths = output_document.get("paths")
+        endpoint_count = 0
+        junction_count = 0
+        branch_count = 0
+        if isinstance(paths, list):
+            for path in paths:
+                if not isinstance(path, Mapping):
+                    continue
+                metadata = path.get("metadata")
+                if not isinstance(metadata, Mapping):
+                    continue
+                endpoint_count += int(metadata.get("endpoint_count", 0))
+                junction_count += int(metadata.get("junction_count", 0))
+                branch_count += int(metadata.get("branch_count", 0))
+
+        topology_items = [
+            f"<li>endpoint_count: <strong>{endpoint_count}</strong></li>",
+            f"<li>junction_count: <strong>{junction_count}</strong></li>",
+            f"<li>branch_count: <strong>{branch_count}</strong></li>",
+        ]
+        if not metric_items and endpoint_count == 0 and junction_count == 0 and branch_count == 0:
+            return "<p>No stroke summary available.</p>"
+        return "<ul>" + "".join(metric_items + topology_items) + "</ul>"
 
     def _load_json(self, path: Path, *, warnings: list[str], required: bool = True) -> Any:
         if not path.exists():

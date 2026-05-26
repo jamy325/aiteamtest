@@ -97,6 +97,7 @@ def test_scorer_penalizes_topology_errors_and_self_intersections() -> None:
         + result.breakdown.self_intersection_score
         + result.breakdown.shared_tangent_violation_score
         + result.breakdown.coordinate_consistency_score
+        + result.breakdown.stroke_mask_error_score
     )
 
 
@@ -216,6 +217,7 @@ def test_scorer_accumulates_shared_tangent_violation_score() -> None:
         + result.breakdown.self_intersection_score
         + result.breakdown.shared_tangent_violation_score
         + result.breakdown.coordinate_consistency_score
+        + result.breakdown.stroke_mask_error_score
     )
 
 
@@ -269,6 +271,26 @@ def test_scorer_accepts_edge_error_from_arc_sampling_pipeline() -> None:
 
     assert diff.vector_point_count > 0
     assert result.breakdown.edge_error_score == pytest.approx(diff.chamfer_error)
+
+
+def test_scorer_includes_optional_stroke_mask_error_term() -> None:
+    path = VectorPath(path_id="path_stroke_score")
+    segment = Segment("seg_1", "path_stroke_score", "line", params={"start": [0.0, 0.0], "end": [10.0, 0.0]})
+    document = _build_document(path=path, segments=(segment,))
+    scorer = Scorer()
+
+    result = scorer.score_document(document, stroke_mask_error=0.75)
+
+    assert result.breakdown.stroke_mask_error_score == pytest.approx(0.75)
+    assert result.total_score == pytest.approx(
+        result.breakdown.edge_error_score
+        + result.breakdown.geometry_complexity_score
+        + result.breakdown.topology_error_score
+        + result.breakdown.self_intersection_score
+        + result.breakdown.shared_tangent_violation_score
+        + result.breakdown.coordinate_consistency_score
+        + result.breakdown.stroke_mask_error_score
+    )
 
 
 def test_scorer_has_no_forbidden_dependencies() -> None:

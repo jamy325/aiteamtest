@@ -62,6 +62,7 @@ class SvgExporter:
             "skipped_path_count": len(skipped_paths),
             "exported_by_source": exported_by_source,
             "skipped_by_source": self._count_sources(skipped_paths),
+            "stroke_summary": self._stroke_summary(selected_paths),
             "warning": None if selected_paths else f"no paths selected for export_mode={export_mode}",
         }
 
@@ -288,6 +289,20 @@ class SvgExporter:
         return sweep
 
     def _apply_style(self, element: ET.Element, style: Style, *, path_source: str | None = None) -> None:
+        if path_source == "skeleton_contour":
+            stroke_width = float(style.stroke_width) if float(style.stroke_width) > 0.0 else 1.0
+            stroke_value = self._color(style.stroke_color) if style.stroke_color is not None else "#000000"
+            element.set("fill", "none")
+            element.set("stroke", stroke_value)
+            element.set("stroke-width", self._fmt(max(stroke_width, 0.0)))
+            element.set("stroke-linecap", str(style.metadata.get("stroke_linecap", "round")))
+            element.set("stroke-linejoin", str(style.metadata.get("stroke_linejoin", "round")))
+            if style.stroke_alpha is not None and style.stroke_color is not None:
+                element.set("stroke-opacity", self._fmt(style.stroke_alpha))
+            if not math.isclose(style.opacity, 1.0, abs_tol=1e-9):
+                element.set("opacity", self._fmt(style.opacity))
+            return
+
         has_fill = style.fill_color is not None
         has_stroke_color = style.stroke_color is not None
         fill_value = "none" if style.fill_color is None else self._color(style.fill_color)
@@ -314,6 +329,28 @@ class SvgExporter:
             element.set("stroke-opacity", self._fmt(style.stroke_alpha))
         if not math.isclose(style.opacity, 1.0, abs_tol=1e-9):
             element.set("opacity", self._fmt(style.opacity))
+
+    def _stroke_summary(self, paths: tuple[Path, ...]) -> dict[str, object]:
+        stroke_paths = [path for path in paths if path.source == "skeleton_contour"]
+        stroke_widths = [
+            float(path.style.stroke_width)
+            for path in stroke_paths
+            if path.style is not None and float(path.style.stroke_width) > 0.0
+        ]
+        confidences = [
+            float(path.metadata["stroke_width_confidence"])
+            for path in stroke_paths
+            if "stroke_width_confidence" in path.metadata
+        ]
+        endpoint_count = sum(int(path.metadata.get("endpoint_count", 0)) for path in stroke_paths)
+        junction_count = sum(int(path.metadata.get("junction_count", 0)) for path in stroke_paths)
+        return {
+            "stroke_path_count": len(stroke_paths),
+            "stroke_width": round(sum(stroke_widths) / len(stroke_widths), 4) if stroke_widths else None,
+            "stroke_width_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+            "endpoint_count": endpoint_count,
+            "junction_count": junction_count,
+        }
 
     def _view_box(self, document: VectorDocument, transformer: CoordinateTransformer) -> str:
         if document.coordinate_system.view_box is not None:

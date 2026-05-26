@@ -10,7 +10,7 @@ import numpy as np
 
 from core.coordinate import CoordinateTransformer
 from core.document import add_anchor, add_path, add_segment, create_document, to_json
-from core.types import CoordinateSystem, VectorDocument, updated
+from core.types import CoordinateSystem, Style, VectorDocument, updated
 from services.contour_extractor import BinaryContour, ContourExtractor, ExtractedContours
 from services.debug_artifacts import DebugArtifactExportResult, DebugArtifactExporter
 from services.distance_field_diff import DistanceFieldDiffRenderer
@@ -19,6 +19,7 @@ from services.renderer import Renderer
 from services.resampler import Resampler
 from services.simple_vectorizer import InitialSegmentType, SimpleVectorizer
 from services.skeleton_graph import SkeletonJunction
+from services.stroke_width_estimator import StrokeWidthEstimator
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,7 @@ class MinimalPipeline:
         json_exporter: JsonExporter | None = None,
         renderer: Renderer | None = None,
         distance_field_diff_renderer: DistanceFieldDiffRenderer | None = None,
+        stroke_width_estimator: StrokeWidthEstimator | None = None,
     ) -> None:
         self.coordinate_system = coordinate_system or CoordinateSystem()
         self.contour_extractor = contour_extractor or ContourExtractor(
@@ -51,6 +53,7 @@ class MinimalPipeline:
         self.json_exporter = json_exporter or JsonExporter()
         self.renderer = renderer or Renderer()
         self.distance_field_diff_renderer = distance_field_diff_renderer or DistanceFieldDiffRenderer()
+        self.stroke_width_estimator = stroke_width_estimator or StrokeWidthEstimator()
 
     def run(
         self,
@@ -147,6 +150,8 @@ class MinimalPipeline:
                     document = add_anchor(document, anchor)
                 for segment in vectorized.segments:
                     document = add_segment(document, segment)
+        document = self._annotate_skeleton_path_topology(document, extracted_contours.skeleton_junctions)
+        document = self._annotate_skeleton_stroke_semantics(document, extracted_contours, image)
         vectorize_elapsed_ms = (perf_counter() - vectorize_start) * 1000.0
 
         debug_artifacts: DebugArtifactExportResult | None = None
@@ -306,6 +311,98 @@ class MinimalPipeline:
                 for endpoint in junction.endpoints
             ],
         }
+
+    def _annotate_skeleton_path_topology(
+        self,
+        document: VectorDocument,
+        junctions: tuple[SkeletonJunction, ...],
+    ) -> VectorDocument:
+        updated_paths = list(document.paths)
+        skeleton_path_indexes = [
+            index
+            for index, path in enumerate(document.paths)
+            if path.source == "skeleton_contour"
+        ]
+        if not skeleton_path_indexes:
+            return document
+
+        for skeleton_index, path_index in enumerate(skeleton_path_indexes):
+            path = updated_paths[path_index]
+            junction_ids = sorted(
+                {
+                    junction.junction_id
+                    for junction in junctions
+                    for endpoint in junction.endpoints
+                    if endpoint.path_index == skeleton_index
+                }
+            )
+            linked_junction_endpoints = sum(
+                1
+                for junction in junctions
+                for endpoint in junction.endpoints
+                if endpoint.path_index == skeleton_index
+            )
+            endpoint_count = 0 if path.closed else max(0, 2 - linked_junction_endpoints)
+            metadata = dict(path.metadata)
+            metadata.update(
+                {
+                    "stroke_semantic": "centerline",
+                    "endpoint_count": endpoint_count,
+                    "junction_count": len(junction_ids),
+                    "branch_count": linked_junction_endpoints,
+                    "junction_ids": junction_ids,
+                }
+            )
+            updated_paths[path_index] = updated(path, metadata=metadata)
+        return updated(document, paths=tuple(updated_paths))
+
+    def _annotate_skeleton_stroke_semantics(
+        self,
+        document: VectorDocument,
+        extracted_contours: ExtractedContours,
+        image: np.ndarray,
+    ) -> VectorDocument:
+        contour_by_id = {contour.contour_id: contour for contour in extracted_contours.skeleton_contours}
+        updated_paths = list(document.paths)
+        for index, path in enumerate(document.paths):
+            if path.source != "skeleton_contour":
+                continue
+            contour_id = str(path.metadata.get("source_contour_id", ""))
+            contour = contour_by_id.get(contour_id)
+            if contour is None:
+                continue
+            estimate = self.stroke_width_estimator.estimate_for_contour(document, contour, image)
+            style = path.style or Style()
+            style_metadata = dict(style.metadata)
+            style_metadata.update(
+                {
+                    "stroke_width_confidence": estimate.confidence,
+                    "stroke_width_reason": estimate.reason,
+                    "stroke_sample_count": estimate.sample_count,
+                    "stroke_linecap": "round",
+                    "stroke_linejoin": "round",
+                }
+            )
+            metadata = dict(path.metadata)
+            metadata.update(
+                {
+                    "stroke_width": estimate.stroke_width,
+                    "stroke_width_confidence": estimate.confidence,
+                    "stroke_width_reason": estimate.reason,
+                    "stroke_sample_count": estimate.sample_count,
+                }
+            )
+            updated_paths[index] = updated(
+                path,
+                style=updated(
+                    style,
+                    fill_color=None,
+                    stroke_width=estimate.stroke_width,
+                    metadata=style_metadata,
+                ),
+                metadata=metadata,
+            )
+        return updated(document, paths=tuple(updated_paths))
 
 
 __all__ = ["MinimalPipeline", "MinimalPipelineResult"]
