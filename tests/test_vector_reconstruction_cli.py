@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -275,6 +276,61 @@ def test_vector_reconstruction_cli_module_run_smoke(tmp_path: Path) -> None:
         "metrics.json",
     ):
         assert (output_dir / name).exists(), name
+
+
+def test_vector_reconstruction_cli_file_provider_ai_review_uses_local_visual_context(tmp_path: Path) -> None:
+    input_path = tmp_path / "circle.png"
+    _write_circle_image(input_path)
+    output_dir = tmp_path / "bundle_ai"
+    response_path = tmp_path / "ai_response.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "summary": "Local visual review completed.",
+                "issues": [],
+                "proposed_commands": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = dict(**os.environ)
+    env["AI_PROVIDER"] = "file"
+    env["AI_FILE_RESPONSE_PATH"] = str(response_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vector_reconstruction",
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--max-iterations",
+            "1",
+            "--export-mode",
+            "centerline",
+            "--enable-ai-review",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    decision_report = json.loads((output_dir / "decision_report.json").read_text(encoding="utf-8"))
+    assert metrics["enable_ai_review"] is True
+    assert metrics["ai_provider"] == "file"
+    assert metrics["ai_status"] == "enabled"
+    assert metrics["ai_input_mode"] == "local_visual_context"
+    assert metrics["ai_prompt_char_count"] > 0
+    assert metrics["ai_review_job_count"] >= 1
+    assert metrics["ai_review_image_count"] >= 3
+    assert metrics["ai_review_crop_max_size_px"] == 512
+    assert "ai_review_summary" in decision_report
 
 
 def test_vector_reconstruction_cli_centerline_rgba_output_has_no_non_finite_tokens(tmp_path: Path) -> None:

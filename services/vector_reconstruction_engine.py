@@ -303,6 +303,7 @@ class VectorReconstructionEngine:
             integrity_validator=base_pipeline.integrity_validator,
             json_exporter=base_pipeline.json_exporter,
             config=configured_pipeline_config,
+            ai_review_context_builder=base_pipeline.ai_review_context_builder,
         )
 
     def _run_pipeline(
@@ -427,6 +428,7 @@ class VectorReconstructionEngine:
         stroke_summary: dict[str, Any],
     ) -> dict[str, Any]:
         report = dict(engine_result.report)
+        ai_review_summary = dict(report.get("ai_review_summary", {}))
         return {
             "status": engine_result.status.value,
             "document_id": document.document_id,
@@ -462,6 +464,15 @@ class VectorReconstructionEngine:
             "stroke_branch_count": stroke_summary.get("stroke_branch_count"),
             "stroke_mask_error": artifact_score_summary.get("stroke_mask_error"),
             "stroke_mask_error_score": artifact_score_summary.get("stroke_mask_error_score"),
+            "ai_input_mode": ai_review_summary.get("ai_input_mode", ""),
+            "ai_input_truncated": bool(ai_review_summary.get("ai_input_truncated", False)),
+            "ai_prompt_char_count": int(ai_review_summary.get("ai_prompt_char_count", 0) or 0),
+            "ai_max_prompt_chars": int(ai_review_summary.get("ai_max_prompt_chars", 0) or 0),
+            "ai_review_job_count": int(ai_review_summary.get("ai_review_job_count", 0) or 0),
+            "ai_review_image_count": int(ai_review_summary.get("ai_review_image_count", 0) or 0),
+            "ai_review_crop_max_size_px": int(ai_review_summary.get("ai_review_crop_max_size_px", 0) or 0),
+            "ai_review_candidate_count": int(ai_review_summary.get("ai_review_candidate_count", 0) or 0),
+            "ai_review_sampled_point_count": int(ai_review_summary.get("ai_review_sampled_point_count", 0) or 0),
             "errors": list(engine_result.errors),
         }
 
@@ -504,6 +515,8 @@ class VectorReconstructionEngine:
                 "stroke_mask_error_score": artifact_score_summary.get("stroke_mask_error_score"),
             }
         )
+        if "ai_review_summary" in report:
+            decision_report["ai_review_summary"] = dict(report.get("ai_review_summary", {}))
         decision_report["report"] = report
         return decision_report
 

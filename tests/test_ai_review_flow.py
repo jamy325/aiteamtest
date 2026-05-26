@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 from jsonschema import ValidationError
 
-from services.ai_agent import AIReviewInput, AIReviewService
+from services.ai_agent import (
+    AIReviewInput,
+    AIReviewInputTooLarge,
+    AIReviewService,
+    ProviderContextLimitExceeded,
+)
 from ui.canvas_widget import CanvasWidget
 from ui.main_window import MainWindow
 
@@ -199,6 +204,93 @@ def test_ai_review_input_payload_includes_rejection_feedback_context() -> None:
     assert "policy_feedback" in str(captured["prompt"])
     assert "rejection_memory" in str(captured["prompt"])
     assert "forbidden_repeated_commands" in str(captured["prompt"])
+
+
+def test_ai_review_input_supports_local_visual_context_budget() -> None:
+    captured: dict[str, object] = {}
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        captured["review_input"] = review_input
+        captured["prompt"] = prompt
+        return {"summary": "local visual review", "issues": [], "proposed_commands": []}
+
+    review_input = AIReviewInput(
+        original_image="original.png",
+        overlay_image="overlay.png",
+        distance_field_diff_image="diff.png",
+        vector_document_json={"document_id": "doc_local", "path_count": 1},
+        document_summary={"document_id": "doc_local", "path_count": 1},
+        review_jobs=(
+            {
+                "job_id": "job_1",
+                "path_id": "path_1",
+                "window_id": "path_1:window_1",
+                "crop_bbox": [0, 0, 64, 64],
+                "image_count": 3,
+                "truncated": False,
+            },
+        ),
+        prompt_budget={"max_prompt_chars": 4000, "max_crop_size_px": 512},
+        ai_input_mode="local_visual_context",
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    output = AIReviewService(responder=responder).run_review(review_input)
+
+    assert output.summary == "local visual review"
+    assert captured["review_input"] == review_input
+    assert "review_jobs" in str(captured["prompt"])
+    assert "local visual context" in str(captured["prompt"]).lower()
+
+
+def test_ai_review_service_rejects_oversized_prompt_before_adapter_call() -> None:
+    called = {"value": False}
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        called["value"] = True
+        return {"summary": "should not run", "issues": [], "proposed_commands": []}
+
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_large", "payload": "x" * 4000},
+        prompt_budget={"max_prompt_chars": 256},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    with pytest.raises(AIReviewInputTooLarge):
+        AIReviewService(responder=responder).run_review(review_input)
+
+    assert called["value"] is False
+
+
+def test_ai_review_service_wraps_provider_context_overflow_errors() -> None:
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        raise RuntimeError("context length exceeded for this model")
+
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_provider"},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    with pytest.raises(ProviderContextLimitExceeded):
+        AIReviewService(responder=responder).run_review(review_input)
 
 
 def test_ai_review_flow_rejects_invalid_schema_response() -> None:

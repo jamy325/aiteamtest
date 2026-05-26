@@ -122,6 +122,7 @@ def _auto_result(
     dry_run_only: bool = False,
     refined_document=None,
     proposed_commands: tuple[dict[str, object], ...] | None = None,
+    ai_review_summary: dict[str, object] | None = None,
 ):
     document = refined_document or _document("engine_result_doc")
     command = {
@@ -191,6 +192,7 @@ def _auto_result(
         rejection_memory=(),
         forbidden_repeated_commands=(),
         unresolved_targets=(),
+        ai_review_summary=ai_review_summary or {},
     )
     return AutoRefinementPipelineResult(
         refined_document=document,
@@ -436,6 +438,27 @@ def test_vector_reconstruction_engine_records_ai_review_metadata_and_command_cou
             legacy_decision="user_confirm",
             report_status=EngineStatus.REQUIRES_EXTERNAL_DECISION.value,
             proposed_commands=proposed_commands,
+            ai_review_summary={
+                "ai_input_mode": "local_visual_context",
+                "ai_input_truncated": False,
+                "ai_prompt_char_count": 1842,
+                "ai_max_prompt_chars": 120000,
+                "ai_review_job_count": 2,
+                "ai_review_image_count": 6,
+                "ai_review_crop_max_size_px": 512,
+                "ai_review_candidate_count": 2,
+                "ai_review_sampled_point_count": 0,
+                "review_jobs": [
+                    {
+                        "job_id": "review_job_1",
+                        "path_id": "path_ai",
+                        "window_id": "path_ai:window_1",
+                        "crop_bbox": [0, 0, 40, 40],
+                        "image_count": 3,
+                        "truncated": False,
+                    }
+                ],
+            },
         )
     )
     pipeline_result = MinimalPipelineResult(
@@ -465,6 +488,13 @@ def test_vector_reconstruction_engine_records_ai_review_metadata_and_command_cou
     assert bundle.metrics["ai_status"] == "recorded_replay"
     assert bundle.metrics["ai_proposed_count"] == 1
     assert bundle.metrics["algorithm_proposed_count"] == 1
+    assert bundle.metrics["ai_input_mode"] == "local_visual_context"
+    assert bundle.metrics["ai_input_truncated"] is False
+    assert bundle.metrics["ai_prompt_char_count"] == 1842
+    assert bundle.metrics["ai_review_job_count"] == 2
+    assert bundle.metrics["ai_review_image_count"] == 6
+    assert bundle.metrics["ai_review_crop_max_size_px"] == 512
+    assert bundle.decision_report["ai_review_summary"]["ai_input_mode"] == "local_visual_context"
     assert bundle.decision_report["metadata"]["ai_provider"] == "openai"
     assert bundle.decision_report["metadata"]["ai_model"] == "gpt-4.1-mini"
     assert bundle.decision_report["metadata"]["ai_status"] == "recorded_replay"
