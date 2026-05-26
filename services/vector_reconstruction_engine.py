@@ -25,7 +25,7 @@ from services.dxf_exporter import DxfExporter
 from services.json_exporter import JsonExporter
 from services.minimal_pipeline import MinimalPipeline, MinimalPipelineResult
 from services.preview_auto_accept_policy import PreviewAndAutoAcceptPolicy
-from services.svg_exporter import SvgExporter
+from services.svg_exporter import ExportMode, SvgExporter
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +42,7 @@ class VectorReconstructionEngineConfig:
     max_stalled_rounds: int = 1
     evaluate_batch_commands: bool = False
     document_id: str = "document_1"
+    export_mode: ExportMode = "all_debug"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ class VectorReconstructionEngine:
         max_iterations: int | None = None,
         dry_run_only: bool | None = None,
         enable_ai_review: bool | None = None,
+        export_mode: ExportMode | None = None,
     ) -> EngineResult:
         runtime_config = self._runtime_config(
             target_types=target_types,
@@ -92,6 +94,7 @@ class VectorReconstructionEngine:
             max_iterations=max_iterations,
             dry_run_only=dry_run_only,
             enable_ai_review=enable_ai_review,
+            export_mode=export_mode,
         )
         pipeline = self._configured_pipeline(runtime_config)
         result = self._run_pipeline(
@@ -111,6 +114,7 @@ class VectorReconstructionEngine:
         max_iterations: int | None = None,
         dry_run_only: bool | None = None,
         enable_ai_review: bool | None = None,
+        export_mode: ExportMode | None = None,
     ) -> EngineResult:
         runtime_config = self._runtime_config(
             target_types=target_types,
@@ -118,6 +122,7 @@ class VectorReconstructionEngine:
             max_iterations=max_iterations,
             dry_run_only=dry_run_only,
             enable_ai_review=enable_ai_review,
+            export_mode=export_mode,
         )
         pipeline = self._configured_pipeline(runtime_config)
         result = self._run_pipeline(
@@ -138,6 +143,7 @@ class VectorReconstructionEngine:
         max_iterations: int | None = None,
         dry_run_only: bool | None = None,
         enable_ai_review: bool | None = None,
+        export_mode: ExportMode | None = None,
     ) -> EngineResult:
         runtime_config = self._runtime_config(
             target_types=target_types,
@@ -145,6 +151,7 @@ class VectorReconstructionEngine:
             max_iterations=max_iterations,
             dry_run_only=dry_run_only,
             enable_ai_review=enable_ai_review,
+            export_mode=export_mode,
         )
         pipeline_result = self.minimal_pipeline.run_from_file(
             image_path,
@@ -157,6 +164,7 @@ class VectorReconstructionEngine:
             max_iterations=runtime_config.max_iterations,
             dry_run_only=runtime_config.dry_run_only,
             enable_ai_review=runtime_config.enable_ai_review,
+            export_mode=runtime_config.export_mode,
         )
 
     def run_artifact_bundle(
@@ -169,6 +177,7 @@ class VectorReconstructionEngine:
         max_iterations: int | None = None,
         dry_run_only: bool | None = None,
         enable_ai_review: bool | None = None,
+        export_mode: ExportMode | None = None,
     ) -> VectorReconstructionArtifactBundle:
         runtime_config = self._runtime_config(
             target_types=target_types,
@@ -176,6 +185,7 @@ class VectorReconstructionEngine:
             max_iterations=max_iterations,
             dry_run_only=dry_run_only,
             enable_ai_review=enable_ai_review,
+            export_mode=export_mode,
         )
         pipeline_result = self.minimal_pipeline.run_from_file(
             image_path,
@@ -188,6 +198,7 @@ class VectorReconstructionEngine:
             max_iterations=runtime_config.max_iterations,
             dry_run_only=runtime_config.dry_run_only,
             enable_ai_review=runtime_config.enable_ai_review,
+            export_mode=runtime_config.export_mode,
         )
         final_document = engine_result.document or pipeline_result.document
         source_image = pipeline_result.source_image
@@ -198,8 +209,8 @@ class VectorReconstructionEngine:
             engine_result=engine_result,
             pipeline_result=pipeline_result,
             document_json=self.json_exporter.export_document(final_document),
-            output_svg=self.svg_exporter.export_document(final_document),
-            output_dxf=self.dxf_exporter.export_document(final_document),
+            output_svg=self.svg_exporter.export_document(final_document, export_mode=runtime_config.export_mode),
+            output_dxf=self.dxf_exporter.export_document(final_document, export_mode=runtime_config.export_mode),
             overlay_png=self.minimal_pipeline.export_overlay(final_document, source_image),
             diff_png=self.minimal_pipeline.export_distance_field_diff(final_document),
             decision_report=decision_report,
@@ -218,6 +229,7 @@ class VectorReconstructionEngine:
         max_iterations: int | None,
         dry_run_only: bool | None,
         enable_ai_review: bool | None,
+        export_mode: ExportMode | None,
     ) -> VectorReconstructionEngineConfig:
         return replace(
             self.config,
@@ -226,6 +238,7 @@ class VectorReconstructionEngine:
             max_iterations=self.config.max_iterations if max_iterations is None else int(max_iterations),
             dry_run_only=self.config.dry_run_only if dry_run_only is None else bool(dry_run_only),
             enable_ai_review=self.config.enable_ai_review if enable_ai_review is None else bool(enable_ai_review),
+            export_mode=self.config.export_mode if export_mode is None else export_mode,
         )
 
     def _configured_pipeline(
@@ -349,6 +362,7 @@ class VectorReconstructionEngine:
                 "dry_run_only": runtime_config.dry_run_only,
                 "enable_ai_review": runtime_config.enable_ai_review,
                 "iteration_count": result.report.iteration_count,
+                "export_mode": runtime_config.export_mode,
             },
         )
 
@@ -395,6 +409,7 @@ class VectorReconstructionEngine:
             "dry_run_only": runtime_config.dry_run_only,
             "enable_ai_review": runtime_config.enable_ai_review,
             "max_iterations": runtime_config.max_iterations,
+            "export_mode": runtime_config.export_mode,
             "iteration_count": int(report.get("iteration_count", 0)),
             "score_before": report.get("score_before"),
             "score_after": report.get("score_after"),

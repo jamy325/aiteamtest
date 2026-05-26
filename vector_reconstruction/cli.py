@@ -12,6 +12,7 @@ from services.vector_reconstruction_engine import VectorReconstructionEngine
 
 
 _TARGET_TYPE_CHOICES: tuple[ShapeCandidateTargetType, ...] = ("circle", "rectangle", "ellipse", "arc", "line")
+_EXPORT_MODE_CHOICES: tuple[str, ...] = ("outline", "centerline", "all_debug")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--dry-run-only", action="store_true", help="Only preview decisions; do not commit final modifications.")
     run_parser.add_argument("--enable-ai-review", action="store_true", help="Enable the AI review loop if configured.")
     run_parser.add_argument("--document-id", default=None, help="Optional document_id override.")
+    run_parser.add_argument(
+        "--export-mode",
+        default="all_debug",
+        choices=list(_EXPORT_MODE_CHOICES),
+        help="Exporter path selection mode for SVG/DXF output.",
+    )
     return parser
 
 
@@ -71,6 +78,7 @@ def _run_command(args: argparse.Namespace) -> int:
             max_iterations=args.max_iterations,
             dry_run_only=args.dry_run_only,
             enable_ai_review=args.enable_ai_review,
+            export_mode=str(args.export_mode),
         )
         _write_bundle(output_dir, bundle)
         if bundle.engine_result.status == EngineStatus.FAILED:

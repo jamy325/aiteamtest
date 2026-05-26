@@ -163,6 +163,22 @@ class _FakeMinimalPipeline:
         self.calls.append((str(image_path), document_id))
         return self.result
 
+    def export_overlay(self, document, source_image):
+        return b"overlay"
+
+    def export_distance_field_diff(self, document):
+        return b"diff"
+
+
+class _RecordingExporter:
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+        self.calls: list[tuple[str, str]] = []
+
+    def export_document(self, document, *, export_mode="all_debug"):
+        self.calls.append((document.document_id, export_mode))
+        return self.payload
+
 
 def test_vector_reconstruction_engine_runs_from_document() -> None:
     pipeline = _FakeAutoRefinementPipeline(_auto_result())
@@ -274,3 +290,31 @@ def test_vector_reconstruction_engine_has_no_ui_dependency() -> None:
             imports.add(node.module)
 
     assert all(not item.startswith("ui") for item in imports)
+
+
+def test_vector_reconstruction_engine_run_artifact_bundle_propagates_export_mode_and_records_it() -> None:
+    pipeline_result = MinimalPipelineResult(
+        document=_document("bundle_doc"),
+        json_payload="{}",
+        extracted_contours=None,  # type: ignore[arg-type]
+        source_image="fake-image",
+        debug_artifacts=None,
+    )
+    minimal_pipeline = _FakeMinimalPipeline(pipeline_result)
+    pipeline = _FakeAutoRefinementPipeline(_auto_result())
+    engine = VectorReconstructionEngine(
+        minimal_pipeline=minimal_pipeline,
+        auto_refinement_pipeline=pipeline,
+        config=VectorReconstructionEngineConfig(export_mode="all_debug"),
+    )
+    svg_exporter = _RecordingExporter("<svg/>")
+    dxf_exporter = _RecordingExporter("0\nEOF\n")
+    engine.svg_exporter = svg_exporter
+    engine.dxf_exporter = dxf_exporter
+
+    bundle = engine.run_artifact_bundle("input.png", export_mode="centerline")
+
+    assert svg_exporter.calls == [("engine_result_doc", "centerline")]
+    assert dxf_exporter.calls == [("engine_result_doc", "centerline")]
+    assert bundle.metrics["export_mode"] == "centerline"
+    assert bundle.decision_report["metadata"]["export_mode"] == "centerline"
