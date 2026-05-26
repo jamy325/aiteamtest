@@ -57,7 +57,7 @@ def _bundle(document_id: str = "cli_doc") -> VectorReconstructionArtifactBundle:
         overlay_png=b"overlay",
         diff_png=b"diff",
         decision_report={"status": "completed"},
-        metrics={"status": "completed", "dry_run_only": False},
+        metrics={"status": "completed", "dry_run_only": False, "export_mode": "all_debug"},
     )
 
 
@@ -162,6 +162,32 @@ def test_vector_reconstruction_cli_passes_dry_run_only_flag(
     assert exit_code == 0
     assert _FakeEngine.last_call is not None
     assert _FakeEngine.last_call["dry_run_only"] is True
+
+
+def test_vector_reconstruction_cli_passes_export_mode_flag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.write_bytes(b"exists")
+    output_dir = tmp_path / "out"
+    monkeypatch.setattr("vector_reconstruction.cli.VectorReconstructionEngine", _FakeEngine)
+
+    exit_code = main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--export-mode",
+            "centerline",
+        ]
+    )
+
+    assert exit_code == 0
+    assert _FakeEngine.last_call is not None
+    assert _FakeEngine.last_call["export_mode"] == "centerline"
 
 
 def test_vector_reconstruction_cli_module_run_smoke(tmp_path: Path) -> None:
