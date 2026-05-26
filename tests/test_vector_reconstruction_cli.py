@@ -7,9 +7,11 @@ import sys
 
 import cv2
 import numpy as np
+import pytest
 
 from core.document import create_document
 from core.types import CoordinateSystem
+from services.ai_agent import AIReviewService
 from services.engine_protocol import EngineResult, EngineStatus
 from services.minimal_pipeline import MinimalPipelineResult
 from services.vector_reconstruction_engine import VectorReconstructionArtifactBundle
@@ -69,6 +71,13 @@ def _bundle(document_id: str = "cli_doc") -> VectorReconstructionArtifactBundle:
 
 class _FakeEngine:
     last_call: dict[str, object] | None = None
+    last_init: dict[str, object] | None = None
+
+    def __init__(self, *, ai_review_service=None, config=None):
+        type(self).last_init = {
+            "ai_review_service": ai_review_service,
+            "config": config,
+        }
 
     def run_artifact_bundle(self, image_path, **kwargs):
         type(self).last_call = {
@@ -105,6 +114,7 @@ def test_vector_reconstruction_cli_writes_artifact_bundle_and_passes_parameters(
 
     assert exit_code == 0
     assert _FakeEngine.last_call is not None
+    assert _FakeEngine.last_init is not None
     assert _FakeEngine.last_call["image_path"] == str(input_path)
     assert _FakeEngine.last_call["max_iterations"] == 4
     assert _FakeEngine.last_call["target_types"] == ("circle", "arc")
@@ -196,6 +206,35 @@ def test_vector_reconstruction_cli_passes_export_mode_flag(
     assert _FakeEngine.last_call["export_mode"] == "centerline"
 
 
+def test_vector_reconstruction_cli_does_not_enable_ai_review_without_flag_even_if_env_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.write_bytes(b"exists")
+    output_dir = tmp_path / "out"
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("AI_PROVIDER_MODEL", "env-model")
+    monkeypatch.setattr("vector_reconstruction.cli.VectorReconstructionEngine", _FakeEngine)
+
+    exit_code = main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    assert _FakeEngine.last_init is not None
+    assert _FakeEngine.last_init["ai_review_service"] is None
+    config = _FakeEngine.last_init["config"]
+    assert getattr(config, "enable_ai_review") is False
+    assert getattr(config, "ai_status") == "disabled"
+
+
 def test_vector_reconstruction_cli_module_run_smoke(tmp_path: Path) -> None:
     input_path = tmp_path / "circle.png"
     _write_circle_image(input_path)
@@ -270,3 +309,174 @@ def test_vector_reconstruction_cli_centerline_rgba_output_has_no_non_finite_toke
     for name in ("document.json", "metrics.json", "decision_report.json", "output.svg", "output.dxf"):
         payload = (output_dir / name).read_text(encoding="utf-8")
         assert all(token not in payload for token in forbidden_tokens), name
+
+
+def test_vector_reconstruction_cli_enable_ai_review_requires_ai_provider(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.write_bytes(b"exists")
+    output_dir = tmp_path / "out"
+    monkeypatch.setattr("vector_reconstruction.cli._ENV_FILE_CANDIDATES", ())
+    monkeypatch.delenv("AI_PROVIDER", raising=False)
+
+    exit_code = main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--enable-ai-review",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err.strip())
+    assert payload["error_type"] == "AIProviderNotConfigured"
+    assert "AI_PROVIDER" in payload["message"]
+
+
+def test_vector_reconstruction_cli_enable_ai_review_surfaces_missing_provider_key(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.write_bytes(b"exists")
+    output_dir = tmp_path / "out"
+    monkeypatch.setattr("vector_reconstruction.cli._ENV_FILE_CANDIDATES", ())
+    monkeypatch.setenv("AI_PROVIDER", "siliconflow")
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+
+    exit_code = main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--enable-ai-review",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err.strip())
+    assert payload["error_type"] == "AIProviderConfigurationError"
+    assert "SILICONFLOW_API_KEY" in payload["message"]
+
+
+def test_vector_reconstruction_cli_builds_ai_review_service_from_env_for_recorded_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.write_bytes(b"exists")
+    output_dir = tmp_path / "out"
+    fixture_path = tmp_path / "fixture.json"
+    fixture_path.write_text(
+        json.dumps(
+            {
+                "provider_name": "openai",
+                "model": "gpt-4.1-mini",
+                "request_fingerprint": "unused-in-cli-test",
+                "recorded_at": "2026-01-01T00:00:00+00:00",
+                "prompt_instructions_sha256": "abc",
+                "response": {
+                    "summary": "ok",
+                    "issues": [],
+                    "proposed_commands": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("vector_reconstruction.cli._ENV_FILE_CANDIDATES", ())
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("AI_PROVIDER_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("AI_RECORDED_MODE", "replay")
+    monkeypatch.setenv("AI_RECORDED_FIXTURE_PATH", str(fixture_path))
+    monkeypatch.setattr("vector_reconstruction.cli.VectorReconstructionEngine", _FakeEngine)
+
+    exit_code = main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--enable-ai-review",
+        ]
+    )
+
+    assert exit_code == 0
+    assert _FakeEngine.last_init is not None
+    ai_review_service = _FakeEngine.last_init["ai_review_service"]
+    config = _FakeEngine.last_init["config"]
+    assert isinstance(ai_review_service, AIReviewService)
+    assert getattr(config, "enable_ai_review") is True
+    assert getattr(config, "ai_provider") == "openai"
+    assert getattr(config, "ai_model") == "gpt-4.1-mini"
+    assert getattr(config, "ai_status") == "recorded_replay"
+    assert _FakeEngine.last_call is not None
+    assert _FakeEngine.last_call["enable_ai_review"] is True
+
+
+def test_vector_reconstruction_cli_prefers_system_env_over_dotenv(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.write_bytes(b"exists")
+    output_dir = tmp_path / "out"
+    fixture_path = tmp_path / "fixture.json"
+    fixture_path.write_text(
+        json.dumps(
+            {
+                "provider_name": "openai",
+                "model": "env-model",
+                "request_fingerprint": "unused-in-cli-test",
+                "recorded_at": "2026-01-01T00:00:00+00:00",
+                "prompt_instructions_sha256": "abc",
+                "response": {
+                    "summary": "ok",
+                    "issues": [],
+                    "proposed_commands": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "\n".join(
+            [
+                "AI_PROVIDER=openai",
+                "AI_PROVIDER_MODEL=dotenv-model",
+                "AI_RECORDED_MODE=replay",
+                f"AI_RECORDED_FIXTURE_PATH={fixture_path}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("vector_reconstruction.cli._ENV_FILE_CANDIDATES", (dotenv_path,))
+    monkeypatch.setenv("AI_PROVIDER_MODEL", "env-model")
+    monkeypatch.setattr("vector_reconstruction.cli.VectorReconstructionEngine", _FakeEngine)
+
+    exit_code = main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--enable-ai-review",
+        ]
+    )
+
+    assert exit_code == 0
+    assert _FakeEngine.last_init is not None
+    config = _FakeEngine.last_init["config"]
+    assert getattr(config, "ai_model") == "env-model"

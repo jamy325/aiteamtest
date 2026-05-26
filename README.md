@@ -73,7 +73,56 @@ Important flags:
 - `--enable-ai-review`
 - `--document-id <id>`
 
-The standard CLI is intentionally offline-first. It does not require network access unless you integrate an `AIReviewService` and explicitly enable live provider usage in your own wrapper.
+The standard CLI is intentionally offline-first. It only enables AI review when you pass `--enable-ai-review`.
+
+## AI Review CLI
+
+When `--enable-ai-review` is set, the CLI loads AI provider settings from:
+
+1. repo-root `.env`
+2. repo-root `.github/.env`
+3. current process environment variables
+
+System environment variables win over `.env` values.
+
+Minimum environment variables:
+
+- `AI_PROVIDER`
+- `AI_PROVIDER_MODEL`
+- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
+- `GOOGLE_API_KEY`
+- `SILICONFLOW_API_KEY`
+
+Useful optional variables:
+
+- `AI_RECORDED_MODE=replay|record`
+- `AI_RECORDED_FIXTURE_PATH=<fixture.json>`
+- `AI_RECORDED_FIXTURES_DIR=<fixture-dir>`
+- `AI_FILE_RESPONSE_PATH=<response.json>`
+- `ENABLE_LIVE_AI_PROVIDER_RECORD=1`
+- `ENABLE_LIVE_AI_PROVIDER_TESTS=1`
+
+Example `.env` for recorded replay without live API access:
+
+```dotenv
+AI_PROVIDER=openai
+AI_PROVIDER_MODEL=gpt-4.1-mini
+AI_RECORDED_MODE=replay
+AI_RECORDED_FIXTURE_PATH=tests/fixtures/ai_responses/openai/gpt-4.1-mini/example.json
+```
+
+Run AI review through the main CLI:
+
+```bash
+python -m vector_reconstruction run \
+  --input samples/inputs/circle_quickstart.png \
+  --output out/quickstart-ai-review \
+  --max-iterations 1 \
+  --enable-ai-review
+```
+
+If `--enable-ai-review` is set but `AI_PROVIDER` or the provider key is missing, the CLI fails immediately with a structured JSON error instead of silently falling back to algorithm-only mode.
 
 ## Sample Inputs And Configs
 

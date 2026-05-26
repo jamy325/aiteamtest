@@ -121,6 +121,7 @@ def _auto_result(
     report_status: str = EngineStatus.COMPLETED.value,
     dry_run_only: bool = False,
     refined_document=None,
+    proposed_commands: tuple[dict[str, object], ...] | None = None,
 ):
     document = refined_document or _document("engine_result_doc")
     command = {
@@ -194,7 +195,7 @@ def _auto_result(
     return AutoRefinementPipelineResult(
         refined_document=document,
         candidates=(),
-        proposed_commands=(command,),
+        proposed_commands=proposed_commands or (command,),
         preview_decisions=(preview_decision,),
         report=report,
     )
@@ -409,3 +410,61 @@ def test_vector_reconstruction_engine_run_artifact_bundle_propagates_export_mode
     assert bundle.decision_report["metadata"]["processing_contour_source"] == "skeleton"
     assert bundle.decision_report["stroke_summary"]["stroke_width"] == 6.0
     assert bundle.decision_report["report"]["stroke_mask_error"] == 0.125
+
+
+def test_vector_reconstruction_engine_records_ai_review_metadata_and_command_counts() -> None:
+    proposed_commands = (
+        {
+            "tool": "propose_replace_path_with_circle",
+            "path_id": "path_algo",
+            "reason": "algorithm",
+            "confidence": 0.7,
+            "requires_user_confirmation": True,
+        },
+        {
+            "tool": "propose_replace_path_with_ellipse",
+            "path_id": "path_ai",
+            "reason": "ai",
+            "confidence": 0.8,
+            "requires_user_confirmation": True,
+            "proposal_source": "ai_review",
+        },
+    )
+    pipeline = _FakeAutoRefinementPipeline(
+        _auto_result(
+            decision_kind=DecisionKind.REQUIRES_EXTERNAL_DECISION,
+            legacy_decision="user_confirm",
+            report_status=EngineStatus.REQUIRES_EXTERNAL_DECISION.value,
+            proposed_commands=proposed_commands,
+        )
+    )
+    pipeline_result = MinimalPipelineResult(
+        document=_stroke_document("bundle_doc_ai"),
+        json_payload="{}",
+        extracted_contours=None,  # type: ignore[arg-type]
+        source_image="fake-image",
+        debug_artifacts=None,
+    )
+    minimal_pipeline = _FakeMinimalPipeline(pipeline_result)
+    engine = VectorReconstructionEngine(
+        minimal_pipeline=minimal_pipeline,
+        auto_refinement_pipeline=pipeline,
+        config=VectorReconstructionEngineConfig(
+            enable_ai_review=True,
+            ai_provider="openai",
+            ai_model="gpt-4.1-mini",
+            ai_status="recorded_replay",
+        ),
+    )
+
+    bundle = engine.run_artifact_bundle("input.png")
+
+    assert bundle.metrics["enable_ai_review"] is True
+    assert bundle.metrics["ai_provider"] == "openai"
+    assert bundle.metrics["ai_model"] == "gpt-4.1-mini"
+    assert bundle.metrics["ai_status"] == "recorded_replay"
+    assert bundle.metrics["ai_proposed_count"] == 1
+    assert bundle.metrics["algorithm_proposed_count"] == 1
+    assert bundle.decision_report["metadata"]["ai_provider"] == "openai"
+    assert bundle.decision_report["metadata"]["ai_model"] == "gpt-4.1-mini"
+    assert bundle.decision_report["metadata"]["ai_status"] == "recorded_replay"

@@ -142,6 +142,7 @@ def test_ai_review_service_supports_adapter_and_legacy_responder_paths() -> None
 
     assert output.summary == "Algorithm candidate looks valid."
     assert output.proposed_commands[0]["candidate_id"] == "cand_circle_1"
+    assert output.proposed_commands[0]["proposal_source"] == "ai_review"
     assert captured["review_input"] == review_input
 
 

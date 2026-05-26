@@ -47,6 +47,9 @@ class VectorReconstructionEngineConfig:
     document_id: str = "document_1"
     export_mode: ExportMode = "all_debug"
     processing_contour_source: str = "all"
+    ai_provider: str = ""
+    ai_model: str = ""
+    ai_status: str = "disabled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +386,10 @@ class VectorReconstructionEngine:
                 "iteration_count": result.report.iteration_count,
                 "export_mode": runtime_config.export_mode,
                 "processing_contour_source": runtime_config.processing_contour_source,
+                "ai_provider": runtime_config.ai_provider,
+                "ai_model": runtime_config.ai_model,
+                "ai_status": runtime_config.ai_status,
+                **self._ai_command_counts(result),
             },
         )
 
@@ -430,6 +437,11 @@ class VectorReconstructionEngine:
             "target_types": list(runtime_config.target_types),
             "dry_run_only": runtime_config.dry_run_only,
             "enable_ai_review": runtime_config.enable_ai_review,
+            "ai_provider": runtime_config.ai_provider,
+            "ai_model": runtime_config.ai_model,
+            "ai_status": runtime_config.ai_status,
+            "ai_proposed_count": int(engine_result.metadata.get("ai_proposed_count", 0)),
+            "algorithm_proposed_count": int(engine_result.metadata.get("algorithm_proposed_count", 0)),
             "max_iterations": runtime_config.max_iterations,
             "export_mode": runtime_config.export_mode,
             "processing_contour_source": runtime_config.processing_contour_source,
@@ -451,6 +463,17 @@ class VectorReconstructionEngine:
             "stroke_mask_error": artifact_score_summary.get("stroke_mask_error"),
             "stroke_mask_error_score": artifact_score_summary.get("stroke_mask_error_score"),
             "errors": list(engine_result.errors),
+        }
+
+    def _ai_command_counts(self, result: AutoRefinementPipelineResult) -> dict[str, int]:
+        ai_proposed_count = sum(
+            1
+            for command in result.proposed_commands
+            if str(command.get("proposal_source", "")).strip().lower() == "ai_review"
+        )
+        return {
+            "ai_proposed_count": ai_proposed_count,
+            "algorithm_proposed_count": max(0, len(result.proposed_commands) - ai_proposed_count),
         }
 
     def _bundle_decision_report(
