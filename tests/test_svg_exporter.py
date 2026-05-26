@@ -266,6 +266,8 @@ def test_svg_exporter_adds_default_visible_stroke_for_unstyled_centerline_path()
     assert path_element.attrib["fill"] == "none"
     assert path_element.attrib["stroke"] == "#000000"
     assert path_element.attrib["stroke-width"] == "1"
+    assert path_element.attrib["stroke-linecap"] == "round"
+    assert path_element.attrib["stroke-linejoin"] == "round"
 
 
 def test_svg_exporter_adds_default_visible_stroke_for_unstyled_circle() -> None:
@@ -291,7 +293,7 @@ def test_svg_exporter_adds_default_visible_stroke_for_unstyled_circle() -> None:
     assert circle.attrib["stroke-width"] == "1"
 
 
-def test_svg_exporter_respects_explicit_fill_without_forcing_fallback_stroke() -> None:
+def test_svg_exporter_treats_skeleton_circle_as_stroke_semantic_even_with_fill_style() -> None:
     document = _document()
     document = add_path(
         document,
@@ -300,7 +302,7 @@ def test_svg_exporter_respects_explicit_fill_without_forcing_fallback_stroke() -
             closed=True,
             source="skeleton_contour",
             segments=("circle_seg",),
-            style=Style(fill_color=(10, 120, 200)),
+            style=Style(fill_color=(10, 120, 200), stroke_width=3.5),
         ),
     )
     document = add_segment(document, Segment("circle_seg", "filled_circle", "circle", {"cx": 25.0, "cy": 25.0, "r": 10.0}))
@@ -310,8 +312,11 @@ def test_svg_exporter_respects_explicit_fill_without_forcing_fallback_stroke() -
     circle = root.find("{http://www.w3.org/2000/svg}circle")
 
     assert circle is not None
-    assert circle.attrib["fill"] == "rgb(10,120,200)"
-    assert circle.attrib["stroke"] == "none"
+    assert circle.attrib["fill"] == "none"
+    assert circle.attrib["stroke"] == "#000000"
+    assert circle.attrib["stroke-width"] == "3.5"
+    assert circle.attrib["stroke-linecap"] == "round"
+    assert circle.attrib["stroke-linejoin"] == "round"
 
 
 def test_svg_exporter_matches_golden_snapshots() -> None:

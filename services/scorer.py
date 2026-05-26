@@ -25,6 +25,7 @@ class ScorerConfig:
     shared_tangent_violation_weight: float = 10.0
     coordinate_space_penalty: float = 10.0
     non_vector_metadata_penalty: float = 2.0
+    stroke_mask_error_weight: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ class ScoreBreakdown:
     self_intersection_score: float
     shared_tangent_violation_score: float
     coordinate_consistency_score: float
+    stroke_mask_error_score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +54,7 @@ class Scorer:
         document: VectorDocument,
         *,
         edge_error: EdgeErrorResult | None = None,
+        stroke_mask_error: float | None = None,
     ) -> ScoreResult:
         edge_error_score = self._edge_error_score(edge_error)
         geometry_complexity_score = self._geometry_complexity_score(document)
@@ -59,6 +62,7 @@ class Scorer:
         self_intersection_score = self._self_intersection_score(document)
         shared_tangent_violation_score = self._shared_tangent_violation_score(document)
         coordinate_consistency_score = self._coordinate_consistency_score(document)
+        stroke_mask_error_score = self._stroke_mask_error_score(stroke_mask_error)
 
         breakdown = ScoreBreakdown(
             edge_error_score=edge_error_score,
@@ -67,6 +71,7 @@ class Scorer:
             self_intersection_score=self_intersection_score,
             shared_tangent_violation_score=shared_tangent_violation_score,
             coordinate_consistency_score=coordinate_consistency_score,
+            stroke_mask_error_score=stroke_mask_error_score,
         )
         total_score = (
             breakdown.edge_error_score
@@ -75,6 +80,7 @@ class Scorer:
             + breakdown.self_intersection_score
             + breakdown.shared_tangent_violation_score
             + breakdown.coordinate_consistency_score
+            + breakdown.stroke_mask_error_score
         )
         return ScoreResult(total_score=total_score, breakdown=breakdown)
 
@@ -174,6 +180,11 @@ class Scorer:
         if isinstance(value, (list, tuple)):
             return sum(self._coordinate_space_penalty(item) for item in value)
         return 0.0
+
+    def _stroke_mask_error_score(self, stroke_mask_error: float | None) -> float:
+        if stroke_mask_error is None:
+            return 0.0
+        return max(0.0, float(stroke_mask_error)) * self.config.stroke_mask_error_weight
 
 
 __all__ = [

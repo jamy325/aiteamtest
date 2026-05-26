@@ -19,6 +19,13 @@ def _test_image() -> np.ndarray:
     return image
 
 
+def _junction_image() -> np.ndarray:
+    image = np.zeros((96, 96), dtype=np.uint8)
+    cv2.line(image, (48, 12), (48, 48), 255, thickness=3)
+    cv2.line(image, (24, 48), (72, 48), 255, thickness=3)
+    return image
+
+
 def _path_touches_page_border(points: tuple[tuple[float, float], ...], image_size: tuple[int, int]) -> bool:
     height, width = image_size
     if not points:
@@ -76,6 +83,35 @@ def test_minimal_pipeline_supports_bezier_segment_generation() -> None:
     assert result.document.segments
     assert all(segment.type == "bezier" for segment in result.document.segments)
     assert result.document.metadata["pipeline"]["segment_type"] == "bezier"
+
+
+def test_minimal_pipeline_records_stroke_width_for_skeleton_paths() -> None:
+    pipeline = MinimalPipeline(
+        coordinate_system=CoordinateSystem(view_box=(0.0, 0.0, 140.0, 120.0)),
+    )
+
+    result = pipeline.run(_test_image(), document_id="doc_stroke_semantics")
+
+    skeleton_paths = [path for path in result.document.paths if path.source == "skeleton_contour"]
+    assert skeleton_paths
+    assert all(path.style is not None for path in skeleton_paths)
+    assert all(path.style.stroke_width > 0.0 for path in skeleton_paths if path.style is not None)
+    assert all(path.metadata.get("stroke_width_confidence") is not None for path in skeleton_paths)
+    assert all(path.metadata.get("stroke_semantic") == "centerline" for path in skeleton_paths)
+
+
+def test_minimal_pipeline_records_junction_topology_for_skeleton_paths() -> None:
+    pipeline = MinimalPipeline(
+        coordinate_system=CoordinateSystem(view_box=(0.0, 0.0, 96.0, 96.0)),
+    )
+
+    result = pipeline.run(_junction_image(), document_id="doc_junction_semantics")
+
+    skeleton_paths = [path for path in result.document.paths if path.source == "skeleton_contour"]
+    assert skeleton_paths
+    assert any(int(path.metadata.get("junction_count", 0)) >= 1 for path in skeleton_paths)
+    assert any(int(path.metadata.get("branch_count", 0)) >= 1 for path in skeleton_paths)
+    assert any(isinstance(path.metadata.get("junction_ids"), list) for path in skeleton_paths)
 
 
 def test_minimal_pipeline_has_no_ui_or_ai_dependencies() -> None:

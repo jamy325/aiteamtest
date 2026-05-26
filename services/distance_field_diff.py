@@ -35,6 +35,7 @@ class DistanceFieldDiffResult:
     chamfer_error: float
     source_point_count: int
     vector_point_count: int
+    stroke_mask_error: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,8 @@ class DistanceFieldDiffRenderer:
         height, width = self._canvas_size(document)
         source_vector_points, source_polylines = self._source_contours(document, transformer)
         vector_points, vector_polylines = self._vector_segments(document, transformer)
+        source_binary_mask = self._source_binary_mask(document, transformer, width, height)
+        vector_stroke_mask = self._vector_stroke_mask(document, transformer, width, height)
 
         source_mask = self._rasterize_polylines(source_polylines, width, height)
         vector_mask = self._rasterize_polylines(vector_polylines, width, height)
@@ -81,6 +84,7 @@ class DistanceFieldDiffRenderer:
             chamfer_error=edge_error.chamfer_error,
             source_point_count=edge_error.source_point_count,
             vector_point_count=edge_error.vector_point_count,
+            stroke_mask_error=self._stroke_mask_error(source_binary_mask, vector_stroke_mask),
         )
 
     def export_diff_png(self, document: VectorDocument) -> bytes:
@@ -175,6 +179,72 @@ class DistanceFieldDiffRenderer:
         self._apply_distance_color(image, overdraw_mask, source_distance, self.options.overdraw_color)
         return image
 
+    def _source_binary_mask(
+        self,
+        document: VectorDocument,
+        transformer: CoordinateTransformer,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        pipeline = document.metadata.get("pipeline", {})
+        source_contours = pipeline.get("source_contours", {})
+        binary_contours = source_contours.get("binary_contours", ())
+        if not isinstance(binary_contours, list) or not binary_contours:
+            return np.zeros((height, width), dtype=np.uint8)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        sorted_contours = sorted(
+            [item for item in binary_contours if isinstance(item, dict)],
+            key=lambda item: int(item.get("depth", 0)),
+        )
+        for contour in sorted_contours:
+            points = contour.get("points", ())
+            if not isinstance(points, list) or len(points) < 2:
+                continue
+            coordinate_space = str(contour.get("coordinate_space", "vector"))
+            polygon = np.array(
+                [self._coerce_pixel_point(transformer, point, coordinate_space) for point in points],
+                dtype=np.int32,
+            )
+            if len(polygon) < 2:
+                continue
+            fill_value = 255 if int(contour.get("depth", 0)) % 2 == 0 else 0
+            cv2.fillPoly(mask, [polygon], fill_value)
+        return mask
+
+    def _vector_stroke_mask(
+        self,
+        document: VectorDocument,
+        transformer: CoordinateTransformer,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        mask = np.zeros((height, width), dtype=np.uint8)
+        segment_lookup = {segment.segment_id: segment for segment in document.segments}
+        for path in document.paths:
+            if path.source != "skeleton_contour":
+                continue
+            stroke_width = float(path.style.stroke_width) if path.style is not None else 0.0
+            thickness = max(1, int(round(stroke_width)))
+            for segment_id in path.segments:
+                segment = segment_lookup.get(segment_id)
+                if segment is None:
+                    continue
+                sampled = self.segment_sampler.sample_segment(segment)
+                if len(sampled) < 2:
+                    continue
+                pixels = np.array([self._point_to_pixel(transformer, point) for point in sampled], dtype=np.int32)
+                cv2.polylines(mask, [pixels], self.segment_sampler.is_closed(segment), 255, thickness, cv2.LINE_8)
+        return mask
+
+    def _stroke_mask_error(self, source_binary_mask: np.ndarray, vector_stroke_mask: np.ndarray) -> float:
+        if source_binary_mask.size == 0 or not np.any(source_binary_mask):
+            return 0.0
+        if vector_stroke_mask.shape != source_binary_mask.shape:
+            return 0.0
+        mismatch = np.logical_xor(source_binary_mask > 0, vector_stroke_mask > 0)
+        foreground = max(1, int(np.count_nonzero(source_binary_mask)))
+        return float(np.count_nonzero(mismatch)) / float(foreground)
+
     def _apply_distance_color(
         self,
         image: np.ndarray,
@@ -195,6 +265,15 @@ class DistanceFieldDiffRenderer:
     def _point_to_pixel(self, transformer: CoordinateTransformer, point: Point) -> tuple[int, int]:
         pixel = transformer.vector_to_pixel(point)
         return (int(round(pixel[0])), int(round(pixel[1])))
+
+    def _coerce_pixel_point(
+        self,
+        transformer: CoordinateTransformer,
+        point: Point | list[float],
+        coordinate_space: str,
+    ) -> tuple[int, int]:
+        vector_point = self._coerce_vector_point(transformer, point, coordinate_space)
+        return self._point_to_pixel(transformer, vector_point)
 
     def _coerce_vector_point(
         self,

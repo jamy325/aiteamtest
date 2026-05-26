@@ -69,6 +69,7 @@ class DxfExporter:
             "exported_by_source": self._count_sources(selected_paths),
             "skipped_by_source": self._count_sources(skipped_paths),
             "entity_counts": entity_counts,
+            "stroke_summary": self._stroke_summary(selected_paths),
             "warning": None if selected_paths else f"no paths selected for export_mode={export_mode}",
             "warnings": warnings,
         }
@@ -121,6 +122,26 @@ class DxfExporter:
                     if self._polyline_vertices(path, segment_lookup) is None:
                         warnings.append(f"path {path.path_id} is not continuous enough for closed LWPOLYLINE fallback")
         return tuple(warnings)
+
+    def _stroke_summary(self, paths: tuple[Path, ...]) -> dict[str, object]:
+        stroke_paths = [path for path in paths if path.source == "skeleton_contour"]
+        widths = [
+            float(path.style.stroke_width)
+            for path in stroke_paths
+            if path.style is not None and float(path.style.stroke_width) > 0.0
+        ]
+        confidences = [
+            float(path.metadata["stroke_width_confidence"])
+            for path in stroke_paths
+            if "stroke_width_confidence" in path.metadata
+        ]
+        return {
+            "stroke_path_count": len(stroke_paths),
+            "stroke_width": round(sum(widths) / len(widths), 4) if widths else None,
+            "stroke_width_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+            "endpoint_count": sum(int(path.metadata.get("endpoint_count", 0)) for path in stroke_paths),
+            "junction_count": sum(int(path.metadata.get("junction_count", 0)) for path in stroke_paths),
+        }
 
     def _path_entity_lines(
         self,
