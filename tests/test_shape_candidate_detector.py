@@ -308,6 +308,59 @@ def _open_wave_document() -> object:
     return _raw_contour_document(points, path_id="wave_path", contour_id="wave_contour_0", closed=False)
 
 
+def _mixed_source_rectangle_document() -> object:
+    document = create_document(
+        document_id="doc_mixed_sources",
+        width=200.0,
+        height=200.0,
+        coordinate_system=CoordinateSystem(internal_space="vector"),
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="binary_rect_path",
+            closed=True,
+            source="binary_contour",
+            segments=("binary_0", "binary_1", "binary_2", "binary_3"),
+        ),
+    )
+    document = add_path(
+        document,
+        VectorPath(
+            path_id="skeleton_rect_path",
+            closed=True,
+            source="skeleton_contour",
+            segments=("skeleton_0", "skeleton_1", "skeleton_2", "skeleton_3"),
+        ),
+    )
+    binary_corners = ((20.0, 20.0), (100.0, 20.0), (100.0, 80.0), (20.0, 80.0))
+    skeleton_corners = ((120.0, 20.0), (180.0, 20.0), (180.0, 80.0), (120.0, 80.0))
+    for index in range(4):
+        binary_start = binary_corners[index]
+        binary_end = binary_corners[(index + 1) % 4]
+        skeleton_start = skeleton_corners[index]
+        skeleton_end = skeleton_corners[(index + 1) % 4]
+        document = add_segment(
+            document,
+            Segment(
+                segment_id=f"binary_{index}",
+                path_id="binary_rect_path",
+                type="line",
+                params={"start": [binary_start[0], binary_start[1]], "end": [binary_end[0], binary_end[1]]},
+            ),
+        )
+        document = add_segment(
+            document,
+            Segment(
+                segment_id=f"skeleton_{index}",
+                path_id="skeleton_rect_path",
+                type="line",
+                params={"start": [skeleton_start[0], skeleton_start[1]], "end": [skeleton_end[0], skeleton_end[1]]},
+            ),
+        )
+    return document
+
+
 def test_shape_candidate_detector_detects_circle_candidate_from_circle_fixture() -> None:
     fixture_path = Path("test_images/circle/test_input_circle.png")
     document = MinimalPipeline(segment_type="line").run_from_file(fixture_path, document_id="circle_fixture").document
@@ -325,6 +378,23 @@ def test_shape_candidate_detector_detects_circle_candidate_from_circle_fixture()
     assert "bbox" in best.evidence
     assert best.evidence["fit_error"] >= 0.0
     assert document == original_document
+
+
+def test_shape_candidate_detector_filters_paths_by_processing_contour_source() -> None:
+    document = _mixed_source_rectangle_document()
+    detector = ShapeCandidateDetector()
+
+    all_candidates = detector.detect_candidates(document, contour_source="all")
+    skeleton_candidates = detector.detect_candidates(document, contour_source="skeleton")
+    binary_candidates = detector.detect_candidates(document, contour_source="binary")
+
+    assert all_candidates
+    assert any(candidate.path_id == "binary_rect_path" for candidate in all_candidates)
+    assert any(candidate.path_id == "skeleton_rect_path" for candidate in all_candidates)
+    assert skeleton_candidates
+    assert {candidate.path_id for candidate in skeleton_candidates} == {"skeleton_rect_path"}
+    assert binary_candidates
+    assert {candidate.path_id for candidate in binary_candidates} == {"binary_rect_path"}
 
 
 def test_shape_candidate_detector_detects_ellipse_candidate_from_ellipse_fixture() -> None:

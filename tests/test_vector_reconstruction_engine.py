@@ -112,6 +112,15 @@ def _auto_result(
             "requires_external_decision": 1 if decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION else 0,
             "auto_reject": 1 if decision_kind == DecisionKind.AUTO_REJECT else 0,
         },
+        processing_summary={
+            "processing_contour_source": "all",
+            "processed_path_count": 0,
+            "processed_binary_path_count": 0,
+            "processed_skeleton_path_count": 0,
+            "available_binary_path_count": 0,
+            "available_skeleton_path_count": 0,
+            "warnings": [],
+        },
         score_before=10.0,
         score_after=9.2,
         integrity={"success": True, "errors": [], "warnings": []},
@@ -317,4 +326,6 @@ def test_vector_reconstruction_engine_run_artifact_bundle_propagates_export_mode
     assert svg_exporter.calls == [("engine_result_doc", "centerline")]
     assert dxf_exporter.calls == [("engine_result_doc", "centerline")]
     assert bundle.metrics["export_mode"] == "centerline"
+    assert bundle.metrics["processing_contour_source"] == "skeleton"
     assert bundle.decision_report["metadata"]["export_mode"] == "centerline"
+    assert bundle.decision_report["metadata"]["processing_contour_source"] == "skeleton"

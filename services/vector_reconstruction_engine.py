@@ -43,6 +43,7 @@ class VectorReconstructionEngineConfig:
     evaluate_batch_commands: bool = False
     document_id: str = "document_1"
     export_mode: ExportMode = "all_debug"
+    processing_contour_source: str = "all"
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +232,7 @@ class VectorReconstructionEngine:
         enable_ai_review: bool | None,
         export_mode: ExportMode | None,
     ) -> VectorReconstructionEngineConfig:
+        selected_export_mode = self.config.export_mode if export_mode is None else export_mode
         return replace(
             self.config,
             target_types=self.config.target_types if target_types is None else tuple(target_types),
@@ -238,7 +240,8 @@ class VectorReconstructionEngine:
             max_iterations=self.config.max_iterations if max_iterations is None else int(max_iterations),
             dry_run_only=self.config.dry_run_only if dry_run_only is None else bool(dry_run_only),
             enable_ai_review=self.config.enable_ai_review if enable_ai_review is None else bool(enable_ai_review),
-            export_mode=self.config.export_mode if export_mode is None else export_mode,
+            export_mode=selected_export_mode,
+            processing_contour_source=_processing_contour_source_for_export_mode(selected_export_mode),
         )
 
     def _configured_pipeline(
@@ -265,6 +268,7 @@ class VectorReconstructionEngine:
             target_types=runtime_config.target_types,
             dry_run_only=runtime_config.dry_run_only,
             evaluate_batch_commands=runtime_config.evaluate_batch_commands,
+            processing_contour_source=runtime_config.processing_contour_source,
             max_iterations=runtime_config.max_iterations,
             max_proposals_per_round=runtime_config.max_proposals_per_round,
             improvement_epsilon=runtime_config.improvement_epsilon,
@@ -363,6 +367,7 @@ class VectorReconstructionEngine:
                 "enable_ai_review": runtime_config.enable_ai_review,
                 "iteration_count": result.report.iteration_count,
                 "export_mode": runtime_config.export_mode,
+                "processing_contour_source": runtime_config.processing_contour_source,
             },
         )
 
@@ -410,6 +415,11 @@ class VectorReconstructionEngine:
             "enable_ai_review": runtime_config.enable_ai_review,
             "max_iterations": runtime_config.max_iterations,
             "export_mode": runtime_config.export_mode,
+            "processing_contour_source": runtime_config.processing_contour_source,
+            "processed_path_count": int(report.get("processing_summary", {}).get("processed_path_count", 0)),
+            "processed_binary_path_count": int(report.get("processing_summary", {}).get("processed_binary_path_count", 0)),
+            "processed_skeleton_path_count": int(report.get("processing_summary", {}).get("processed_skeleton_path_count", 0)),
+            "processing_warnings": list(report.get("processing_summary", {}).get("warnings", ())),
             "iteration_count": int(report.get("iteration_count", 0)),
             "score_before": report.get("score_before"),
             "score_after": report.get("score_after"),
@@ -425,3 +435,11 @@ __all__ = [
     "VectorReconstructionEngine",
     "VectorReconstructionEngineConfig",
 ]
+
+
+def _processing_contour_source_for_export_mode(export_mode: ExportMode) -> str:
+    if export_mode == "outline":
+        return "binary"
+    if export_mode == "centerline":
+        return "skeleton"
+    return "all"
