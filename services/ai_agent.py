@@ -178,6 +178,12 @@ class AIReviewService:
         prompt = build_review_prompt(review_input)
         response = normalize_ai_review_response(self.adapter.review(prompt, review_input))
         validate_ai_review_response(response)
+        normalized_commands = []
+        for command in response["proposed_commands"]:
+            normalized_command = dict(command)
+            normalized_command.setdefault("proposal_source", "ai_review")
+            normalized_commands.append(normalized_command)
+        response["proposed_commands"] = normalized_commands
         return AIReviewOutput(
             summary=str(response["summary"]),
             issues=tuple(dict(issue) for issue in response["issues"]),

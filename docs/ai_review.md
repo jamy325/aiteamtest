@@ -36,6 +36,17 @@ The review model is expected to inspect algorithm candidates and existing intent
 
 ## Provider configuration
 
+- Main CLI integration:
+  - `python -m vector_reconstruction run --enable-ai-review ...` now constructs `AIReviewService(adapter=...)` automatically.
+  - Search order for configuration is:
+    1. repo-root `.env`
+    2. repo-root `.github/.env`
+    3. process environment variables
+  - Process environment variables override `.env` values.
+- Required switch:
+  - `AI_PROVIDER`
+- Optional shared selector:
+  - `AI_PROVIDER_MODEL`
 - Review-image safety gate:
   - Default max size per image: `20 * 1024 * 1024` bytes (20MB)
   - The size check runs before any `read_bytes()` or `PIL.Image.open()` call
@@ -57,6 +68,50 @@ The review model is expected to inspect algorithm candidates and existing intent
   - You can override `base_url` if your SiliconFlow deployment uses a different API domain
 
 If a provider SDK is not installed, or the API key is missing, the adapter raises a clear `ProviderConfigurationError`.
+
+## CLI examples
+
+Recorded replay without live API traffic:
+
+```dotenv
+AI_PROVIDER=openai
+AI_PROVIDER_MODEL=gpt-4.1-mini
+AI_RECORDED_MODE=replay
+AI_RECORDED_FIXTURE_PATH=tests/fixtures/ai_responses/openai/gpt-4.1-mini/example.json
+```
+
+```bash
+python -m vector_reconstruction run \
+  --input samples/inputs/circle_quickstart.png \
+  --output out/ai-review-replay \
+  --max-iterations 1 \
+  --enable-ai-review
+```
+
+Live SiliconFlow example:
+
+```dotenv
+AI_PROVIDER=siliconflow
+AI_PROVIDER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+SILICONFLOW_API_KEY=your_key_here
+```
+
+```bash
+python -m vector_reconstruction run \
+  --input samples/inputs/ellipse_quickstart.png \
+  --output out/ai-review-live \
+  --max-iterations 1 \
+  --enable-ai-review
+```
+
+Optional CLI-only helper variables:
+
+- `AI_RECORDED_MODE=replay|record`
+- `AI_RECORDED_FIXTURE_PATH=<fixture.json>`
+- `AI_RECORDED_FIXTURES_DIR=<fixture-dir>`
+- `AI_FILE_RESPONSE_PATH=<response.json>`
+
+If `--enable-ai-review` is omitted, the CLI stays on the algorithm-only path even if these variables are present.
 
 ## Testing policy
 
