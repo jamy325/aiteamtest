@@ -1,4 +1,5 @@
 import ast
+import math
 from pathlib import Path
 
 import cv2
@@ -7,6 +8,7 @@ import numpy as np
 from core.document import from_json
 from core.types import CoordinateSystem
 from services.minimal_pipeline import MinimalPipeline
+from services.stroke_width_estimator import StrokeWidthEstimate
 
 
 FIXTURE_ROOT = Path("tests/fixtures/debug_artifacts")
@@ -112,6 +114,31 @@ def test_minimal_pipeline_records_junction_topology_for_skeleton_paths() -> None
     assert any(int(path.metadata.get("junction_count", 0)) >= 1 for path in skeleton_paths)
     assert any(int(path.metadata.get("branch_count", 0)) >= 1 for path in skeleton_paths)
     assert any(isinstance(path.metadata.get("junction_ids"), list) for path in skeleton_paths)
+
+
+def test_minimal_pipeline_guards_non_finite_stroke_width_before_writing_path_style() -> None:
+    class _NonFiniteStrokeWidthEstimator:
+        def estimate_for_contour(self, document, contour, image) -> StrokeWidthEstimate:
+            return StrokeWidthEstimate(
+                stroke_width=float("inf"),
+                confidence=float("nan"),
+                reason="distance_transform_estimate",
+                sample_count=4,
+            )
+
+    pipeline = MinimalPipeline(
+        coordinate_system=CoordinateSystem(view_box=(0.0, 0.0, 140.0, 120.0)),
+        stroke_width_estimator=_NonFiniteStrokeWidthEstimator(),
+    )
+
+    result = pipeline.run(_test_image(), document_id="doc_guarded_stroke_width")
+
+    skeleton_paths = [path for path in result.document.paths if path.source == "skeleton_contour"]
+    assert skeleton_paths
+    assert all(path.style is not None for path in skeleton_paths)
+    assert all(math.isfinite(path.style.stroke_width) and path.style.stroke_width > 0.0 for path in skeleton_paths if path.style is not None)
+    assert all(path.metadata.get("stroke_width_reason") == "non_finite_stroke_width_guard" for path in skeleton_paths)
+    assert all(path.metadata.get("stroke_width_confidence") == 0.0 for path in skeleton_paths)
 
 
 def test_minimal_pipeline_has_no_ui_or_ai_dependencies() -> None:

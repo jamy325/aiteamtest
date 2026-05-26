@@ -128,12 +128,12 @@ class DxfExporter:
         widths = [
             float(path.style.stroke_width)
             for path in stroke_paths
-            if path.style is not None and float(path.style.stroke_width) > 0.0
+            if path.style is not None and math.isfinite(float(path.style.stroke_width)) and float(path.style.stroke_width) > 0.0
         ]
         confidences = [
             float(path.metadata["stroke_width_confidence"])
             for path in stroke_paths
-            if "stroke_width_confidence" in path.metadata
+            if "stroke_width_confidence" in path.metadata and math.isfinite(float(path.metadata["stroke_width_confidence"]))
         ]
         return {
             "stroke_path_count": len(stroke_paths),
@@ -360,6 +360,8 @@ class DxfExporter:
 
     @staticmethod
     def _fmt(value: float) -> str:
+        if not math.isfinite(float(value)):
+            return "0"
         text = f"{float(value):.6f}".rstrip("0").rstrip(".")
         return text if text else "0"
 
