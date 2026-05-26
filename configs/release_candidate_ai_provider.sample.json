@@ -1,0 +1,12 @@
+{
+  "provider": "openai",
+  "recorded_mode": "replay",
+  "model": "gpt-4.1-mini",
+  "fixture_path": "tests/fixtures/ai_responses/openai/gpt-4.1-mini/<request_fingerprint>.json",
+  "max_image_bytes": 20971520,
+  "allow_live": false,
+  "notes": [
+    "Use replay by default for release-candidate docs and tests.",
+    "The standard CLI does not read this file directly; this template is for AIReviewService integrations or custom wrappers."
+  ]
+}

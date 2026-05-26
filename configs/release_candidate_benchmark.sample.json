@@ -1,0 +1,16 @@
+{
+  "acceptance": {
+    "manifest": "benchmarks/acceptance_manifest.json",
+    "output_dir": "out/acceptance",
+    "execute_proposed_commands": false,
+    "case_timeout_seconds": 20
+  },
+  "real_world_regression": {
+    "manifest": "benchmarks/real_samples/manifest.json",
+    "baseline": "benchmarks/baselines/real_world_regression_baseline.json",
+    "output_dir": "out/real-world-regression",
+    "execute_proposed_commands": false,
+    "case_timeout_seconds": 20
+  },
+  "notes": "Template for release packaging. The current benchmark scripts accept CLI flags directly; this file is a shareable config example."
+}

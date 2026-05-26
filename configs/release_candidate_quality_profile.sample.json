@@ -1,0 +1,12 @@
+{
+  "profile_name": "release_candidate_circle",
+  "recommended_thresholds": {
+    "max_total_score": 500.0,
+    "max_edge_error": 50.0,
+    "max_complexity_score": 25.0,
+    "max_requires_external_decision_count": 2,
+    "min_algorithm_confidence": 0.55,
+    "min_inlier_ratio": 0.6
+  },
+  "notes": "Sample release-candidate quality profile. Copy and tune per geometry family or benchmark suite."
+}
