@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import mimetypes
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -149,6 +151,11 @@ class FreePenRuntime:
                     "canvas_width": width,
                     "canvas_height": height,
                     "source_image_size_bytes": int(source_image_path.stat().st_size),
+                    "image_upload_summary": self._image_upload_summary(source_image_path),
+                    "provider_request_content_summary": self._provider_request_content_summary(
+                        prompt=prompt,
+                        source_image_path=source_image_path,
+                    ),
                 }
             )
             try:
@@ -329,6 +336,83 @@ class FreePenRuntime:
     def _record_interaction(self, payload: dict[str, Any]) -> None:
         if self.interaction_logger is not None:
             self.interaction_logger(payload)
+
+    def _image_upload_summary(self, source_image_path: Path) -> dict[str, Any]:
+        raw_bytes = source_image_path.read_bytes()
+        mime_type = mimetypes.guess_type(source_image_path.name)[0] or "application/octet-stream"
+        data_url = self._data_url_from_bytes(raw_bytes=raw_bytes, mime_type=mime_type)
+        return {
+            "path": str(source_image_path),
+            "mime_type": mime_type,
+            "file_size_bytes": len(raw_bytes),
+            "file_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "data_url_header": data_url.split(",", 1)[0],
+            "data_url_char_count": len(data_url),
+            "data_url_sha256": hashlib.sha256(data_url.encode("utf-8")).hexdigest(),
+        }
+
+    def _provider_request_content_summary(self, *, prompt: str, source_image_path: Path) -> dict[str, Any]:
+        image_summary = self._image_upload_summary(source_image_path)
+        provider = self.provider_name.strip().lower()
+        if provider == "openai":
+            return {
+                "provider_format": "openai.responses",
+                "content": [
+                    {"type": "input_text", "text_char_count": len(prompt)},
+                    {
+                        "type": "input_image",
+                        "image_url_header": image_summary["data_url_header"],
+                        "image_url_char_count": image_summary["data_url_char_count"],
+                        "image_url_sha256": image_summary["data_url_sha256"],
+                    },
+                ],
+            }
+        if provider == "siliconflow":
+            return {
+                "provider_format": "openai.chat.completions",
+                "content": [
+                    {"type": "text", "text_char_count": len(prompt)},
+                    {
+                        "type": "image_url",
+                        "image_url_header": image_summary["data_url_header"],
+                        "image_url_char_count": image_summary["data_url_char_count"],
+                        "image_url_sha256": image_summary["data_url_sha256"],
+                        "detail": "auto",
+                    },
+                ],
+            }
+        if provider == "gemini":
+            return {
+                "provider_format": "gemini.generate_content",
+                "content": [
+                    {"type": "text", "text_char_count": len(prompt)},
+                    {
+                        "type": "image_file",
+                        "mime_type": image_summary["mime_type"],
+                        "file_size_bytes": image_summary["file_size_bytes"],
+                        "file_sha256": image_summary["file_sha256"],
+                    },
+                ],
+            }
+        return {
+            "provider_format": provider or type(self.adapter).__name__,
+            "content": [
+                {"type": "text", "text_char_count": len(prompt)},
+                {
+                    "type": "image_file",
+                    "mime_type": image_summary["mime_type"],
+                    "file_size_bytes": image_summary["file_size_bytes"],
+                    "file_sha256": image_summary["file_sha256"],
+                },
+            ],
+        }
+
+    @staticmethod
+    def _data_url_from_bytes(*, raw_bytes: bytes, mime_type: str) -> str:
+        import base64
+
+        encoded = base64.b64encode(raw_bytes).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
 
     @staticmethod
     def _write_round_response(

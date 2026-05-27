@@ -194,4 +194,8 @@ def test_free_pen_cli_writes_ai_review_interaction_log(tmp_path: Path, monkeypat
     assert interaction["image_file_count"] == 1
     assert interaction["prompt_char_count"] > 0
     assert interaction["image_paths"] == [str(input_path)]
+    assert interaction["image_upload_summary"]["mime_type"] == "image/png"
+    assert interaction["image_upload_summary"]["data_url_header"] == "data:image/png;base64"
+    assert interaction["image_upload_summary"]["data_url_char_count"] > interaction["image_upload_summary"]["file_size_bytes"]
+    assert interaction["provider_request_content_summary"]["content"][1]["type"] == "image_file"
     assert interaction["normalized_response"]["decision"] == "draw"
