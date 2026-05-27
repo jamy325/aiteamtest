@@ -34,9 +34,10 @@ class GeminiVisionAdapter(VisionReviewAdapter):
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
-        contents: list[Any] = [prompt]
+        contents: list[Any] = []
         for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
             contents.append(self._load_image(image_path))
+        contents.append(prompt)
         response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.models.generate_content(
             model=self.model,

@@ -133,8 +133,13 @@ def test_free_pen_prompt_stays_isolated_from_formal_ai_review_terms() -> None:
     assert '"candidates"' not in prompt
     assert '"available_tools"' not in prompt
     assert "image_px" in prompt
-    assert "distinct visible shapes or stroke groups" in prompt
     assert "do not say that the source image is missing" in prompt
+    assert "Produce a tracing attempt, not a review." in prompt
+    assert "directly returning cubic Bezier control points" in prompt
+    assert 'default behavior should be to return `decision="draw"`' in prompt
+    assert 'if any visible stroke or outline exists, return `decision="draw"`' in prompt
+    assert "still return your best partial `draw` result instead of `stalled`" in prompt
+    assert '"decision": "accept"' not in prompt
 
 
 def test_free_pen_cli_uses_file_provider_and_writes_outputs(tmp_path: Path, monkeypatch) -> None:
@@ -199,5 +204,6 @@ def test_free_pen_cli_writes_ai_review_interaction_log(tmp_path: Path, monkeypat
     assert interaction["image_upload_summary"]["mime_type"] == "image/png"
     assert interaction["image_upload_summary"]["data_url_header"] == "data:image/png;base64"
     assert interaction["image_upload_summary"]["data_url_char_count"] > interaction["image_upload_summary"]["file_size_bytes"]
-    assert interaction["provider_request_content_summary"]["content"][1]["type"] == "image_file"
+    assert interaction["provider_request_content_summary"]["content"][0]["type"] == "image_file"
+    assert interaction["provider_request_content_summary"]["content"][-1]["type"] == "text"
     assert interaction["normalized_response"]["decision"] == "draw"

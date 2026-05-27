@@ -358,20 +358,19 @@ class FreePenRuntime:
             return {
                 "provider_format": "openai.responses",
                 "content": [
-                    {"type": "input_text", "text_char_count": len(prompt)},
                     {
                         "type": "input_image",
                         "image_url_header": image_summary["data_url_header"],
                         "image_url_char_count": image_summary["data_url_char_count"],
                         "image_url_sha256": image_summary["data_url_sha256"],
                     },
+                    {"type": "input_text", "text_char_count": len(prompt)},
                 ],
             }
         if provider == "siliconflow":
             return {
                 "provider_format": "openai.chat.completions",
                 "content": [
-                    {"type": "text", "text_char_count": len(prompt)},
                     {
                         "type": "image_url",
                         "image_url_header": image_summary["data_url_header"],
@@ -379,31 +378,32 @@ class FreePenRuntime:
                         "image_url_sha256": image_summary["data_url_sha256"],
                         "detail": "auto",
                     },
+                    {"type": "text", "text_char_count": len(prompt)},
                 ],
             }
         if provider == "gemini":
             return {
                 "provider_format": "gemini.generate_content",
                 "content": [
-                    {"type": "text", "text_char_count": len(prompt)},
                     {
                         "type": "image_file",
                         "mime_type": image_summary["mime_type"],
                         "file_size_bytes": image_summary["file_size_bytes"],
                         "file_sha256": image_summary["file_sha256"],
                     },
+                    {"type": "text", "text_char_count": len(prompt)},
                 ],
             }
         return {
             "provider_format": provider or type(self.adapter).__name__,
             "content": [
-                {"type": "text", "text_char_count": len(prompt)},
                 {
                     "type": "image_file",
                     "mime_type": image_summary["mime_type"],
                     "file_size_bytes": image_summary["file_size_bytes"],
                     "file_sha256": image_summary["file_sha256"],
                 },
+                {"type": "text", "text_char_count": len(prompt)},
             ],
         }
 

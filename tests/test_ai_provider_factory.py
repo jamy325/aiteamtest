@@ -149,6 +149,8 @@ def test_create_vision_adapter_supports_openai_and_gemini_stubs(tmp_path: Path) 
     assert openai_client.responses.last_kwargs is not None
     openai_input = openai_client.responses.last_kwargs["input"][0]["content"]  # type: ignore[index]
     assert any(item["type"] == "input_image" for item in openai_input)  # type: ignore[index]
+    assert openai_input[0]["type"] == "input_image"  # type: ignore[index]
+    assert openai_input[-1]["type"] == "input_text"  # type: ignore[index]
 
     gemini_client = _GeminiClientStub()
     gemini_adapter = create_vision_adapter(
@@ -184,7 +186,8 @@ def test_create_vision_adapter_supports_siliconflow_stub(tmp_path: Path) -> None
     assert last_kwargs is not None
     content = last_kwargs["messages"][0]["content"]  # type: ignore[index]
     assert any(item["type"] == "image_url" for item in content)  # type: ignore[index]
-    assert content[0]["type"] == "text"  # type: ignore[index]
+    assert content[0]["type"] == "image_url"  # type: ignore[index]
+    assert content[-1]["type"] == "text"  # type: ignore[index]
 
 
 def test_collect_image_paths_allows_small_images_by_default(tmp_path: Path) -> None:

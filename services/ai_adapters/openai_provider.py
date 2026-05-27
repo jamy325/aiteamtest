@@ -34,7 +34,7 @@ class OpenAIVisionAdapter(VisionReviewAdapter):
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
-        content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        content: list[dict[str, Any]] = []
         for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
             content.append(
                 {
@@ -43,6 +43,7 @@ class OpenAIVisionAdapter(VisionReviewAdapter):
                     "detail": self.image_detail,
                 }
             )
+        content.append({"type": "input_text", "text": prompt})
         response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.responses.create(
             model=self.model,

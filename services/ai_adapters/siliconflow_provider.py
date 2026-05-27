@@ -34,7 +34,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
-        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        content: list[dict[str, Any]] = []
         for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
             content.append(
                 {
@@ -45,6 +45,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                     },
                 }
             )
+        content.append({"type": "text", "text": prompt})
         response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.chat.completions.create(
             model=self.model,
