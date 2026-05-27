@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from services.ai_adapters.base import VisionReviewAdapter
@@ -28,6 +29,8 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
     image_detail: str = "auto"
     max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES
     timeout_seconds: float | None = None
+    response_schema: dict[str, Any] | None = None
+    response_schema_path: Path | None = None
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
@@ -42,6 +45,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                     },
                 }
             )
+        response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": content}],
@@ -49,7 +53,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                 "type": "json_schema",
                 "json_schema": {
                     "name": "ai_review_response",
-                    "schema": load_response_schema(),
+                    "schema": response_schema,
                     "strict": True,
                 },
             },

@@ -29,18 +29,21 @@ class GeminiVisionAdapter(VisionReviewAdapter):
     image_loader: Callable[[Path], Any] | None = None
     max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES
     timeout_seconds: float | None = None
+    response_schema: dict[str, Any] | None = None
+    response_schema_path: Path | None = None
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
         contents: list[Any] = [prompt]
         for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
             contents.append(self._load_image(image_path))
+        response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.models.generate_content(
             model=self.model,
             contents=contents,
             config={
                 "response_mime_type": "application/json",
-                "response_json_schema": load_response_schema(),
+                "response_json_schema": response_schema,
             },
         )
         response_text = extract_text_value(response, provider_name="gemini", attr_names=("text", "output_text"))

@@ -11,6 +11,7 @@ from typing import Sequence
 from core.types import ShapeCandidateTargetType
 from services.ai_adapters import ProviderConfigurationError, create_vision_adapter
 from services.ai_agent import AIReviewService
+from services.free_pen_runtime import FreePenRuntime, load_free_pen_schema
 from services.engine_protocol import AutonomyLevel, EngineStatus
 from services.vector_reconstruction_engine import VectorReconstructionEngine, VectorReconstructionEngineConfig
 
@@ -83,6 +84,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional timeout for a single AI review provider call.",
     )
+
+    free_pen_parser = subparsers.add_parser("free-pen", help="Run the experimental FreePenRuntime and write final_overlay.png.")
+    free_pen_parser.add_argument("--input", required=True, help="Input source image path.")
+    free_pen_parser.add_argument("--output", required=True, help="Output directory for final_overlay.png and round responses.")
+    free_pen_parser.add_argument("--max-rounds", type=int, default=1, help="Maximum FreePen AI rounds.")
+    free_pen_parser.add_argument("--stroke-width", type=int, default=3, help="Rendered stroke width in pixels.")
+    free_pen_parser.add_argument(
+        "--ai-review-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional timeout for a single FreePen provider call.",
+    )
     return parser
 
 
@@ -90,6 +103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "run":
         return _run_command(args)
+    if args.command == "free-pen":
+        return _free_pen_command(args)
     raise SystemExit(f"unsupported command: {args.command}")
 
 
@@ -160,6 +175,53 @@ def _run_command(args: argparse.Namespace) -> int:
             )
         print(json.dumps({"ok": True, "status": bundle.engine_result.status.value, "output": str(output_dir)}, ensure_ascii=False))
         return 0
+    except Exception as exc:
+        return _emit_error(
+            type(exc).__name__,
+            str(exc),
+            {
+                "input": str(input_path),
+                "output": str(output_dir),
+            },
+        )
+
+
+def _free_pen_command(args: argparse.Namespace) -> int:
+    input_path = Path(args.input)
+    output_dir = Path(args.output)
+    if not input_path.is_file():
+        return _emit_error(
+            "InputImageNotFound",
+            f"input image not found: {input_path}",
+            {
+                "input": str(input_path),
+                "output": str(output_dir),
+            },
+        )
+
+    try:
+        adapter = _build_free_pen_adapter(ai_review_timeout_seconds=args.ai_review_timeout_seconds)
+        runtime = FreePenRuntime(
+            adapter=adapter,
+            max_rounds=max(1, int(args.max_rounds)),
+            stroke_width=max(1, int(args.stroke_width)),
+        )
+        result = runtime.run(input_path, output_dir)
+        print(
+            json.dumps(
+                {
+                    "ok": result.error_message is None,
+                    "status": result.status,
+                    "output": str(output_dir),
+                    "final_overlay": str(result.final_overlay_path),
+                    "rounds_executed": result.rounds_executed,
+                    "final_decision": result.final_decision,
+                    "error_message": result.error_message,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0 if result.error_message is None else 1
     except Exception as exc:
         return _emit_error(
             type(exc).__name__,
@@ -290,6 +352,57 @@ def _build_engine_runtime(
             ai_review_timeout_seconds=None if ai_review_timeout_seconds is None else float(ai_review_timeout_seconds),
         ),
     )
+
+
+def _build_free_pen_adapter(*, ai_review_timeout_seconds: float | None = None):
+    runtime_env = _merged_ai_environment()
+    provider = str(runtime_env.get("AI_PROVIDER", "")).strip().lower()
+    if not provider:
+        raise AIProviderNotConfigured("AI_PROVIDER is required for `vector_reconstruction free-pen`")
+
+    model = str(runtime_env.get("AI_PROVIDER_MODEL", "")).strip() or None
+    adapter_kwargs: dict[str, object] = {
+        "response_schema": load_free_pen_schema(),
+    }
+    if model:
+        adapter_kwargs["model"] = model
+    if ai_review_timeout_seconds is not None:
+        adapter_kwargs["timeout_seconds"] = float(ai_review_timeout_seconds)
+
+    openai_key = str(runtime_env.get("OPENAI_API_KEY", "")).strip()
+    gemini_key = str(runtime_env.get("GEMINI_API_KEY", "")).strip()
+    google_key = str(runtime_env.get("GOOGLE_API_KEY", "")).strip()
+    siliconflow_key = str(runtime_env.get("SILICONFLOW_API_KEY", "")).strip()
+
+    if provider == "openai" and openai_key:
+        adapter_kwargs["api_key"] = openai_key
+    elif provider == "gemini":
+        resolved_gemini_key = gemini_key or google_key
+        if resolved_gemini_key:
+            adapter_kwargs["api_key"] = resolved_gemini_key
+    elif provider == "siliconflow" and siliconflow_key:
+        adapter_kwargs["api_key"] = siliconflow_key
+    elif provider == "file":
+        response_path = str(runtime_env.get("AI_FILE_RESPONSE_PATH", "")).strip()
+        if not response_path:
+            raise AIProviderConfigurationError("file provider requires AI_FILE_RESPONSE_PATH")
+        adapter_kwargs["response_path"] = _resolve_config_path(response_path)
+
+    _validate_provider_configuration(
+        provider=provider,
+        recorded_mode="",
+        openai_key=openai_key,
+        gemini_key=gemini_key,
+        google_key=google_key,
+        siliconflow_key=siliconflow_key,
+    )
+
+    try:
+        return create_vision_adapter(provider, **adapter_kwargs)
+    except ProviderConfigurationError as exc:
+        raise AIProviderConfigurationError(str(exc)) from exc
+    except ValueError as exc:
+        raise AIProviderConfigurationError(str(exc)) from exc
 
 
 def _merged_ai_environment() -> dict[str, str]:

@@ -19,8 +19,9 @@ class ProviderConfigurationError(RuntimeError):
     pass
 
 
-def load_response_schema() -> dict[str, Any]:
-    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+def load_response_schema(schema_path: Path | None = None) -> dict[str, Any]:
+    resolved_path = SCHEMA_PATH if schema_path is None else Path(schema_path)
+    return json.loads(resolved_path.read_text(encoding="utf-8"))
 
 
 def resolve_api_key(*names: str) -> str | None:
