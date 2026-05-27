@@ -10,8 +10,14 @@ Return JSON only.
 
 Your task:
 - Look at the attached source image.
+- First estimate how many distinct visible shapes or stroke groups you can see in the image.
 - Trace the visible drawing using cubic Bezier segments.
 - Use image pixel coordinates for every point.
+
+Before you decide:
+- Confirm to yourself that an image is attached to this request.
+- If an image is attached, do not say that the source image is missing.
+- Mention your best visible shape or stroke-group count in the `reason` text, even if it is only an estimate.
 
 Coordinate system:
 - coordinate_space: image_px
@@ -39,19 +45,19 @@ If you can draw the tracing, return:
       "p1": [x, y]
     }
   ],
-  "reason": "short reason"
+  "reason": "short reason, including the estimated visible shape count"
 }
 
 If the current tracing is already good enough, return:
 {
   "decision": "accept",
-  "reason": "short reason"
+  "reason": "short reason, including the estimated visible shape count"
 }
 
 If you cannot continue reliably, return:
 {
   "decision": "stalled",
-  "reason": "short reason"
+  "reason": "short reason, including the estimated visible shape count"
 }
 """
 

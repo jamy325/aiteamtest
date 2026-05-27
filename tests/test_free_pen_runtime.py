@@ -133,6 +133,8 @@ def test_free_pen_prompt_stays_isolated_from_formal_ai_review_terms() -> None:
     assert '"candidates"' not in prompt
     assert '"available_tools"' not in prompt
     assert "image_px" in prompt
+    assert "distinct visible shapes or stroke groups" in prompt
+    assert "do not say that the source image is missing" in prompt
 
 
 def test_free_pen_cli_uses_file_provider_and_writes_outputs(tmp_path: Path, monkeypatch) -> None:
