@@ -8,7 +8,12 @@ import numpy as np
 
 from services.ai_adapters import create_vision_adapter
 from services.free_pen_prompt import build_free_pen_prompt
-from services.free_pen_runtime import FreePenReviewInput, FreePenRuntime
+from services.free_pen_runtime import (
+    FileSequenceFreePenAdapter,
+    FreePenReviewInput,
+    FreePenRuntime,
+    FreePenToolRuntime,
+)
 from vector_reconstruction.cli import main
 
 
@@ -133,12 +138,8 @@ def test_free_pen_prompt_stays_isolated_from_formal_ai_review_terms() -> None:
     assert '"candidates"' not in prompt
     assert '"available_tools"' not in prompt
     assert "image_px" in prompt
-    assert "do not say that the source image is missing" in prompt
-    assert "Produce a tracing attempt, not a review." in prompt
-    assert "directly returning cubic Bezier control points" in prompt
-    assert 'default behavior should be to return `decision="draw"`' in prompt
-    assert 'if any visible stroke or outline exists, return `decision="draw"`' in prompt
-    assert "still return your best partial `draw` result instead of `stalled`" in prompt
+    assert '"decision": "draw"' in prompt
+    assert '"decision": "stalled"' in prompt
     assert '"decision": "accept"' not in prompt
 
 
@@ -207,3 +208,149 @@ def test_free_pen_cli_writes_ai_review_interaction_log(tmp_path: Path, monkeypat
     assert interaction["provider_request_content_summary"]["content"][0]["type"] == "image_file"
     assert interaction["provider_request_content_summary"]["content"][-1]["type"] == "text"
     assert interaction["normalized_response"]["decision"] == "draw"
+
+
+def test_free_pen_cli_prints_raw_provider_response_to_stderr(tmp_path: Path, monkeypatch, capsys) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "out"
+    response_path = tmp_path / "response.json"
+    response_path.write_text(json.dumps(_draw_response()), encoding="utf-8")
+
+    monkeypatch.setenv("AI_PROVIDER", "file")
+    monkeypatch.setenv("AI_FILE_RESPONSE_PATH", str(response_path))
+    exit_code = main(
+        [
+            "free-pen",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--max-rounds",
+            "1",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[free_pen_raw_response][round=1]" in captured.err
+    assert '"decision": "draw"' in captured.err
+
+
+def test_free_pen_tool_runtime_sequence_generates_overlay_paths_and_trace(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "tool_out"
+    response_path = tmp_path / "tool_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {
+                    "decision": "tool_call",
+                    "tool_call": {"tool": "start_path", "x": 12, "y": 52},
+                    "reason": "start",
+                },
+                {
+                    "decision": "tool_call",
+                    "tool_call": {"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]},
+                    "reason": "curve",
+                },
+                {
+                    "decision": "finish",
+                    "reason": "done",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=4)
+    result = runtime.run(input_path, output_dir)
+
+    assert result.status == "finished"
+    assert result.successful_step_count == 2
+    assert result.rounds_executed == 3
+    overlay = cv2.imread(str(result.final_overlay_path), cv2.IMREAD_UNCHANGED)
+    assert overlay is not None
+    assert int(np.count_nonzero(overlay[:, :, 3])) > 0
+    assert result.final_composite_path.exists()
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    assert trace_payload["successful_step_count"] == 2
+    assert trace_payload["rounds"][0]["executed_tool_call"]["tool"] == "start_path"
+    paths_payload = json.loads(result.paths_json_path.read_text(encoding="utf-8"))
+    assert paths_payload["paths"][0]["segments"][0]["type"] == "move"
+    assert paths_payload["paths"][0]["segments"][1]["type"] == "cubic"
+
+
+def test_free_pen_tool_runtime_records_invalid_tool_call_without_crashing(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "tool_invalid"
+    response_path = tmp_path / "tool_invalid.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {
+                    "decision": "tool_call",
+                    "tool_call": {"tool": "line_to", "x": 20, "y": 20},
+                    "reason": "invalid without start_path",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=2)
+    result = runtime.run(input_path, output_dir)
+
+    assert result.status == "invalid_response"
+    assert result.error_message is not None
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    assert trace_payload["invalid_step_count"] >= 1
+    assert trace_payload["rounds"][0]["validation_result"]["success"] is False
+
+
+def test_free_pen_tool_cli_uses_file_sequence_provider_and_writes_outputs(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "tool_cli"
+    response_path = tmp_path / "tool_cli_response.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {
+                    "decision": "tool_call",
+                    "tool_call": {"tool": "start_path", "x": 12, "y": 52},
+                    "reason": "start",
+                },
+                {
+                    "decision": "tool_call",
+                    "tool_call": {"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]},
+                    "reason": "curve",
+                },
+                {
+                    "decision": "finish",
+                    "reason": "done",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("AI_PROVIDER", "file")
+    monkeypatch.setenv("AI_FILE_RESPONSE_PATH", str(response_path))
+    exit_code = main(
+        [
+            "free-pen-tool",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--max-steps",
+            "4",
+        ]
+    )
+
+    assert exit_code == 0
+    for name in ("final_overlay.png", "final_composite.png", "free_pen_paths.json", "tool_trace.json"):
+        assert (output_dir / name).exists()

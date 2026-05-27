@@ -11,7 +11,13 @@ from typing import Sequence
 from core.types import ShapeCandidateTargetType
 from services.ai_adapters import ProviderConfigurationError, create_vision_adapter
 from services.ai_agent import AIReviewService
-from services.free_pen_runtime import FreePenRuntime, load_free_pen_schema
+from services.free_pen_runtime import (
+    FileSequenceFreePenAdapter,
+    FreePenRuntime,
+    FreePenToolRuntime,
+    load_free_pen_schema,
+    load_free_pen_tool_schema,
+)
 from services.engine_protocol import AutonomyLevel, EngineStatus
 from services.vector_reconstruction_engine import VectorReconstructionEngine, VectorReconstructionEngineConfig
 
@@ -101,6 +107,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional timeout for a single FreePen provider call.",
     )
+
+    free_pen_tool_parser = subparsers.add_parser(
+        "free-pen-tool",
+        help="Run the experimental FreePenRuntime V1 tool loop and write overlay/composite/path artifacts.",
+    )
+    free_pen_tool_parser.add_argument("--input", required=True, help="Input source image path.")
+    free_pen_tool_parser.add_argument("--output", required=True, help="Output directory for FreePen tool artifacts.")
+    free_pen_tool_parser.add_argument("--max-steps", type=int, default=16, help="Maximum drawing tool-call steps.")
+    free_pen_tool_parser.add_argument("--stroke-width", type=int, default=2, help="Rendered stroke width in pixels.")
+    free_pen_tool_parser.add_argument(
+        "--ai-review-log-path",
+        default=None,
+        help="Optional JSON path for FreePen tool AI request/response logs.",
+    )
+    free_pen_tool_parser.add_argument(
+        "--ai-review-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional timeout for a single FreePen tool provider call.",
+    )
     return parser
 
 
@@ -110,6 +136,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_command(args)
     if args.command == "free-pen":
         return _free_pen_command(args)
+    if args.command == "free-pen-tool":
+        return _free_pen_tool_command(args)
     raise SystemExit(f"unsupported command: {args.command}")
 
 
@@ -213,6 +241,7 @@ def _free_pen_command(args: argparse.Namespace) -> int:
             max_rounds=max(1, int(args.max_rounds)),
             stroke_width=max(1, int(args.stroke_width)),
             interaction_logger=None if interaction_logger is None else interaction_logger.record,
+            raw_response_logger=_print_free_pen_raw_response,
             provider_name=str(getattr(adapter, "provider_name", "") or runtime_env.get("AI_PROVIDER", "")).strip().lower(),
             provider_model=str(getattr(adapter, "model", "") or runtime_env.get("AI_PROVIDER_MODEL", "")).strip(),
         )
@@ -225,6 +254,64 @@ def _free_pen_command(args: argparse.Namespace) -> int:
                     "output": str(output_dir),
                     "final_overlay": str(result.final_overlay_path),
                     "rounds_executed": result.rounds_executed,
+                    "final_decision": result.final_decision,
+                    "error_message": result.error_message,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0 if result.error_message is None else 1
+    except Exception as exc:
+        return _emit_error(
+            type(exc).__name__,
+            str(exc),
+            {
+                "input": str(input_path),
+                "output": str(output_dir),
+            },
+        )
+
+
+def _free_pen_tool_command(args: argparse.Namespace) -> int:
+    input_path = Path(args.input)
+    output_dir = Path(args.output)
+    if not input_path.is_file():
+        return _emit_error(
+            "InputImageNotFound",
+            f"input image not found: {input_path}",
+            {
+                "input": str(input_path),
+                "output": str(output_dir),
+            },
+        )
+
+    try:
+        runtime_env = _merged_ai_environment()
+        adapter = _build_free_pen_tool_adapter(ai_review_timeout_seconds=args.ai_review_timeout_seconds)
+        interaction_logger = _AIReviewInteractionLogWriter(Path(args.ai_review_log_path)) if args.ai_review_log_path else None
+        runtime = FreePenToolRuntime(
+            adapter=adapter,
+            max_steps=max(1, int(args.max_steps)),
+            stroke_width=max(1, int(args.stroke_width)),
+            interaction_logger=None if interaction_logger is None else interaction_logger.record,
+            raw_response_logger=_print_free_pen_raw_response,
+            provider_name=str(getattr(adapter, "provider_name", "") or runtime_env.get("AI_PROVIDER", "")).strip().lower(),
+            provider_model=str(getattr(adapter, "model", "") or runtime_env.get("AI_PROVIDER_MODEL", "")).strip(),
+        )
+        result = runtime.run(input_path, output_dir)
+        print(
+            json.dumps(
+                {
+                    "ok": result.error_message is None,
+                    "status": result.status,
+                    "output": str(output_dir),
+                    "final_overlay": str(result.final_overlay_path),
+                    "final_composite": str(result.final_composite_path),
+                    "free_pen_paths": str(result.paths_json_path),
+                    "tool_trace": str(result.tool_trace_path),
+                    "rounds_executed": result.rounds_executed,
+                    "successful_step_count": result.successful_step_count,
+                    "invalid_step_count": result.invalid_step_count,
                     "final_decision": result.final_decision,
                     "error_message": result.error_message,
                 },
@@ -415,6 +502,58 @@ def _build_free_pen_adapter(*, ai_review_timeout_seconds: float | None = None):
         raise AIProviderConfigurationError(str(exc)) from exc
 
 
+def _build_free_pen_tool_adapter(*, ai_review_timeout_seconds: float | None = None):
+    runtime_env = _merged_ai_environment()
+    provider = str(runtime_env.get("AI_PROVIDER", "")).strip().lower()
+    if not provider:
+        raise AIProviderNotConfigured("AI_PROVIDER is required for `vector_reconstruction free-pen-tool`")
+
+    model = str(runtime_env.get("AI_PROVIDER_MODEL", "")).strip() or None
+    adapter_kwargs: dict[str, object] = {
+        "response_schema": load_free_pen_tool_schema(),
+    }
+    if model:
+        adapter_kwargs["model"] = model
+    if ai_review_timeout_seconds is not None:
+        adapter_kwargs["timeout_seconds"] = float(ai_review_timeout_seconds)
+
+    openai_key = str(runtime_env.get("OPENAI_API_KEY", "")).strip()
+    gemini_key = str(runtime_env.get("GEMINI_API_KEY", "")).strip()
+    google_key = str(runtime_env.get("GOOGLE_API_KEY", "")).strip()
+    siliconflow_key = str(runtime_env.get("SILICONFLOW_API_KEY", "")).strip()
+
+    if provider == "file":
+        response_path = str(runtime_env.get("AI_FILE_RESPONSE_PATH", "")).strip()
+        if not response_path:
+            raise AIProviderConfigurationError("file provider requires AI_FILE_RESPONSE_PATH")
+        return FileSequenceFreePenAdapter(response_path=_resolve_config_path(response_path))
+
+    if provider == "openai" and openai_key:
+        adapter_kwargs["api_key"] = openai_key
+    elif provider == "gemini":
+        resolved_gemini_key = gemini_key or google_key
+        if resolved_gemini_key:
+            adapter_kwargs["api_key"] = resolved_gemini_key
+    elif provider == "siliconflow" and siliconflow_key:
+        adapter_kwargs["api_key"] = siliconflow_key
+
+    _validate_provider_configuration(
+        provider=provider,
+        recorded_mode="",
+        openai_key=openai_key,
+        gemini_key=gemini_key,
+        google_key=google_key,
+        siliconflow_key=siliconflow_key,
+    )
+
+    try:
+        return create_vision_adapter(provider, **adapter_kwargs)
+    except ProviderConfigurationError as exc:
+        raise AIProviderConfigurationError(str(exc)) from exc
+    except ValueError as exc:
+        raise AIProviderConfigurationError(str(exc)) from exc
+
+
 def _merged_ai_environment() -> dict[str, str]:
     merged: dict[str, str] = {}
     for env_path in _ENV_FILE_CANDIDATES:
@@ -488,6 +627,14 @@ def _emit_error(error_type: str, message: str, details: dict[str, object] | None
     }
     print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
     return 1
+
+
+def _print_free_pen_raw_response(round_index: int, raw_response: object) -> None:
+    try:
+        rendered = json.dumps(raw_response, ensure_ascii=False)
+    except TypeError:
+        rendered = repr(raw_response)
+    print(f"[free_pen_raw_response][round={round_index}] {rendered}", file=sys.stderr)
 
 
 class _ProgressReporter:
