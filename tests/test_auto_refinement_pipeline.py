@@ -690,3 +690,115 @@ def test_auto_refinement_pipeline_marks_unresolved_when_stalled_after_prior_feed
 
     assert result.report.policy_feedback
     assert result.report.status == EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS.value
+
+
+def test_auto_refinement_pipeline_emits_ai_command_processing_progress_events() -> None:
+    events: list[dict[str, object]] = []
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {
+            "summary": "One AI proposal.",
+            "issues": [{"issue_id": "issue_1", "category": "topology", "severity": "low", "summary": "check"}],
+            "proposed_commands": [
+                {
+                    "tool": "propose_replace_path_with_circle",
+                    "path_id": "path_1",
+                    "reason": "try circle",
+                    "confidence": 0.78,
+                    "requires_user_confirmation": True,
+                }
+            ],
+        }
+
+    feedback = PolicyFeedback(
+        reason_code="low_inlier_ratio",
+        message="Preview inlier ratio is too low.",
+        metrics_delta={"inlier_ratio": 0.42},
+        policy_hint="do not retry unchanged proposal",
+        retry_allowed=True,
+        retry_constraints={"min_inlier_ratio": 0.6},
+    )
+    preview_policy = _SequentialRejectingPreviewPolicy(
+        [
+            (
+                PreviewDecision(
+                    command={
+                        "tool": "propose_replace_path_with_circle",
+                        "path_id": "path_1",
+                        "reason": "try circle",
+                        "confidence": 0.78,
+                        "requires_user_confirmation": True,
+                    },
+                    preview_result=_policy_preview_result(command_id="cmd_progress", path_id="path_1"),
+                    decision="reject",
+                    reason="Preview inlier ratio is too low.",
+                    risk_flags=("low_inlier_ratio",),
+                    decision_kind=DecisionKind.AUTO_REJECT,
+                    risk_level=RiskLevel.MEDIUM,
+                    policy_feedback=feedback,
+                ),
+            ),
+        ]
+    )
+
+    pipeline = AutoRefinementPipeline(
+        shape_candidate_detector=_EmptyDetector(),
+        proposed_command_planner=_EmptyPlanner(),
+        preview_policy=preview_policy,
+        ai_review_service=AIReviewService(responder=responder),
+        config=AutoRefinementPipelineConfig(max_iterations=1, max_stalled_rounds=1),
+    )
+    pipeline.set_progress_callback(events.append)
+
+    result = pipeline.run_with_ai_review(_rectangle_document())
+
+    stages = [event["stage"] for event in events]
+    for required in (
+        "ai_response_normalized",
+        "ai_commands_merged",
+        "retry_budget_done",
+        "preview_policy_start",
+        "preview_policy_done",
+        "document_update_done",
+        "ai_review_round_done",
+    ):
+        assert required in stages
+
+    normalized_event = next(event for event in events if event["stage"] == "ai_response_normalized")
+    assert normalized_event["summary_length"] == len("One AI proposal.")
+    assert normalized_event["issue_count"] == 1
+    assert normalized_event["ai_proposed_command_count"] == 1
+
+    merged_event = next(event for event in events if event["stage"] == "ai_commands_merged")
+    assert merged_event["algorithm_command_count"] == 0
+    assert merged_event["ai_command_count"] == 1
+    assert merged_event["merged_command_count"] == 1
+    assert merged_event["limited_command_count"] == 1
+
+    retry_event = next(event for event in events if event["stage"] == "retry_budget_done")
+    assert retry_event["blocked_count"] == 0
+    assert retry_event["executable_count"] == 1
+    assert retry_event["unresolved_target_count"] == 0
+
+    preview_done_event = next(event for event in events if event["stage"] == "preview_policy_done")
+    assert preview_done_event["decision_count"] == 1
+    assert preview_done_event["auto_apply_count"] == 0
+    assert preview_done_event["auto_reject_count"] == 1
+    assert preview_done_event["requires_external_decision_count"] == 0
+    assert preview_done_event["accepted_count"] == 0
+    assert preview_done_event["rejected_count"] == 1
+    assert preview_done_event["user_confirm_count"] == 0
+
+    update_event = next(event for event in events if event["stage"] == "document_update_done")
+    assert update_event["applied_command_count"] == 0
+    assert update_event["document_changed"] is False
+    assert update_event["score_before"] == 4.0
+    assert update_event["score_after"] == 4.0
+    assert update_event["improvement"] == 0.0
+    assert update_event["stalled_rounds"] == 1
+
+    round_done_event = next(event for event in events if event["stage"] == "ai_review_round_done")
+    assert round_done_event["iteration"] == 1
+    assert round_done_event["final_status"] == EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS.value
+    assert round_done_event["unresolved_target_count"] == 0
+    assert result.report.status == EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS.value

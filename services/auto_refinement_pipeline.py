@@ -330,8 +330,24 @@ class AutoRefinementPipeline:
                 prompt_char_count=prompt_char_count,
             )
             candidate_commands = tuple(dict(command) for command in ai_review_output.proposed_commands)
+            self._emit_progress(
+                "ai_response_normalized",
+                message="AI review response normalized.",
+                summary_length=len(ai_review_output.summary),
+                issue_count=len(ai_review_output.issues),
+                ai_proposed_command_count=len(candidate_commands),
+            )
+            merged_commands = tuple(dict(command) for command in algorithm_commands) + candidate_commands
             proposed_commands = self._limit_commands(
-                tuple(dict(command) for command in algorithm_commands) + candidate_commands
+                merged_commands
+            )
+            self._emit_progress(
+                "ai_commands_merged",
+                message="Merged algorithm and AI proposed commands.",
+                algorithm_command_count=len(algorithm_commands),
+                ai_command_count=len(candidate_commands),
+                merged_command_count=len(merged_commands),
+                limited_command_count=len(proposed_commands),
             )
             considered_commands.extend(dict(command) for command in proposed_commands)
 
@@ -340,9 +356,23 @@ class AutoRefinementPipeline:
                 rejection_memory=tuple(rejection_memory.values()),
                 forbidden_repeated_commands=tuple(sorted(forbidden_repeated_commands)),
             )
+            existing_forbidden_count = len(forbidden_repeated_commands)
             forbidden_repeated_commands.update(newly_forbidden)
             unresolved_targets.update(newly_unresolved)
+            self._emit_progress(
+                "retry_budget_done",
+                message="Retry budget filtering completed.",
+                blocked_count=len(blocked_decisions),
+                executable_count=len(executable_commands),
+                newly_forbidden_count=max(0, len(forbidden_repeated_commands) - existing_forbidden_count),
+                unresolved_target_count=len(unresolved_targets),
+            )
 
+            self._emit_progress(
+                "preview_policy_start",
+                message="Starting preview policy evaluation.",
+                executable_command_count=len(executable_commands),
+            )
             policy_result = self.preview_policy.evaluate_commands(
                 self._evaluation_commands(executable_commands),
                 current_document,
@@ -354,6 +384,22 @@ class AutoRefinementPipeline:
                 user_confirm_count=0,
             )
             round_decisions = tuple(blocked_decisions) + policy_result.decisions
+            auto_apply_count = sum(1 for decision in round_decisions if decision.decision_kind == DecisionKind.AUTO_APPLY)
+            auto_reject_count = sum(1 for decision in round_decisions if decision.decision_kind == DecisionKind.AUTO_REJECT)
+            requires_external_decision_count = sum(
+                1 for decision in round_decisions if decision.decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION
+            )
+            self._emit_progress(
+                "preview_policy_done",
+                message="Preview policy evaluation completed.",
+                decision_count=len(round_decisions),
+                auto_apply_count=auto_apply_count,
+                auto_reject_count=auto_reject_count,
+                requires_external_decision_count=requires_external_decision_count,
+                accepted_count=sum(1 for decision in round_decisions if decision.decision == "auto_accept"),
+                rejected_count=sum(1 for decision in round_decisions if decision.decision == "reject"),
+                user_confirm_count=sum(1 for decision in round_decisions if decision.decision == "user_confirm"),
+            )
             all_decisions.extend(round_decisions)
 
             round_feedback = tuple(
@@ -366,6 +412,8 @@ class AutoRefinementPipeline:
                 forbidden_repeated_commands.update(feedback.forbidden_repeated_commands)
 
             rejection_memory = self._update_rejection_memory(rejection_memory, round_decisions)
+            score_before_round = current_score
+            previous_document = current_document
             current_document = current_document if effective_dry_run else policy_result.final_document
             next_score = self.scorer.score_document(current_document).total_score
             improvement = current_score - next_score
@@ -376,14 +424,34 @@ class AutoRefinementPipeline:
             else:
                 current_score = next_score
                 stalled_rounds += 1
+            self._emit_progress(
+                "document_update_done",
+                message="Updated document state after preview policy.",
+                applied_command_count=auto_apply_count,
+                document_changed=current_document != previous_document,
+                score_before=score_before_round,
+                score_after=next_score,
+                improvement=improvement,
+                stalled_rounds=stalled_rounds,
+            )
 
             if unresolved_targets:
                 final_status = EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS
+            should_break = False
             if stalled_rounds >= self.config.max_stalled_rounds:
                 if round_feedback or unresolved_targets:
                     final_status = EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS
-                break
+                should_break = True
             if not candidate_commands and not algorithm_commands:
+                should_break = True
+            self._emit_progress(
+                "ai_review_round_done",
+                message="AI review round completed.",
+                iteration=iteration,
+                final_status=final_status.value,
+                unresolved_target_count=len(unresolved_targets),
+            )
+            if should_break:
                 break
 
         if collected_feedback and final_status == EngineStatus.COMPLETED:
