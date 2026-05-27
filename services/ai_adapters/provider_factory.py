@@ -58,6 +58,7 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             client=kwargs.get("client"),
             image_detail=str(kwargs.get("image_detail", "auto")),
             max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
+            timeout_seconds=None if kwargs.get("timeout_seconds") is None else float(kwargs.get("timeout_seconds")),
         )
 
     if normalized_provider == "gemini":
@@ -67,6 +68,7 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             client=kwargs.get("client"),
             image_loader=kwargs.get("image_loader"),
             max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
+            timeout_seconds=None if kwargs.get("timeout_seconds") is None else float(kwargs.get("timeout_seconds")),
         )
 
     if normalized_provider == "siliconflow":
@@ -77,6 +79,7 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             client=kwargs.get("client"),
             image_detail=str(kwargs.get("image_detail", "auto")),
             max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
+            timeout_seconds=None if kwargs.get("timeout_seconds") is None else float(kwargs.get("timeout_seconds")),
         )
 
     if normalized_provider == "responder":

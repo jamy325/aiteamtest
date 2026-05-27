@@ -27,6 +27,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
     client: Any | None = None
     image_detail: str = "auto"
     max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES
+    timeout_seconds: float | None = None
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
@@ -52,6 +53,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                     "strict": True,
                 },
             },
+            timeout=self.timeout_seconds,
         )
         response_text = self._extract_message_content(response)
         return parse_json_response_text(response_text, provider_name="siliconflow")

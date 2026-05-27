@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -144,6 +145,7 @@ class AutoRefinementPipeline:
         json_exporter: JsonExporter | None = None,
         config: AutoRefinementPipelineConfig | None = None,
         ai_review_context_builder: AIReviewContextBuilder | None = None,
+        progress_callback=None,
     ) -> None:
         self.shape_candidate_detector = shape_candidate_detector or ShapeCandidateDetector()
         self.proposed_command_planner = proposed_command_planner or ProposedCommandPlanner()
@@ -154,6 +156,10 @@ class AutoRefinementPipeline:
         self.json_exporter = json_exporter or JsonExporter()
         self.config = config or AutoRefinementPipelineConfig()
         self.ai_review_context_builder = ai_review_context_builder or AIReviewContextBuilder()
+        self.progress_callback = progress_callback
+
+    def set_progress_callback(self, callback) -> None:
+        self.progress_callback = callback
 
     def run_from_pipeline_result(
         self,
@@ -189,8 +195,16 @@ class AutoRefinementPipeline:
         target_types: tuple[ShapeCandidateTargetType, ...] | list[ShapeCandidateTargetType] | None = None,
         dry_run_only: bool | None = None,
     ) -> AutoRefinementPipelineResult:
+        stage_start = perf_counter()
         selected_target_types = tuple(target_types) if target_types is not None else self.config.target_types
         effective_dry_run = self.config.dry_run_only if dry_run_only is None else bool(dry_run_only)
+        self._emit_progress(
+            "auto_refinement_start",
+            message="Starting auto refinement pipeline.",
+            path_count=len(document.paths),
+            segment_count=len(document.segments),
+            enable_ai_review=False,
+        )
 
         score_before = self.scorer.score_document(document).total_score
         processing_summary = self._processing_summary(document)
@@ -217,13 +231,23 @@ class AutoRefinementPipeline:
             dry_run_only=effective_dry_run,
             target_types=selected_target_types,
         )
-        return AutoRefinementPipelineResult(
+        result = AutoRefinementPipelineResult(
             refined_document=refined_document,
             candidates=candidates,
             proposed_commands=proposed_commands,
             preview_decisions=policy_result.decisions,
             report=report,
         )
+        self._emit_progress(
+            "auto_refinement_done",
+            message="Auto refinement pipeline completed.",
+            duration_ms=(perf_counter() - stage_start) * 1000.0,
+            path_count=len(result.refined_document.paths),
+            segment_count=len(result.refined_document.segments),
+            decision_count=len(result.preview_decisions),
+            enable_ai_review=False,
+        )
+        return result
 
     def run_with_ai_review(
         self,
@@ -236,8 +260,16 @@ class AutoRefinementPipeline:
         if self.ai_review_service is None:
             raise RuntimeError("AI review service is not configured")
 
+        stage_start = perf_counter()
         selected_target_types = tuple(target_types) if target_types is not None else self.config.target_types
         effective_dry_run = self.config.dry_run_only if dry_run_only is None else bool(dry_run_only)
+        self._emit_progress(
+            "auto_refinement_start",
+            message="Starting auto refinement pipeline.",
+            path_count=len(document.paths),
+            segment_count=len(document.segments),
+            enable_ai_review=True,
+        )
         initial_document = document
         current_document = document
         current_score = self.scorer.score_document(document).total_score
@@ -262,6 +294,8 @@ class AutoRefinementPipeline:
             )
             latest_candidates = self._filter_candidates(detected_candidates, selected_target_types)
             algorithm_commands = self.proposed_command_planner.plan_commands(current_document, latest_candidates)
+            context_start = perf_counter()
+            self._emit_progress("ai_review_context_build_start", message="Building AI review context.")
             review_input = self._build_ai_review_input(
                 document=current_document,
                 source_image=source_image,
@@ -273,14 +307,47 @@ class AutoRefinementPipeline:
                 processing_summary=processing_summary,
             )
             prompt_char_count = len(build_review_prompt(review_input))
+            self._emit_progress(
+                "ai_review_context_build_done",
+                message="AI review context built.",
+                duration_ms=(perf_counter() - context_start) * 1000.0,
+                review_job_count=len(review_input.review_jobs),
+                image_file_count=sum(
+                    1
+                    for item in (
+                        review_input.original_image,
+                        review_input.overlay_image,
+                        review_input.distance_field_diff_image,
+                    )
+                    if item
+                ),
+                panel_count=sum(int(job.get("image_count", 0)) for job in review_input.review_jobs),
+                prompt_char_count=prompt_char_count,
+            )
             ai_review_output = self.ai_review_service.run_review(review_input)
             ai_review_summary = self._ai_review_summary(
                 review_input=review_input,
                 prompt_char_count=prompt_char_count,
             )
             candidate_commands = tuple(dict(command) for command in ai_review_output.proposed_commands)
+            self._emit_progress(
+                "ai_response_normalized",
+                message="AI review response normalized.",
+                summary_length=len(ai_review_output.summary),
+                issue_count=len(ai_review_output.issues),
+                ai_proposed_command_count=len(candidate_commands),
+            )
+            merged_commands = tuple(dict(command) for command in algorithm_commands) + candidate_commands
             proposed_commands = self._limit_commands(
-                tuple(dict(command) for command in algorithm_commands) + candidate_commands
+                merged_commands
+            )
+            self._emit_progress(
+                "ai_commands_merged",
+                message="Merged algorithm and AI proposed commands.",
+                algorithm_command_count=len(algorithm_commands),
+                ai_command_count=len(candidate_commands),
+                merged_command_count=len(merged_commands),
+                limited_command_count=len(proposed_commands),
             )
             considered_commands.extend(dict(command) for command in proposed_commands)
 
@@ -289,9 +356,23 @@ class AutoRefinementPipeline:
                 rejection_memory=tuple(rejection_memory.values()),
                 forbidden_repeated_commands=tuple(sorted(forbidden_repeated_commands)),
             )
+            existing_forbidden_count = len(forbidden_repeated_commands)
             forbidden_repeated_commands.update(newly_forbidden)
             unresolved_targets.update(newly_unresolved)
+            self._emit_progress(
+                "retry_budget_done",
+                message="Retry budget filtering completed.",
+                blocked_count=len(blocked_decisions),
+                executable_count=len(executable_commands),
+                newly_forbidden_count=max(0, len(forbidden_repeated_commands) - existing_forbidden_count),
+                unresolved_target_count=len(unresolved_targets),
+            )
 
+            self._emit_progress(
+                "preview_policy_start",
+                message="Starting preview policy evaluation.",
+                executable_command_count=len(executable_commands),
+            )
             policy_result = self.preview_policy.evaluate_commands(
                 self._evaluation_commands(executable_commands),
                 current_document,
@@ -303,6 +384,22 @@ class AutoRefinementPipeline:
                 user_confirm_count=0,
             )
             round_decisions = tuple(blocked_decisions) + policy_result.decisions
+            auto_apply_count = sum(1 for decision in round_decisions if decision.decision_kind == DecisionKind.AUTO_APPLY)
+            auto_reject_count = sum(1 for decision in round_decisions if decision.decision_kind == DecisionKind.AUTO_REJECT)
+            requires_external_decision_count = sum(
+                1 for decision in round_decisions if decision.decision_kind == DecisionKind.REQUIRES_EXTERNAL_DECISION
+            )
+            self._emit_progress(
+                "preview_policy_done",
+                message="Preview policy evaluation completed.",
+                decision_count=len(round_decisions),
+                auto_apply_count=auto_apply_count,
+                auto_reject_count=auto_reject_count,
+                requires_external_decision_count=requires_external_decision_count,
+                accepted_count=sum(1 for decision in round_decisions if decision.decision == "auto_accept"),
+                rejected_count=sum(1 for decision in round_decisions if decision.decision == "reject"),
+                user_confirm_count=sum(1 for decision in round_decisions if decision.decision == "user_confirm"),
+            )
             all_decisions.extend(round_decisions)
 
             round_feedback = tuple(
@@ -315,6 +412,8 @@ class AutoRefinementPipeline:
                 forbidden_repeated_commands.update(feedback.forbidden_repeated_commands)
 
             rejection_memory = self._update_rejection_memory(rejection_memory, round_decisions)
+            score_before_round = current_score
+            previous_document = current_document
             current_document = current_document if effective_dry_run else policy_result.final_document
             next_score = self.scorer.score_document(current_document).total_score
             improvement = current_score - next_score
@@ -325,14 +424,34 @@ class AutoRefinementPipeline:
             else:
                 current_score = next_score
                 stalled_rounds += 1
+            self._emit_progress(
+                "document_update_done",
+                message="Updated document state after preview policy.",
+                applied_command_count=auto_apply_count,
+                document_changed=current_document != previous_document,
+                score_before=score_before_round,
+                score_after=next_score,
+                improvement=improvement,
+                stalled_rounds=stalled_rounds,
+            )
 
             if unresolved_targets:
                 final_status = EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS
+            should_break = False
             if stalled_rounds >= self.config.max_stalled_rounds:
                 if round_feedback or unresolved_targets:
                     final_status = EngineStatus.COMPLETED_WITH_UNRESOLVED_REGIONS
-                break
+                should_break = True
             if not candidate_commands and not algorithm_commands:
+                should_break = True
+            self._emit_progress(
+                "ai_review_round_done",
+                message="AI review round completed.",
+                iteration=iteration,
+                final_status=final_status.value,
+                unresolved_target_count=len(unresolved_targets),
+            )
+            if should_break:
                 break
 
         if collected_feedback and final_status == EngineStatus.COMPLETED:
@@ -367,13 +486,23 @@ class AutoRefinementPipeline:
             unresolved_targets=tuple(sorted(unresolved_targets)),
             ai_review_summary=ai_review_summary,
         )
-        return AutoRefinementPipelineResult(
+        result = AutoRefinementPipelineResult(
             refined_document=current_document,
             candidates=latest_candidates,
             proposed_commands=tuple(considered_commands),
             preview_decisions=tuple(all_decisions),
             report=report,
         )
+        self._emit_progress(
+            "auto_refinement_done",
+            message="Auto refinement pipeline completed.",
+            duration_ms=(perf_counter() - stage_start) * 1000.0,
+            path_count=len(result.refined_document.paths),
+            segment_count=len(result.refined_document.segments),
+            decision_count=len(result.preview_decisions),
+            enable_ai_review=True,
+        )
+        return result
 
     def _filter_candidates(
         self,
@@ -609,6 +738,13 @@ class AutoRefinementPipeline:
                 for job in jobs
             ],
         }
+
+    def _emit_progress(self, stage: str, *, message: str, **fields: Any) -> None:
+        if self.progress_callback is None:
+            return
+        event = {"stage": stage, "message": message}
+        event.update(fields)
+        self.progress_callback(event)
 
     def _processing_summary(self, document: VectorDocument) -> dict[str, Any]:
         available_binary_path_count = sum(1 for path in document.paths if path.source == "binary_contour")

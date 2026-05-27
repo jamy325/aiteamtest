@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from core.types import ShapeCandidateTargetType, VectorDocument
@@ -50,6 +51,7 @@ class VectorReconstructionEngineConfig:
     ai_provider: str = ""
     ai_model: str = ""
     ai_status: str = "disabled"
+    ai_review_timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +75,7 @@ class VectorReconstructionEngine:
         auto_refinement_pipeline: AutoRefinementPipeline | Any | None = None,
         ai_review_service: AIReviewService | None = None,
         config: VectorReconstructionEngineConfig | None = None,
+        progress_callback=None,
     ) -> None:
         self.minimal_pipeline = minimal_pipeline or MinimalPipeline()
         self.auto_refinement_pipeline = auto_refinement_pipeline or AutoRefinementPipeline(
@@ -83,6 +86,17 @@ class VectorReconstructionEngine:
         self.json_exporter = JsonExporter()
         self.svg_exporter = SvgExporter()
         self.dxf_exporter = DxfExporter()
+        self.progress_callback = progress_callback
+        self.set_progress_callback(progress_callback)
+
+    def set_progress_callback(self, callback) -> None:
+        self.progress_callback = callback
+        if hasattr(self.minimal_pipeline, "set_progress_callback"):
+            self.minimal_pipeline.set_progress_callback(callback)
+        if hasattr(self.auto_refinement_pipeline, "set_progress_callback"):
+            self.auto_refinement_pipeline.set_progress_callback(callback)
+        if self.ai_review_service is not None and hasattr(self.ai_review_service, "set_progress_callback"):
+            self.ai_review_service.set_progress_callback(callback)
 
     def run_document(
         self,
@@ -211,6 +225,13 @@ class VectorReconstructionEngine:
         source_image = pipeline_result.source_image
         if source_image is None:
             raise ValueError("pipeline result does not include source_image")
+        artifact_start = perf_counter()
+        self._emit_progress(
+            "artifact_export_start",
+            message="Starting artifact export.",
+            path_count=len(final_document.paths),
+            segment_count=len(final_document.segments),
+        )
         artifact_score_summary = self._artifact_score_summary(
             before_document=pipeline_result.document,
             after_document=final_document,
@@ -222,7 +243,7 @@ class VectorReconstructionEngine:
             artifact_score_summary=artifact_score_summary,
             stroke_summary=stroke_summary,
         )
-        return VectorReconstructionArtifactBundle(
+        bundle = VectorReconstructionArtifactBundle(
             engine_result=engine_result,
             pipeline_result=pipeline_result,
             document_json=self.json_exporter.export_document(final_document),
@@ -239,6 +260,14 @@ class VectorReconstructionEngine:
                 stroke_summary=stroke_summary,
             ),
         )
+        self._emit_progress(
+            "artifact_export_done",
+            message="Artifact export completed.",
+            duration_ms=(perf_counter() - artifact_start) * 1000.0,
+            path_count=len(final_document.paths),
+            segment_count=len(final_document.segments),
+        )
+        return bundle
 
     def _runtime_config(
         self,
@@ -304,6 +333,7 @@ class VectorReconstructionEngine:
             json_exporter=base_pipeline.json_exporter,
             config=configured_pipeline_config,
             ai_review_context_builder=base_pipeline.ai_review_context_builder,
+            progress_callback=base_pipeline.progress_callback,
         )
 
     def _run_pipeline(
@@ -390,6 +420,7 @@ class VectorReconstructionEngine:
                 "ai_provider": runtime_config.ai_provider,
                 "ai_model": runtime_config.ai_model,
                 "ai_status": runtime_config.ai_status,
+                "ai_review_timeout_seconds": runtime_config.ai_review_timeout_seconds,
                 **self._ai_command_counts(result),
             },
         )
@@ -442,6 +473,7 @@ class VectorReconstructionEngine:
             "ai_provider": runtime_config.ai_provider,
             "ai_model": runtime_config.ai_model,
             "ai_status": runtime_config.ai_status,
+            "ai_review_timeout_seconds": runtime_config.ai_review_timeout_seconds,
             "ai_proposed_count": int(engine_result.metadata.get("ai_proposed_count", 0)),
             "algorithm_proposed_count": int(engine_result.metadata.get("algorithm_proposed_count", 0)),
             "max_iterations": runtime_config.max_iterations,
@@ -594,6 +626,13 @@ class VectorReconstructionEngine:
             return None
         parsed = float(value)
         return parsed if math.isfinite(parsed) else None
+
+    def _emit_progress(self, stage: str, *, message: str, **fields: Any) -> None:
+        if self.progress_callback is None:
+            return
+        event = {"stage": stage, "message": message}
+        event.update(fields)
+        self.progress_callback(event)
 
 
 __all__ = [
