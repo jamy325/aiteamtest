@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
@@ -182,6 +183,8 @@ class AIReviewService:
         self,
         adapter: VisionReviewAdapter | None = None,
         responder: Callable[[str, AIReviewInput], dict[str, Any]] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        interaction_logger: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         if adapter is not None and responder is not None:
             raise ValueError("configure either adapter or responder, not both")
@@ -189,6 +192,22 @@ class AIReviewService:
             ResponderVisionAdapter(responder) if responder is not None else None
         )
         self.responder = responder
+        self.progress_callback = progress_callback
+        self.interaction_logger = interaction_logger
+        self.provider_name = ""
+        self.provider_model = ""
+        self.provider_status = ""
+
+    def set_progress_callback(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
+        self.progress_callback = callback
+
+    def set_interaction_logger(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
+        self.interaction_logger = callback
+
+    def set_runtime_metadata(self, *, provider: str = "", model: str = "", status: str = "") -> None:
+        self.provider_name = str(provider).strip().lower()
+        self.provider_model = str(model).strip()
+        self.provider_status = str(status).strip()
 
     def run_review(self, review_input: AIReviewInput) -> AIReviewOutput:
         if self.adapter is None:
@@ -200,20 +219,80 @@ class AIReviewService:
             raise AIReviewInputTooLarge(
                 f"AI review input exceeds max prompt chars: {len(prompt)} > {max_prompt_chars}"
             )
+        provider_metadata = self._provider_metadata()
+        image_paths = tuple(
+            item
+            for item in (
+                review_input.original_image,
+                review_input.overlay_image,
+                review_input.distance_field_diff_image,
+            )
+            if item
+        )
+        panel_count = sum(int(job.get("image_count", 0)) for job in review_input.review_jobs)
+        self._emit_progress(
+            "ai_provider_call_start",
+            message="Calling AI review provider.",
+            provider=provider_metadata["provider"],
+            model=provider_metadata["model"],
+            status=provider_metadata["status"],
+            prompt_char_count=len(prompt),
+            image_file_count=len(image_paths),
+            panel_count=panel_count,
+            review_job_count=len(review_input.review_jobs),
+        )
+        provider_start = perf_counter()
         try:
             raw_response = self.adapter.review(prompt, review_input)
         except Exception as exc:
+            duration_ms = (perf_counter() - provider_start) * 1000.0
+            self._emit_progress(
+                "ai_provider_call_done",
+                message="AI review provider call failed.",
+                provider=provider_metadata["provider"],
+                model=provider_metadata["model"],
+                status="error",
+                duration_ms=duration_ms,
+                error_type=type(exc).__name__,
+            )
             if _looks_like_context_overflow(exc):
                 raise ProviderContextLimitExceeded(str(exc)) from exc
             raise
         response = normalize_ai_review_response(raw_response)
         validate_ai_review_response(response)
+        duration_ms = (perf_counter() - provider_start) * 1000.0
+        self._emit_progress(
+            "ai_provider_call_done",
+            message="AI review provider call completed.",
+            provider=provider_metadata["provider"],
+            model=provider_metadata["model"],
+            status=provider_metadata["status"],
+            duration_ms=duration_ms,
+            prompt_char_count=len(prompt),
+            image_file_count=len(image_paths),
+            panel_count=panel_count,
+            review_job_count=len(review_input.review_jobs),
+        )
         normalized_commands = []
         for command in response["proposed_commands"]:
             normalized_command = dict(command)
             normalized_command.setdefault("proposal_source", "ai_review")
             normalized_commands.append(normalized_command)
         response["proposed_commands"] = normalized_commands
+        self._record_interaction(
+            {
+                "provider": provider_metadata["provider"],
+                "model": provider_metadata["model"],
+                "status": provider_metadata["status"],
+                "prompt": prompt,
+                "prompt_char_count": len(prompt),
+                "image_paths": list(image_paths),
+                "review_input_summary": _review_input_summary(review_input),
+                "raw_response": json.loads(json.dumps(raw_response)),
+                "normalized_response": json.loads(json.dumps(response)),
+                "duration_ms": round(duration_ms, 3),
+            }
+        )
         return AIReviewOutput(
             summary=str(response["summary"]),
             issues=tuple(dict(issue) for issue in response["issues"]),
@@ -222,6 +301,40 @@ class AIReviewService:
             review_input=review_input,
             raw_response=dict(response),
         )
+
+    def _provider_metadata(self) -> dict[str, str]:
+        provider = self.provider_name
+        model = self.provider_model
+        status = self.provider_status or "enabled"
+        if not provider and self.adapter is not None:
+            adapter_name = type(self.adapter).__name__.lower()
+            if "openai" in adapter_name:
+                provider = "openai"
+            elif "gemini" in adapter_name:
+                provider = "gemini"
+            elif "siliconflow" in adapter_name:
+                provider = "siliconflow"
+            elif "file" in adapter_name:
+                provider = "file"
+            elif "recorded" in adapter_name:
+                provider = str(getattr(self.adapter, "provider_name", "")).strip().lower() or "recorded"
+            else:
+                provider = adapter_name
+        if not model and self.adapter is not None:
+            model = str(getattr(self.adapter, "model", "")).strip()
+        return {"provider": provider, "model": model, "status": status}
+
+    def _emit_progress(self, stage: str, *, message: str, **fields: Any) -> None:
+        if self.progress_callback is None:
+            return
+        event = {"stage": stage, "message": message}
+        event.update(fields)
+        self.progress_callback(event)
+
+    def _record_interaction(self, payload: dict[str, Any]) -> None:
+        if self.interaction_logger is None:
+            return
+        self.interaction_logger(payload)
 
 
 def _max_prompt_chars(prompt_budget: dict[str, Any] | None) -> int | None:
@@ -245,6 +358,36 @@ def _looks_like_context_overflow(exc: BaseException) -> bool:
         "context window",
     )
     return any(pattern in message for pattern in patterns)
+
+
+def _review_input_summary(review_input: AIReviewInput) -> dict[str, Any]:
+    return {
+        "ai_input_mode": review_input.ai_input_mode,
+        "ai_input_truncated": bool(review_input.ai_input_truncated),
+        "fit_error": float(review_input.fit_error),
+        "complexity_score": float(review_input.complexity_score),
+        "topology_status": review_input.topology_status,
+        "self_intersection_count": int(review_input.self_intersection_count),
+        "document_summary": json.loads(json.dumps(review_input.document_summary)),
+        "preview_summary": json.loads(json.dumps(review_input.preview_summary)),
+        "prompt_budget": json.loads(json.dumps(review_input.prompt_budget)),
+        "review_job_count": len(review_input.review_jobs),
+        "candidate_count": len(review_input.candidates),
+        "algorithm_command_count": len(review_input.proposed_commands_from_algorithm),
+        "policy_feedback_count": len(review_input.policy_feedback),
+        "rejection_memory_count": len(review_input.rejection_memory),
+        "forbidden_repeated_command_count": len(review_input.forbidden_repeated_commands),
+        "image_paths": [
+            item
+            for item in (
+                review_input.original_image,
+                review_input.overlay_image,
+                review_input.distance_field_diff_image,
+            )
+            if item
+        ],
+        "review_jobs": json.loads(json.dumps(review_input.review_jobs)),
+    }
 
 
 __all__ = [

@@ -293,6 +293,53 @@ def test_ai_review_service_wraps_provider_context_overflow_errors() -> None:
         AIReviewService(responder=responder).run_review(review_input)
 
 
+def test_ai_review_service_emits_progress_and_interaction_payload() -> None:
+    progress_events: list[dict[str, object]] = []
+    interactions: list[dict[str, object]] = []
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {"summary": "ok", "issues": [], "proposed_commands": []}
+
+    service = AIReviewService(responder=responder)
+    service.set_progress_callback(progress_events.append)
+    service.set_interaction_logger(interactions.append)
+    service.set_runtime_metadata(provider="file", model="fixture-model", status="enabled")
+    review_input = AIReviewInput(
+        original_image="original.png",
+        overlay_image="overlay.png",
+        distance_field_diff_image="diff.png",
+        vector_document_json={"document_id": "doc_progress"},
+        document_summary={"document_id": "doc_progress"},
+        review_jobs=(
+            {
+                "job_id": "job_1",
+                "path_id": "path_1",
+                "window_id": "path_1:window_1",
+                "crop_bbox": [0, 0, 64, 64],
+                "image_count": 3,
+                "truncated": False,
+            },
+        ),
+        prompt_budget={"max_prompt_chars": 4000, "max_crop_size_px": 512},
+        ai_input_mode="local_visual_context",
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    output = service.run_review(review_input)
+
+    assert output.summary == "ok"
+    assert [event["stage"] for event in progress_events] == ["ai_provider_call_start", "ai_provider_call_done"]
+    assert interactions and interactions[0]["provider"] == "file"
+    assert interactions[0]["model"] == "fixture-model"
+    assert interactions[0]["status"] == "enabled"
+    assert interactions[0]["prompt_char_count"] == len(output.prompt)
+    assert interactions[0]["review_input_summary"]["review_job_count"] == 1
+
+
 def test_ai_review_flow_rejects_invalid_schema_response() -> None:
     def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
         return {

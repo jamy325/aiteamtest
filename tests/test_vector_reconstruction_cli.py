@@ -335,6 +335,168 @@ def test_vector_reconstruction_cli_file_provider_ai_review_uses_local_visual_con
     assert "ai_review_summary" in decision_report
 
 
+def test_vector_reconstruction_cli_emits_jsonl_progress_and_writes_ai_review_log(tmp_path: Path) -> None:
+    input_path = tmp_path / "circle.png"
+    _write_circle_image(input_path)
+    output_dir = tmp_path / "bundle_ai_log"
+    log_path = tmp_path / "ai_review_interaction.json"
+    response_path = tmp_path / "ai_response.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "summary": "Local visual review completed.",
+                "issues": [],
+                "proposed_commands": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = dict(**os.environ)
+    env["AI_PROVIDER"] = "file"
+    env["AI_FILE_RESPONSE_PATH"] = str(response_path)
+    env["OPENAI_API_KEY"] = "super-secret-key"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vector_reconstruction",
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--max-iterations",
+            "1",
+            "--export-mode",
+            "centerline",
+            "--enable-ai-review",
+            "--ai-review-log-path",
+            str(log_path),
+            "--progress-format",
+            "jsonl",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    stdout_payload = json.loads(completed.stdout.strip())
+    assert stdout_payload["ok"] is True
+    progress_events = [json.loads(line) for line in completed.stderr.splitlines() if line.strip()]
+    stages = {event["stage"] for event in progress_events}
+    for required in (
+        "load_input_image_start",
+        "load_input_image_done",
+        "minimal_pipeline_start",
+        "minimal_pipeline_done",
+        "contour_extraction_start",
+        "contour_extraction_done",
+        "skeleton_processing_start",
+        "skeleton_processing_done",
+        "auto_refinement_start",
+        "auto_refinement_done",
+        "ai_review_context_build_start",
+        "ai_review_context_build_done",
+        "ai_provider_call_start",
+        "ai_provider_call_done",
+        "artifact_export_start",
+        "artifact_export_done",
+        "total_done",
+    ):
+        assert required in stages
+
+    assert log_path.exists()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "super-secret-key" not in log_text
+    for forbidden in ("source_contours", "resampled_contours", "\"paths\"", "\"segments\"", "\"anchors\""):
+        assert forbidden not in log_text
+    interaction_log = json.loads(log_text)
+    assert interaction_log["interaction_count"] == 1
+    interaction = interaction_log["interactions"][0]
+    assert interaction["provider"] == "file"
+    assert interaction["prompt_char_count"] > 0
+    assert interaction["review_input_summary"]["review_job_count"] >= 1
+    assert interaction["normalized_response"]["summary"] == "Local visual review completed."
+
+
+def test_vector_reconstruction_cli_file_provider_accepts_utf8_bom_response(tmp_path: Path) -> None:
+    input_path = tmp_path / "circle.png"
+    _write_circle_image(input_path)
+    output_dir = tmp_path / "bundle_bom"
+    response_path = tmp_path / "ai_response_bom.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "summary": "BOM response completed.",
+                "issues": [],
+                "proposed_commands": [],
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+    env = dict(**os.environ)
+    env["AI_PROVIDER"] = "file"
+    env["AI_FILE_RESPONSE_PATH"] = str(response_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vector_reconstruction",
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--max-iterations",
+            "1",
+            "--export-mode",
+            "centerline",
+            "--enable-ai-review",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout.strip())
+    assert payload["ok"] is True
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["ai_provider"] == "file"
+
+
+def test_vector_reconstruction_cli_quiet_suppresses_progress_logs(tmp_path: Path) -> None:
+    input_path = tmp_path / "circle.png"
+    _write_circle_image(input_path)
+    output_dir = tmp_path / "bundle_quiet"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vector_reconstruction",
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--dry-run-only",
+            "--quiet",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr.strip() == ""
+
+
 def test_vector_reconstruction_cli_centerline_rgba_output_has_no_non_finite_tokens(tmp_path: Path) -> None:
     input_path = tmp_path / "rgba_line.png"
     _write_rgba_black_line_image(input_path)

@@ -502,3 +502,29 @@ def test_vector_reconstruction_engine_records_ai_review_metadata_and_command_cou
     assert bundle.decision_report["metadata"]["ai_provider"] == "openai"
     assert bundle.decision_report["metadata"]["ai_model"] == "gpt-4.1-mini"
     assert bundle.decision_report["metadata"]["ai_status"] == "recorded_replay"
+
+
+def test_vector_reconstruction_engine_emits_artifact_export_progress_events() -> None:
+    events: list[dict[str, object]] = []
+    pipeline_result = MinimalPipelineResult(
+        document=_stroke_document("bundle_doc_progress"),
+        json_payload="{}",
+        extracted_contours=None,  # type: ignore[arg-type]
+        source_image="fake-image",
+        debug_artifacts=None,
+    )
+    minimal_pipeline = _FakeMinimalPipeline(pipeline_result)
+    pipeline = _FakeAutoRefinementPipeline(_auto_result(refined_document=_stroke_document("engine_result_doc")))
+    engine = VectorReconstructionEngine(
+        minimal_pipeline=minimal_pipeline,
+        auto_refinement_pipeline=pipeline,
+    )
+    engine.set_progress_callback(events.append)
+
+    bundle = engine.run_artifact_bundle("input.png")
+
+    assert bundle.metrics["path_count"] >= 1
+    assert [event["stage"] for event in events if str(event.get("stage", "")).startswith("artifact_export")] == [
+        "artifact_export_start",
+        "artifact_export_done",
+    ]

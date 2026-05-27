@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from time import perf_counter
 from typing import Sequence
 
 from core.types import ShapeCandidateTargetType
@@ -28,6 +29,10 @@ class AIProviderNotConfigured(RuntimeError):
 
 
 class AIProviderConfigurationError(RuntimeError):
+    pass
+
+
+class AIReviewLogWriteError(RuntimeError):
     pass
 
 
@@ -60,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(_EXPORT_MODE_CHOICES),
         help="Exporter path selection mode for SVG/DXF output.",
     )
+    run_parser.add_argument("--quiet", action="store_true", help="Disable progress logs on stderr.")
+    run_parser.add_argument(
+        "--progress-format",
+        default="text",
+        choices=("text", "jsonl"),
+        help="Progress log format written to stderr.",
+    )
+    run_parser.add_argument(
+        "--ai-review-log-path",
+        default=None,
+        help="Optional JSON path for sanitized AI review interaction logs.",
+    )
     return parser
 
 
@@ -73,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run_command(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     output_dir = Path(args.output)
+    progress_reporter = _ProgressReporter(quiet=bool(args.quiet), format=str(args.progress_format))
     if not input_path.is_file():
         return _emit_error(
             "InputImageNotFound",
@@ -84,12 +102,24 @@ def _run_command(args: argparse.Namespace) -> int:
         )
 
     try:
+        total_start = perf_counter()
         target_types = _parse_target_types(args.target_types)
         ai_review_service, engine_config = _build_engine_runtime(enable_ai_review=bool(args.enable_ai_review))
+        interaction_logger = _AIReviewInteractionLogWriter(Path(args.ai_review_log_path)) if args.ai_review_log_path else None
+        if ai_review_service is not None:
+            ai_review_service.set_progress_callback(progress_reporter.emit_event)
+            ai_review_service.set_interaction_logger(None if interaction_logger is None else interaction_logger.record)
+            ai_review_service.set_runtime_metadata(
+                provider=engine_config.ai_provider,
+                model=engine_config.ai_model,
+                status=engine_config.ai_status,
+            )
         engine = VectorReconstructionEngine(
             ai_review_service=ai_review_service,
             config=engine_config,
         )
+        if hasattr(engine, "set_progress_callback"):
+            engine.set_progress_callback(progress_reporter.emit_event)
         bundle = engine.run_artifact_bundle(
             input_path,
             document_id=args.document_id,
@@ -101,6 +131,15 @@ def _run_command(args: argparse.Namespace) -> int:
             export_mode=str(args.export_mode),
         )
         _write_bundle(output_dir, bundle)
+        progress_reporter.emit_event(
+            {
+                "stage": "total_done",
+                "message": "CLI run completed.",
+                "duration_ms": (perf_counter() - total_start) * 1000.0,
+                "status": bundle.engine_result.status.value,
+                "output": str(output_dir),
+            }
+        )
         if bundle.engine_result.status == EngineStatus.FAILED:
             return _emit_error(
                 "EngineFailed",
@@ -310,6 +349,71 @@ def _emit_error(error_type: str, message: str, details: dict[str, object] | None
     }
     print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
     return 1
+
+
+class _ProgressReporter:
+    def __init__(self, *, quiet: bool, format: str) -> None:
+        self.quiet = quiet
+        self.format = format
+        self.started_at = perf_counter()
+
+    def emit_event(self, event: dict[str, object]) -> None:
+        if self.quiet:
+            return
+        payload = dict(event)
+        payload.setdefault("elapsed_ms", round((perf_counter() - self.started_at) * 1000.0, 3))
+        if self.format == "jsonl":
+            print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+            return
+        stage = str(payload.get("stage", "unknown_stage"))
+        message = str(payload.get("message", ""))
+        details = ", ".join(
+            f"{key}={value}"
+            for key, value in payload.items()
+            if key not in {"stage", "message"} and value not in (None, "", (), [], {})
+        )
+        suffix = f" ({details})" if details else ""
+        print(f"[{stage}] {message}{suffix}", file=sys.stderr)
+
+
+class _AIReviewInteractionLogWriter:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.records: list[dict[str, object]] = []
+
+    def record(self, payload: dict[str, object]) -> None:
+        self.records.append(_sanitize_for_ai_review_log(payload))
+        document = {
+            "interaction_count": len(self.records),
+            "interactions": self.records,
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError as exc:
+            raise AIReviewLogWriteError(f"failed to write AI review interaction log: {self.path}") from exc
+
+
+def _sanitize_for_ai_review_log(value: object) -> object:
+    forbidden_keys = {"source_contours", "resampled_contours", "paths", "segments", "anchors", "document_json"}
+    secret_markers = ("api_key", "authorization", "secret", "token")
+    if isinstance(value, dict):
+        sanitized: dict[str, object] = {}
+        for key, item in value.items():
+            normalized_key = str(key)
+            lowered = normalized_key.lower()
+            if normalized_key in forbidden_keys:
+                continue
+            if any(marker in lowered for marker in secret_markers):
+                sanitized[normalized_key] = "[redacted]"
+                continue
+            sanitized[normalized_key] = _sanitize_for_ai_review_log(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_for_ai_review_log(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_for_ai_review_log(item) for item in value]
+    return value
 
 
 __all__ = ["build_parser", "main"]

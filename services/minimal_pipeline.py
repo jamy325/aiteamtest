@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -44,6 +44,7 @@ class MinimalPipeline:
         renderer: Renderer | None = None,
         distance_field_diff_renderer: DistanceFieldDiffRenderer | None = None,
         stroke_width_estimator: StrokeWidthEstimator | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.coordinate_system = coordinate_system or CoordinateSystem()
         self.contour_extractor = contour_extractor or ContourExtractor(
@@ -55,6 +56,10 @@ class MinimalPipeline:
         self.renderer = renderer or Renderer()
         self.distance_field_diff_renderer = distance_field_diff_renderer or DistanceFieldDiffRenderer()
         self.stroke_width_estimator = stroke_width_estimator or StrokeWidthEstimator()
+        self.progress_callback = progress_callback
+
+    def set_progress_callback(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
+        self.progress_callback = callback
 
     def run(
         self,
@@ -65,12 +70,23 @@ class MinimalPipeline:
         debug_output_dir: str | Path | None = None,
         debug_stages: tuple[str, ...] | list[str] | None = None,
     ) -> MinimalPipelineResult:
+        pipeline_start = perf_counter()
         debug_enabled = bool(debug or debug_output_dir is not None)
+        contour_start = perf_counter()
+        self._emit_progress("contour_extraction_start", message="Starting contour extraction.")
         if debug_enabled:
             extracted_contours, contour_debug = self.contour_extractor.extract_contours_with_debug(image)
         else:
             extracted_contours = self.contour_extractor.extract_contours(image)
             contour_debug = None
+        contour_duration_ms = (perf_counter() - contour_start) * 1000.0
+        self._emit_progress(
+            "contour_extraction_done",
+            message="Contour extraction completed.",
+            duration_ms=contour_duration_ms,
+            binary_contour_count=len(extracted_contours.binary_contours),
+            skeleton_contour_count=len(extracted_contours.skeleton_contours),
+        )
         height, width = image.shape[:2]
         document = create_document(
             document_id=document_id,
@@ -79,6 +95,8 @@ class MinimalPipeline:
             coordinate_system=self.coordinate_system,
         )
 
+        skeleton_processing_start = perf_counter()
+        self._emit_progress("skeleton_processing_start", message="Starting skeleton and vector processing.")
         resample_start = perf_counter()
         resampled_binary = tuple(self._resample_contour(contour) for contour in extracted_contours.binary_contours)
         resampled_skeleton = tuple(
@@ -154,6 +172,16 @@ class MinimalPipeline:
         document = self._annotate_skeleton_path_topology(document, extracted_contours.skeleton_junctions)
         document = self._annotate_skeleton_stroke_semantics(document, extracted_contours, image)
         vectorize_elapsed_ms = (perf_counter() - vectorize_start) * 1000.0
+        skeleton_processing_duration_ms = (perf_counter() - skeleton_processing_start) * 1000.0
+        self._emit_progress(
+            "skeleton_processing_done",
+            message="Skeleton and vector processing completed.",
+            duration_ms=skeleton_processing_duration_ms,
+            path_count=len(document.paths),
+            segment_count=len(document.segments),
+            skipped_binary_count=skipped_binary_count,
+            skipped_skeleton_count=skipped_skeleton_count,
+        )
 
         debug_artifacts: DebugArtifactExportResult | None = None
         if debug_enabled and contour_debug is not None:
@@ -197,13 +225,21 @@ class MinimalPipeline:
                 vectorized_segment_count=len(document.segments),
             )
 
-        return MinimalPipelineResult(
+        result = MinimalPipelineResult(
             document=document,
             json_payload=to_json(document),
             extracted_contours=extracted_contours,
             source_image=image.copy(),
             debug_artifacts=debug_artifacts,
         )
+        self._emit_progress(
+            "minimal_pipeline_done",
+            message="Minimal pipeline completed.",
+            duration_ms=(perf_counter() - pipeline_start) * 1000.0,
+            path_count=len(result.document.paths),
+            segment_count=len(result.document.segments),
+        )
+        return result
 
     def run_from_file(
         self,
@@ -214,7 +250,17 @@ class MinimalPipeline:
         debug_output_dir: str | Path | None = None,
         debug_stages: tuple[str, ...] | list[str] | None = None,
     ) -> MinimalPipelineResult:
+        self._emit_progress("load_input_image_start", message="Loading input image.", input=str(image_path))
+        load_start = perf_counter()
         image = self.load_image(image_path)
+        self._emit_progress(
+            "load_input_image_done",
+            message="Input image loaded.",
+            duration_ms=(perf_counter() - load_start) * 1000.0,
+            width=int(image.shape[1]),
+            height=int(image.shape[0]),
+        )
+        self._emit_progress("minimal_pipeline_start", message="Starting minimal pipeline.")
         return self.run(
             image,
             document_id=document_id,
@@ -424,6 +470,13 @@ class MinimalPipeline:
             reason=safe_reason,
             sample_count=max(0, int(estimate.sample_count)),
         )
+
+    def _emit_progress(self, stage: str, *, message: str, **fields: Any) -> None:
+        if self.progress_callback is None:
+            return
+        event = {"stage": stage, "message": message}
+        event.update(fields)
+        self.progress_callback(event)
 
 
 __all__ = ["MinimalPipeline", "MinimalPipelineResult"]
