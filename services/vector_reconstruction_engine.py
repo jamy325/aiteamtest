@@ -51,6 +51,7 @@ class VectorReconstructionEngineConfig:
     ai_provider: str = ""
     ai_model: str = ""
     ai_status: str = "disabled"
+    ai_review_timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,7 +200,6 @@ class VectorReconstructionEngine:
         enable_ai_review: bool | None = None,
         export_mode: ExportMode | None = None,
     ) -> VectorReconstructionArtifactBundle:
-        artifact_start = perf_counter()
         runtime_config = self._runtime_config(
             target_types=target_types,
             autonomy_level=autonomy_level,
@@ -225,6 +225,7 @@ class VectorReconstructionEngine:
         source_image = pipeline_result.source_image
         if source_image is None:
             raise ValueError("pipeline result does not include source_image")
+        artifact_start = perf_counter()
         self._emit_progress(
             "artifact_export_start",
             message="Starting artifact export.",
@@ -419,6 +420,7 @@ class VectorReconstructionEngine:
                 "ai_provider": runtime_config.ai_provider,
                 "ai_model": runtime_config.ai_model,
                 "ai_status": runtime_config.ai_status,
+                "ai_review_timeout_seconds": runtime_config.ai_review_timeout_seconds,
                 **self._ai_command_counts(result),
             },
         )
@@ -471,6 +473,7 @@ class VectorReconstructionEngine:
             "ai_provider": runtime_config.ai_provider,
             "ai_model": runtime_config.ai_model,
             "ai_status": runtime_config.ai_status,
+            "ai_review_timeout_seconds": runtime_config.ai_review_timeout_seconds,
             "ai_proposed_count": int(engine_result.metadata.get("ai_proposed_count", 0)),
             "algorithm_proposed_count": int(engine_result.metadata.get("algorithm_proposed_count", 0)),
             "max_iterations": runtime_config.max_iterations,

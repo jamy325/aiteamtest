@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON path for sanitized AI review interaction logs.",
     )
+    run_parser.add_argument(
+        "--ai-review-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional timeout for a single AI review provider call.",
+    )
     return parser
 
 
@@ -104,7 +110,10 @@ def _run_command(args: argparse.Namespace) -> int:
     try:
         total_start = perf_counter()
         target_types = _parse_target_types(args.target_types)
-        ai_review_service, engine_config = _build_engine_runtime(enable_ai_review=bool(args.enable_ai_review))
+        ai_review_service, engine_config = _build_engine_runtime(
+            enable_ai_review=bool(args.enable_ai_review),
+            ai_review_timeout_seconds=args.ai_review_timeout_seconds,
+        )
         interaction_logger = _AIReviewInteractionLogWriter(Path(args.ai_review_log_path)) if args.ai_review_log_path else None
         if ai_review_service is not None:
             ai_review_service.set_progress_callback(progress_reporter.emit_event)
@@ -195,7 +204,11 @@ def _write_bundle(output_dir: Path, bundle) -> None:
     )
 
 
-def _build_engine_runtime(*, enable_ai_review: bool) -> tuple[AIReviewService | None, VectorReconstructionEngineConfig]:
+def _build_engine_runtime(
+    *,
+    enable_ai_review: bool,
+    ai_review_timeout_seconds: float | None = None,
+) -> tuple[AIReviewService | None, VectorReconstructionEngineConfig]:
     if not enable_ai_review:
         return (
             None,
@@ -214,6 +227,8 @@ def _build_engine_runtime(*, enable_ai_review: bool) -> tuple[AIReviewService | 
     adapter_kwargs: dict[str, object] = {}
     if model:
         adapter_kwargs["model"] = model
+    if ai_review_timeout_seconds is not None:
+        adapter_kwargs["timeout_seconds"] = float(ai_review_timeout_seconds)
 
     openai_key = str(runtime_env.get("OPENAI_API_KEY", "")).strip()
     gemini_key = str(runtime_env.get("GEMINI_API_KEY", "")).strip()
@@ -266,12 +281,13 @@ def _build_engine_runtime(*, enable_ai_review: bool) -> tuple[AIReviewService | 
         raise AIProviderConfigurationError(str(exc)) from exc
 
     return (
-        AIReviewService(adapter=adapter),
+        AIReviewService(adapter=adapter, timeout_seconds=ai_review_timeout_seconds),
         VectorReconstructionEngineConfig(
             enable_ai_review=True,
             ai_provider=provider,
             ai_model=str(model or getattr(adapter, "model", "") or ""),
             ai_status=ai_status,
+            ai_review_timeout_seconds=None if ai_review_timeout_seconds is None else float(ai_review_timeout_seconds),
         ),
     )
 
@@ -380,9 +396,20 @@ class _AIReviewInteractionLogWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.records: list[dict[str, object]] = []
+        self.record_index_by_id: dict[str, int] = {}
 
     def record(self, payload: dict[str, object]) -> None:
-        self.records.append(_sanitize_for_ai_review_log(payload))
+        sanitized = _sanitize_for_ai_review_log(payload)
+        interaction_id = sanitized.get("interaction_id")
+        if isinstance(interaction_id, str) and interaction_id in self.record_index_by_id:
+            index = self.record_index_by_id[interaction_id]
+            merged = dict(self.records[index])
+            merged.update(sanitized)
+            self.records[index] = merged
+        else:
+            if isinstance(interaction_id, str):
+                self.record_index_by_id[interaction_id] = len(self.records)
+            self.records.append(sanitized)
         document = {
             "interaction_count": len(self.records),
             "interactions": self.records,

@@ -28,6 +28,7 @@ class GeminiVisionAdapter(VisionReviewAdapter):
     client: Any | None = None
     image_loader: Callable[[Path], Any] | None = None
     max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES
+    timeout_seconds: float | None = None
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()

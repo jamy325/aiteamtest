@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+import time
 
 import pytest
 from jsonschema import ValidationError
@@ -7,6 +8,7 @@ from jsonschema import ValidationError
 from services.ai_agent import (
     AIReviewInput,
     AIReviewInputTooLarge,
+    AIReviewProviderTimeout,
     AIReviewService,
     ProviderContextLimitExceeded,
 )
@@ -333,11 +335,114 @@ def test_ai_review_service_emits_progress_and_interaction_payload() -> None:
 
     assert output.summary == "ok"
     assert [event["stage"] for event in progress_events] == ["ai_provider_call_start", "ai_provider_call_done"]
-    assert interactions and interactions[0]["provider"] == "file"
+    assert len(interactions) == 2
+    assert interactions[0]["provider"] == "file"
     assert interactions[0]["model"] == "fixture-model"
-    assert interactions[0]["status"] == "enabled"
+    assert interactions[0]["status"] == "request_sent"
     assert interactions[0]["prompt_char_count"] == len(output.prompt)
     assert interactions[0]["review_input_summary"]["review_job_count"] == 1
+    assert interactions[1]["status"] == "completed"
+    assert interactions[1]["normalized_response"]["summary"] == "ok"
+
+
+def test_ai_review_service_emits_waiting_heartbeat_and_timeout() -> None:
+    progress_events: list[dict[str, object]] = []
+    interactions: list[dict[str, object]] = []
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        time.sleep(0.08)
+        return {"summary": "slow", "issues": [], "proposed_commands": []}
+
+    service = AIReviewService(
+        responder=responder,
+        timeout_seconds=0.03,
+        heartbeat_interval_seconds=0.01,
+    )
+    service.set_progress_callback(progress_events.append)
+    service.set_interaction_logger(interactions.append)
+    service.set_runtime_metadata(provider="siliconflow", model="slow-model", status="enabled")
+    review_input = AIReviewInput(
+        original_image="original.png",
+        overlay_image="overlay.png",
+        distance_field_diff_image="diff.png",
+        vector_document_json={"document_id": "doc_timeout"},
+        document_summary={"document_id": "doc_timeout"},
+        review_jobs=(
+            {
+                "job_id": "job_1",
+                "path_id": "path_1",
+                "window_id": "path_1:window_1",
+                "crop_bbox": [0, 0, 64, 64],
+                "image_count": 3,
+                "truncated": False,
+            },
+        ),
+        prompt_budget={"max_prompt_chars": 4000, "max_crop_size_px": 512},
+        ai_input_mode="local_visual_context",
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    with pytest.raises(AIReviewProviderTimeout):
+        service.run_review(review_input)
+
+    stages = [event["stage"] for event in progress_events]
+    assert stages[0] == "ai_provider_call_start"
+    assert "ai_provider_call_waiting" in stages
+    assert stages[-1] == "ai_provider_call_done"
+    waiting_event = next(event for event in progress_events if event["stage"] == "ai_provider_call_waiting")
+    assert waiting_event["provider"] == "siliconflow"
+    assert float(waiting_event["provider_elapsed_ms"]) > 0.0
+    assert interactions[0]["status"] == "request_sent"
+    assert interactions[-1]["status"] == "timeout"
+    assert interactions[-1]["error_type"] == "AIReviewProviderTimeout"
+
+
+def test_ai_review_service_records_primitive_mismatch_warning_in_interaction_log() -> None:
+    interactions: list[dict[str, object]] = []
+
+    def responder(prompt: str, review_input: AIReviewInput) -> dict[str, object]:
+        return {
+            "summary": "mismatch",
+            "issues": [],
+            "proposed_commands": [
+                {
+                    "tool": "propose_replace_segment_with_arc",
+                    "path_id": "path_1",
+                    "segment_range": [0, 0],
+                    "reason": "arc",
+                    "confidence": 0.7,
+                    "requires_user_confirmation": True,
+                    "candidate_id": "skeleton_path_7:line:12-12",
+                }
+            ],
+        }
+
+    service = AIReviewService(responder=responder)
+    service.set_interaction_logger(interactions.append)
+    review_input = AIReviewInput(
+        original_image=None,
+        overlay_image=None,
+        distance_field_diff_image=None,
+        vector_document_json={"document_id": "doc_mismatch"},
+        fit_error=0.2,
+        complexity_score=0.2,
+        topology_status="open",
+        self_intersection_count=1,
+        coordinate_system={"unit": "px"},
+    )
+
+    output = service.run_review(review_input)
+
+    assert output.summary == "mismatch"
+    assert interactions[-1]["status"] == "completed"
+    warnings = interactions[-1]["primitive_mismatch_warnings"]
+    assert isinstance(warnings, list) and warnings
+    assert warnings[0]["candidate_target_type"] == "line"
+    assert warnings[0]["command_target_type"] == "arc"
 
 
 def test_ai_review_flow_rejects_invalid_schema_response() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import time
 
 from core.document import add_path, add_segment, create_document
 from core.types import CoordinateSystem, Path as VectorPath, Segment, Style
@@ -528,3 +529,53 @@ def test_vector_reconstruction_engine_emits_artifact_export_progress_events() ->
         "artifact_export_start",
         "artifact_export_done",
     ]
+
+
+def test_vector_reconstruction_engine_artifact_export_duration_excludes_pipeline_time() -> None:
+    events: list[dict[str, object]] = []
+    pipeline_result = MinimalPipelineResult(
+        document=_stroke_document("bundle_doc_duration"),
+        json_payload="{}",
+        extracted_contours=None,  # type: ignore[arg-type]
+        source_image="fake-image",
+        debug_artifacts=None,
+    )
+    minimal_pipeline = _FakeMinimalPipeline(pipeline_result)
+    pipeline = _FakeAutoRefinementPipeline(_auto_result(refined_document=_stroke_document("engine_result_duration")))
+
+    original_run_from_file = minimal_pipeline.run_from_file
+    original_run_from_pipeline_result = pipeline.run_from_pipeline_result
+    original_export_overlay = minimal_pipeline.export_overlay
+    original_export_diff = minimal_pipeline.export_distance_field_diff
+
+    def slow_run_from_file(*args, **kwargs):
+        time.sleep(0.05)
+        return original_run_from_file(*args, **kwargs)
+
+    def slow_run_from_pipeline_result(*args, **kwargs):
+        time.sleep(0.05)
+        return original_run_from_pipeline_result(*args, **kwargs)
+
+    def slow_export_overlay(*args, **kwargs):
+        time.sleep(0.01)
+        return original_export_overlay(*args, **kwargs)
+
+    def slow_export_diff(*args, **kwargs):
+        time.sleep(0.01)
+        return original_export_diff(*args, **kwargs)
+
+    minimal_pipeline.run_from_file = slow_run_from_file  # type: ignore[assignment]
+    pipeline.run_from_pipeline_result = slow_run_from_pipeline_result  # type: ignore[assignment]
+    minimal_pipeline.export_overlay = slow_export_overlay  # type: ignore[assignment]
+    minimal_pipeline.export_distance_field_diff = slow_export_diff  # type: ignore[assignment]
+
+    engine = VectorReconstructionEngine(
+        minimal_pipeline=minimal_pipeline,
+        auto_refinement_pipeline=pipeline,
+    )
+    engine.set_progress_callback(events.append)
+
+    engine.run_artifact_bundle("input.png")
+
+    done_event = next(event for event in events if event["stage"] == "artifact_export_done")
+    assert float(done_event["duration_ms"]) < 80.0

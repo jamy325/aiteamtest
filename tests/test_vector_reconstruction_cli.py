@@ -416,6 +416,7 @@ def test_vector_reconstruction_cli_emits_jsonl_progress_and_writes_ai_review_log
     interaction_log = json.loads(log_text)
     assert interaction_log["interaction_count"] == 1
     interaction = interaction_log["interactions"][0]
+    assert interaction["status"] == "completed"
     assert interaction["provider"] == "file"
     assert interaction["prompt_char_count"] > 0
     assert interaction["review_input_summary"]["review_job_count"] >= 1
@@ -700,3 +701,45 @@ def test_vector_reconstruction_cli_prefers_system_env_over_dotenv(
     assert _FakeEngine.last_init is not None
     config = _FakeEngine.last_init["config"]
     assert getattr(config, "ai_model") == "env-model"
+
+
+def test_vector_reconstruction_cli_builds_ai_review_timeout_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.write_bytes(b"exists")
+    output_dir = tmp_path / "out"
+    response_path = tmp_path / "ai_response.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "summary": "ok",
+                "issues": [],
+                "proposed_commands": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("vector_reconstruction.cli._ENV_FILE_CANDIDATES", ())
+    monkeypatch.setenv("AI_PROVIDER", "file")
+    monkeypatch.setenv("AI_FILE_RESPONSE_PATH", str(response_path))
+    monkeypatch.setattr("vector_reconstruction.cli.VectorReconstructionEngine", _FakeEngine)
+
+    exit_code = main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--enable-ai-review",
+            "--ai-review-timeout-seconds",
+            "180",
+        ]
+    )
+
+    assert exit_code == 0
+    assert _FakeEngine.last_init is not None
+    config = _FakeEngine.last_init["config"]
+    assert getattr(config, "ai_review_timeout_seconds") == 180.0
