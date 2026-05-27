@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -100,6 +101,9 @@ class FreePenRuntime:
     stroke_width: int = 3
     stroke_rgba: tuple[int, int, int, int] = (0, 255, 0, 255)
     sample_count_per_segment: int = 64
+    interaction_logger: Callable[[dict[str, Any]], None] | None = None
+    provider_name: str = ""
+    provider_model: str = ""
 
     def run(self, source_image_path: Path, output_dir: Path) -> FreePenRunResult:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -126,16 +130,45 @@ class FreePenRuntime:
                 max_rounds=max(1, int(self.max_rounds)),
             )
             prompt = build_free_pen_prompt(review_input.prompt_input())
+            interaction_id = f"free_pen_{uuid4().hex}"
             raw_response: Any = None
             normalized_response: dict[str, Any] | None = None
             response_error: str | None = None
             status = "received"
+            self._record_interaction(
+                {
+                    "interaction_id": interaction_id,
+                    "provider": self.provider_name,
+                    "model": self.provider_model,
+                    "status": "request_sent",
+                    "round_index": round_index,
+                    "prompt": prompt,
+                    "prompt_char_count": len(prompt),
+                    "image_paths": [str(source_image_path)],
+                    "image_file_count": 1,
+                    "canvas_width": width,
+                    "canvas_height": height,
+                    "source_image_size_bytes": int(source_image_path.stat().st_size),
+                }
+            )
             try:
                 raw_response = self.adapter.review(prompt, review_input)
                 normalized_response = normalize_free_pen_response(raw_response)
                 validate_free_pen_response(normalized_response)
                 final_decision = str(normalized_response["decision"])
                 final_reason = str(normalized_response.get("reason") or "").strip() or None
+                self._record_interaction(
+                    {
+                        "interaction_id": interaction_id,
+                        "provider": self.provider_name,
+                        "model": self.provider_model,
+                        "status": "completed",
+                        "round_index": round_index,
+                        "raw_response": raw_response,
+                        "normalized_response": normalized_response,
+                        "final_decision": final_decision,
+                    }
+                )
                 if final_decision == "draw":
                     current_overlay = self._render_overlay(
                         width=width,
@@ -193,6 +226,18 @@ class FreePenRuntime:
                 response_error = str(exc)
                 error_message = response_error
                 status = "invalid_response"
+                self._record_interaction(
+                    {
+                        "interaction_id": interaction_id,
+                        "provider": self.provider_name,
+                        "model": self.provider_model,
+                        "status": "failed",
+                        "round_index": round_index,
+                        "raw_response": raw_response,
+                        "normalized_response": normalized_response,
+                        "error": response_error,
+                    }
+                )
 
             response_files.append(
                 self._write_round_response(
@@ -280,6 +325,10 @@ class FreePenRuntime:
     @staticmethod
     def _empty_overlay(*, width: int, height: int) -> np.ndarray:
         return np.zeros((int(height), int(width), 4), dtype=np.uint8)
+
+    def _record_interaction(self, payload: dict[str, Any]) -> None:
+        if self.interaction_logger is not None:
+            self.interaction_logger(payload)
 
     @staticmethod
     def _write_round_response(

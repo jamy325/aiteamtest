@@ -159,3 +159,39 @@ def test_free_pen_cli_uses_file_provider_and_writes_outputs(tmp_path: Path, monk
     assert exit_code == 0
     assert (output_dir / "final_overlay.png").exists()
     assert (output_dir / "round_001_response.json").exists()
+
+
+def test_free_pen_cli_writes_ai_review_interaction_log(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "out"
+    log_path = tmp_path / "free_pen_ai_log.json"
+    response_path = tmp_path / "response.json"
+    response_path.write_text(json.dumps(_draw_response()), encoding="utf-8")
+
+    monkeypatch.setenv("AI_PROVIDER", "file")
+    monkeypatch.setenv("AI_FILE_RESPONSE_PATH", str(response_path))
+    exit_code = main(
+        [
+            "free-pen",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_dir),
+            "--max-rounds",
+            "1",
+            "--ai-review-log-path",
+            str(log_path),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(log_path.read_text(encoding="utf-8"))
+    assert payload["interaction_count"] == 1
+    interaction = payload["interactions"][0]
+    assert interaction["status"] == "completed"
+    assert interaction["provider"] == "file"
+    assert interaction["image_file_count"] == 1
+    assert interaction["prompt_char_count"] > 0
+    assert interaction["image_paths"] == [str(input_path)]
+    assert interaction["normalized_response"]["decision"] == "draw"

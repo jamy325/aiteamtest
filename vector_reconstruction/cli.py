@@ -91,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     free_pen_parser.add_argument("--max-rounds", type=int, default=1, help="Maximum FreePen AI rounds.")
     free_pen_parser.add_argument("--stroke-width", type=int, default=3, help="Rendered stroke width in pixels.")
     free_pen_parser.add_argument(
+        "--ai-review-log-path",
+        default=None,
+        help="Optional JSON path for FreePen AI request/response logs.",
+    )
+    free_pen_parser.add_argument(
         "--ai-review-timeout-seconds",
         type=float,
         default=None,
@@ -200,11 +205,16 @@ def _free_pen_command(args: argparse.Namespace) -> int:
         )
 
     try:
+        runtime_env = _merged_ai_environment()
         adapter = _build_free_pen_adapter(ai_review_timeout_seconds=args.ai_review_timeout_seconds)
+        interaction_logger = _AIReviewInteractionLogWriter(Path(args.ai_review_log_path)) if args.ai_review_log_path else None
         runtime = FreePenRuntime(
             adapter=adapter,
             max_rounds=max(1, int(args.max_rounds)),
             stroke_width=max(1, int(args.stroke_width)),
+            interaction_logger=None if interaction_logger is None else interaction_logger.record,
+            provider_name=str(getattr(adapter, "provider_name", "") or runtime_env.get("AI_PROVIDER", "")).strip().lower(),
+            provider_model=str(getattr(adapter, "model", "") or runtime_env.get("AI_PROVIDER_MODEL", "")).strip(),
         )
         result = runtime.run(input_path, output_dir)
         print(
