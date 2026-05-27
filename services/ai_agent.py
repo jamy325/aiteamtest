@@ -33,6 +33,8 @@ Inputs available to you:
 - overlay_image
 - distance_field_diff_image
 - vector_document_json
+- document_summary
+- review_jobs
 - candidates
 - proposed_commands_from_algorithm
 - preview_summary
@@ -49,9 +51,13 @@ Inputs available to you:
 - rejection_memory
 - forbidden_repeated_commands
 - retry_budget
+- ai_input_mode
+- prompt_budget
 
 When describing issues or commands:
 - inspect algorithm candidates first and explain why a candidate should or should not be trusted
+- use local review_jobs and the crop panels from the three images as the primary local visual context
+- treat vector_document_json as a compact summary, not a full geometric document dump
 - keep any replacement proposal at semantic intent level so later deterministic refinement can solve the exact geometry
 - include topology guidance when path closure, gap, or continuity is suspicious
 - include self_intersection guidance when paths cross or overlap incorrectly
@@ -85,6 +91,11 @@ class AIReviewInput:
     available_tools: tuple[str, ...] = ()
     alpha_notes: str | None = None
     color_notes: str | None = None
+    ai_input_mode: str = "legacy_document_context"
+    document_summary: dict[str, Any] | None = None
+    review_jobs: tuple[dict[str, Any], ...] = ()
+    prompt_budget: dict[str, Any] | None = None
+    ai_input_truncated: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -103,6 +114,14 @@ class AIReviewOutput:
 def build_review_prompt(review_input: AIReviewInput) -> str:
     payload = json.dumps(review_input.to_payload(), ensure_ascii=True, sort_keys=True, indent=2)
     return f"{AI_REVIEW_PROMPT}\n\nReview input:\n{payload}"
+
+
+class AIReviewInputTooLarge(ValueError):
+    pass
+
+
+class ProviderContextLimitExceeded(RuntimeError):
+    pass
 
 
 def load_ai_command_schema() -> dict[str, Any]:
@@ -176,7 +195,18 @@ class AIReviewService:
             raise RuntimeError("AI review adapter is not configured")
 
         prompt = build_review_prompt(review_input)
-        response = normalize_ai_review_response(self.adapter.review(prompt, review_input))
+        max_prompt_chars = _max_prompt_chars(review_input.prompt_budget)
+        if max_prompt_chars is not None and len(prompt) > max_prompt_chars:
+            raise AIReviewInputTooLarge(
+                f"AI review input exceeds max prompt chars: {len(prompt)} > {max_prompt_chars}"
+            )
+        try:
+            raw_response = self.adapter.review(prompt, review_input)
+        except Exception as exc:
+            if _looks_like_context_overflow(exc):
+                raise ProviderContextLimitExceeded(str(exc)) from exc
+            raise
+        response = normalize_ai_review_response(raw_response)
         validate_ai_review_response(response)
         normalized_commands = []
         for command in response["proposed_commands"]:
@@ -194,11 +224,36 @@ class AIReviewService:
         )
 
 
+def _max_prompt_chars(prompt_budget: dict[str, Any] | None) -> int | None:
+    if not isinstance(prompt_budget, dict):
+        return None
+    value = prompt_budget.get("max_prompt_chars")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return int(value)
+
+
+def _looks_like_context_overflow(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    patterns = (
+        "context length",
+        "too many tokens",
+        "max_seq_len",
+        "maximum context",
+        "input tokens",
+        "prompt is too long",
+        "context window",
+    )
+    return any(pattern in message for pattern in patterns)
+
+
 __all__ = [
     "AIReviewInput",
     "AIReviewOutput",
     "AIReviewService",
+    "AIReviewInputTooLarge",
     "AI_REVIEW_PROMPT",
+    "ProviderContextLimitExceeded",
     "SCHEMA_PATH",
     "build_review_prompt",
     "load_ai_command_schema",

@@ -4,7 +4,10 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
-from services.ai_agent import AIReviewInput, AIReviewService
+import numpy as np
+
+from services.ai_agent import AIReviewInput, AIReviewInputTooLarge, AIReviewService, build_review_prompt
+from services.ai_review_context_builder import AIReviewContextBuilder
 from services.command_preview import CommandPreviewResult, ConstraintChangeSummary, ExportImpactSummary
 from core.types import ShapeCandidateTargetType, VectorDocument
 from services.document_integrity import DocumentIntegrityValidator, IntegrityReport
@@ -56,6 +59,7 @@ class AutoRefinementReport:
     rejection_memory: tuple[dict[str, Any], ...] = ()
     forbidden_repeated_commands: tuple[str, ...] = ()
     unresolved_targets: tuple[str, ...] = ()
+    ai_review_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +78,7 @@ class AutoRefinementReport:
             "rejection_memory": json.loads(json.dumps(self.rejection_memory)),
             "forbidden_repeated_commands": list(self.forbidden_repeated_commands),
             "unresolved_targets": list(self.unresolved_targets),
+            "ai_review_summary": json.loads(json.dumps(self.ai_review_summary)),
         }
 
 
@@ -138,6 +143,7 @@ class AutoRefinementPipeline:
         integrity_validator: DocumentIntegrityValidator | None = None,
         json_exporter: JsonExporter | None = None,
         config: AutoRefinementPipelineConfig | None = None,
+        ai_review_context_builder: AIReviewContextBuilder | None = None,
     ) -> None:
         self.shape_candidate_detector = shape_candidate_detector or ShapeCandidateDetector()
         self.proposed_command_planner = proposed_command_planner or ProposedCommandPlanner()
@@ -147,6 +153,7 @@ class AutoRefinementPipeline:
         self.integrity_validator = integrity_validator or DocumentIntegrityValidator()
         self.json_exporter = json_exporter or JsonExporter()
         self.config = config or AutoRefinementPipelineConfig()
+        self.ai_review_context_builder = ai_review_context_builder or AIReviewContextBuilder()
 
     def run_from_pipeline_result(
         self,
@@ -170,6 +177,7 @@ class AutoRefinementPipeline:
     ) -> AutoRefinementPipelineResult:
         return self.run_with_ai_review(
             pipeline_result.document,
+            source_image=pipeline_result.source_image,
             target_types=target_types,
             dry_run_only=dry_run_only,
         )
@@ -221,6 +229,7 @@ class AutoRefinementPipeline:
         self,
         document: VectorDocument,
         *,
+        source_image: np.ndarray | None = None,
         target_types: tuple[ShapeCandidateTargetType, ...] | list[ShapeCandidateTargetType] | None = None,
         dry_run_only: bool | None = None,
     ) -> AutoRefinementPipelineResult:
@@ -242,6 +251,7 @@ class AutoRefinementPipeline:
         stalled_rounds = 0
         iteration_count = 0
         final_status = EngineStatus.COMPLETED
+        ai_review_summary: dict[str, Any] = {}
 
         for iteration in range(1, self.config.max_iterations + 1):
             iteration_count = iteration
@@ -254,13 +264,20 @@ class AutoRefinementPipeline:
             algorithm_commands = self.proposed_command_planner.plan_commands(current_document, latest_candidates)
             review_input = self._build_ai_review_input(
                 document=current_document,
+                source_image=source_image,
                 candidates=latest_candidates,
                 algorithm_commands=algorithm_commands,
                 policy_feedback=tuple(collected_feedback),
                 rejection_memory=tuple(rejection_memory.values()),
                 forbidden_repeated_commands=tuple(sorted(forbidden_repeated_commands)),
+                processing_summary=processing_summary,
             )
+            prompt_char_count = len(build_review_prompt(review_input))
             ai_review_output = self.ai_review_service.run_review(review_input)
+            ai_review_summary = self._ai_review_summary(
+                review_input=review_input,
+                prompt_char_count=prompt_char_count,
+            )
             candidate_commands = tuple(dict(command) for command in ai_review_output.proposed_commands)
             proposed_commands = self._limit_commands(
                 tuple(dict(command) for command in algorithm_commands) + candidate_commands
@@ -348,6 +365,7 @@ class AutoRefinementPipeline:
             rejection_memory=tuple(rejection_memory.values()),
             forbidden_repeated_commands=tuple(sorted(forbidden_repeated_commands)),
             unresolved_targets=tuple(sorted(unresolved_targets)),
+            ai_review_summary=ai_review_summary,
         )
         return AutoRefinementPipelineResult(
             refined_document=current_document,
@@ -393,6 +411,7 @@ class AutoRefinementPipeline:
         rejection_memory: tuple[RejectionMemoryItem, ...] = (),
         forbidden_repeated_commands: tuple[str, ...] = (),
         unresolved_targets: tuple[str, ...] = (),
+        ai_review_summary: dict[str, Any] | None = None,
     ) -> AutoRefinementReport:
         candidate_stats = {
             "total": len(candidates),
@@ -441,30 +460,48 @@ class AutoRefinementPipeline:
             rejection_memory=tuple(item.to_dict() for item in rejection_memory),
             forbidden_repeated_commands=tuple(forbidden_repeated_commands),
             unresolved_targets=tuple(unresolved_targets),
+            ai_review_summary=json.loads(json.dumps(ai_review_summary or {})),
         )
 
     def _build_ai_review_input(
         self,
         *,
         document: VectorDocument,
+        source_image: np.ndarray | None,
         candidates: tuple[ShapeCandidate, ...],
         algorithm_commands: tuple[dict[str, Any], ...],
         policy_feedback: tuple[PolicyFeedback, ...],
         rejection_memory: tuple[RejectionMemoryItem, ...],
         forbidden_repeated_commands: tuple[str, ...],
+        processing_summary: dict[str, Any],
     ) -> AIReviewInput:
         score = self.scorer.score_document(document).total_score
-        return AIReviewInput(
-            original_image=None,
-            overlay_image=None,
-            distance_field_diff_image=None,
-            vector_document_json=self.json_exporter.export_to_dict(document),
-            candidates=tuple(_candidate_to_dict(candidate) for candidate in candidates),
-            proposed_commands_from_algorithm=tuple(json.loads(json.dumps(command)) for command in algorithm_commands),
+        context_result = self.ai_review_context_builder.build(
+            document=document,
+            source_image=source_image,
+            candidates=candidates,
+            algorithm_commands=algorithm_commands,
+            fit_error=score,
+            complexity_score=score,
+            topology_status=_aggregate_topology_status(document),
+            self_intersection_count=_aggregate_self_intersection_count(document),
+            processing_summary=processing_summary,
+            previous_issues=tuple(feedback.to_dict() for feedback in policy_feedback),
+        )
+        review_input = AIReviewInput(
+            original_image=context_result.original_image_path,
+            overlay_image=context_result.overlay_image_path,
+            distance_field_diff_image=context_result.diff_image_path,
+            vector_document_json=context_result.document_summary,
+            document_summary=context_result.document_summary,
+            review_jobs=context_result.review_jobs,
+            candidates=context_result.candidates,
+            proposed_commands_from_algorithm=context_result.algorithm_commands,
             preview_summary={
                 "score": score,
                 "rejected_count": sum(1 for item in policy_feedback if item.reason_code != "auto_apply"),
                 "forbidden_repeated_commands": list(forbidden_repeated_commands),
+                "processing_summary": dict(processing_summary),
             },
             policy_feedback=tuple(feedback.to_dict() for feedback in policy_feedback),
             rejection_memory=tuple(item.to_dict() for item in rejection_memory),
@@ -476,12 +513,102 @@ class AutoRefinementPipeline:
                 "max_retry_per_target": self.config.max_retry_per_target,
                 "max_retry_per_path": self.config.max_retry_per_path,
             },
+            prompt_budget=context_result.prompt_budget,
             fit_error=score,
             complexity_score=score,
             topology_status=_aggregate_topology_status(document),
             self_intersection_count=_aggregate_self_intersection_count(document),
             coordinate_system=self.json_exporter.export_to_dict(document)["coordinate_system"],
+            ai_input_mode="local_visual_context",
+            ai_input_truncated=context_result.truncated,
         )
+        return self._trim_ai_review_input(review_input)
+
+    def _trim_ai_review_input(self, review_input: AIReviewInput) -> AIReviewInput:
+        current = review_input
+        while True:
+            prompt_char_count = len(build_review_prompt(current))
+            max_prompt_chars = int((current.prompt_budget or {}).get("max_prompt_chars", 0) or 0)
+            if max_prompt_chars <= 0 or prompt_char_count <= max_prompt_chars:
+                return current
+            if current.review_jobs and len(current.review_jobs) > 1:
+                current = AIReviewInput(
+                    **{
+                        **current.to_payload(),
+                        "review_jobs": tuple(current.review_jobs[:-1]),
+                        "ai_input_truncated": True,
+                    }
+                )
+                continue
+            if current.candidates and len(current.candidates) > 1:
+                current = AIReviewInput(
+                    **{
+                        **current.to_payload(),
+                        "candidates": tuple(current.candidates[:-1]),
+                        "ai_input_truncated": True,
+                    }
+                )
+                continue
+            if current.proposed_commands_from_algorithm and len(current.proposed_commands_from_algorithm) > 1:
+                current = AIReviewInput(
+                    **{
+                        **current.to_payload(),
+                        "proposed_commands_from_algorithm": tuple(current.proposed_commands_from_algorithm[:-1]),
+                        "ai_input_truncated": True,
+                    }
+                )
+                continue
+            raise AIReviewInputTooLarge(
+                f"AI review input exceeds max prompt chars after trimming: {prompt_char_count} > {max_prompt_chars}"
+            )
+
+    def _ai_review_summary(
+        self,
+        *,
+        review_input: AIReviewInput,
+        prompt_char_count: int,
+    ) -> dict[str, Any]:
+        jobs = tuple(dict(job) for job in review_input.review_jobs)
+        return {
+            "ai_input_mode": review_input.ai_input_mode,
+            "ai_input_truncated": bool(review_input.ai_input_truncated),
+            "ai_prompt_char_count": prompt_char_count,
+            "ai_max_prompt_chars": int((review_input.prompt_budget or {}).get("max_prompt_chars", 0) or 0),
+            "ai_review_job_count": len(jobs),
+            "ai_review_image_count": sum(
+                1
+                for item in (
+                    review_input.original_image,
+                    review_input.overlay_image,
+                    review_input.distance_field_diff_image,
+                )
+                if item
+            ),
+            "ai_review_image_file_count": sum(
+                1
+                for item in (
+                    review_input.original_image,
+                    review_input.overlay_image,
+                    review_input.distance_field_diff_image,
+                )
+                if item
+            ),
+            "ai_review_panel_count": sum(int(job.get("image_count", 0)) for job in jobs),
+            "ai_review_crop_max_size_px": int((review_input.prompt_budget or {}).get("max_crop_size_px", 0) or 0),
+            "ai_review_candidate_count": len(review_input.candidates),
+            "ai_review_sampled_point_count": 0,
+            "review_jobs": [
+                {
+                    "job_id": str(job.get("job_id", "")),
+                    "path_id": str(job.get("path_id", "")),
+                    "window_id": str(job.get("window_id", "")),
+                    "crop_bbox": list(job.get("crop_bbox", ())),
+                    "image_count": int(job.get("image_count", 0)),
+                    "truncated": bool(job.get("truncated", False)),
+                }
+                for job in jobs
+            ],
+        }
 
     def _processing_summary(self, document: VectorDocument) -> dict[str, Any]:
         available_binary_path_count = sum(1 for path in document.paths if path.source == "binary_contour")
