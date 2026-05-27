@@ -444,7 +444,9 @@ def test_vector_reconstruction_engine_records_ai_review_metadata_and_command_cou
                 "ai_prompt_char_count": 1842,
                 "ai_max_prompt_chars": 120000,
                 "ai_review_job_count": 2,
-                "ai_review_image_count": 6,
+                "ai_review_image_count": 3,
+                "ai_review_image_file_count": 3,
+                "ai_review_panel_count": 6,
                 "ai_review_crop_max_size_px": 512,
                 "ai_review_candidate_count": 2,
                 "ai_review_sampled_point_count": 0,
@@ -492,7 +494,9 @@ def test_vector_reconstruction_engine_records_ai_review_metadata_and_command_cou
     assert bundle.metrics["ai_input_truncated"] is False
     assert bundle.metrics["ai_prompt_char_count"] == 1842
     assert bundle.metrics["ai_review_job_count"] == 2
-    assert bundle.metrics["ai_review_image_count"] == 6
+    assert bundle.metrics["ai_review_image_count"] == 3
+    assert bundle.metrics["ai_review_image_file_count"] == 3
+    assert bundle.metrics["ai_review_panel_count"] == 6
     assert bundle.metrics["ai_review_crop_max_size_px"] == 512
     assert bundle.decision_report["ai_review_summary"]["ai_input_mode"] == "local_visual_context"
     assert bundle.decision_report["metadata"]["ai_provider"] == "openai"

@@ -470,6 +470,8 @@ class VectorReconstructionEngine:
             "ai_max_prompt_chars": int(ai_review_summary.get("ai_max_prompt_chars", 0) or 0),
             "ai_review_job_count": int(ai_review_summary.get("ai_review_job_count", 0) or 0),
             "ai_review_image_count": int(ai_review_summary.get("ai_review_image_count", 0) or 0),
+            "ai_review_image_file_count": int(ai_review_summary.get("ai_review_image_file_count", 0) or 0),
+            "ai_review_panel_count": int(ai_review_summary.get("ai_review_panel_count", 0) or 0),
             "ai_review_crop_max_size_px": int(ai_review_summary.get("ai_review_crop_max_size_px", 0) or 0),
             "ai_review_candidate_count": int(ai_review_summary.get("ai_review_candidate_count", 0) or 0),
             "ai_review_sampled_point_count": int(ai_review_summary.get("ai_review_sampled_point_count", 0) or 0),

@@ -575,7 +575,25 @@ class AutoRefinementPipeline:
             "ai_prompt_char_count": prompt_char_count,
             "ai_max_prompt_chars": int((review_input.prompt_budget or {}).get("max_prompt_chars", 0) or 0),
             "ai_review_job_count": len(jobs),
-            "ai_review_image_count": sum(int(job.get("image_count", 0)) for job in jobs),
+            "ai_review_image_count": sum(
+                1
+                for item in (
+                    review_input.original_image,
+                    review_input.overlay_image,
+                    review_input.distance_field_diff_image,
+                )
+                if item
+            ),
+            "ai_review_image_file_count": sum(
+                1
+                for item in (
+                    review_input.original_image,
+                    review_input.overlay_image,
+                    review_input.distance_field_diff_image,
+                )
+                if item
+            ),
+            "ai_review_panel_count": sum(int(job.get("image_count", 0)) for job in jobs),
             "ai_review_crop_max_size_px": int((review_input.prompt_budget or {}).get("max_crop_size_px", 0) or 0),
             "ai_review_candidate_count": len(review_input.candidates),
             "ai_review_sampled_point_count": 0,

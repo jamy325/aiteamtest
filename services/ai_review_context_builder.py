@@ -39,6 +39,8 @@ class AIReviewContextResult:
     truncated: bool
     prompt_char_count: int
     image_count: int
+    image_file_count: int
+    panel_count: int
     candidate_count: int
     sampled_point_count: int
 
@@ -152,9 +154,24 @@ class AIReviewContextBuilder:
             )
 
         temp_dir = Path(tempfile.mkdtemp(prefix="ai-review-context-"))
-        original_path = _write_sheet(temp_dir / "original_crops.png", original_crops, "original")
-        overlay_path = _write_sheet(temp_dir / "overlay_crops.png", overlay_crops, "overlay")
-        diff_path = _write_sheet(temp_dir / "diff_crops.png", diff_crops, "diff")
+        original_path = _write_sheet(
+            temp_dir / "original_crops.png",
+            original_crops,
+            "original",
+            max_edge=self.budget.max_crop_size_px,
+        )
+        overlay_path = _write_sheet(
+            temp_dir / "overlay_crops.png",
+            overlay_crops,
+            "overlay",
+            max_edge=self.budget.max_crop_size_px,
+        )
+        diff_path = _write_sheet(
+            temp_dir / "diff_crops.png",
+            diff_crops,
+            "diff",
+            max_edge=self.budget.max_crop_size_px,
+        )
         document_summary = {
             "document_id": document.document_id,
             "width": float(document.width),
@@ -191,7 +208,9 @@ class AIReviewContextBuilder:
             prompt_budget=prompt_budget,
             truncated=any_truncated,
             prompt_char_count=0,
-            image_count=3 if review_jobs else 0,
+            image_count=sum(1 for item in (original_path, overlay_path, diff_path) if item is not None),
+            image_file_count=sum(1 for item in (original_path, overlay_path, diff_path) if item is not None),
+            panel_count=len(review_jobs) * self.budget.max_images_per_job,
             candidate_count=len(candidate_summaries),
             sampled_point_count=0,
         )
@@ -362,10 +381,11 @@ def _crop_image(image: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarra
     return image[top:bottom, left:right].copy()
 
 
-def _write_sheet(output_path: Path, images: list[np.ndarray], prefix: str) -> Path | None:
+def _write_sheet(output_path: Path, images: list[np.ndarray], prefix: str, *, max_edge: int) -> Path | None:
     if not images:
         return None
     sheet = _contact_sheet(images, prefix)
+    sheet = _resize_max_edge(sheet, max_edge=max_edge)
     success, encoded = cv2.imencode(".png", sheet)
     if not success:
         raise ValueError(f"failed to encode {prefix} contact sheet")
@@ -397,6 +417,16 @@ def _contact_sheet(images: list[np.ndarray], prefix: str) -> np.ndarray:
             cv2.LINE_AA,
         )
     return canvas
+
+
+def _resize_max_edge(image: np.ndarray, *, max_edge: int) -> np.ndarray:
+    current_max_edge = max(int(image.shape[0]), int(image.shape[1]))
+    if current_max_edge <= max_edge:
+        return image
+    scale = float(max_edge) / float(current_max_edge)
+    target_width = max(1, int(round(image.shape[1] * scale)))
+    target_height = max(1, int(round(image.shape[0] * scale)))
+    return cv2.resize(image, (target_width, target_height), interpolation=cv2.INTER_AREA)
 
 
 def _to_bgr(image: np.ndarray) -> np.ndarray:

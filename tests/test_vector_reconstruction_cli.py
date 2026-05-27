@@ -328,7 +328,9 @@ def test_vector_reconstruction_cli_file_provider_ai_review_uses_local_visual_con
     assert metrics["ai_input_mode"] == "local_visual_context"
     assert metrics["ai_prompt_char_count"] > 0
     assert metrics["ai_review_job_count"] >= 1
-    assert metrics["ai_review_image_count"] >= 3
+    assert metrics["ai_review_image_count"] == 3
+    assert metrics["ai_review_image_file_count"] == 3
+    assert metrics["ai_review_panel_count"] >= 3
     assert metrics["ai_review_crop_max_size_px"] == 512
     assert "ai_review_summary" in decision_report
 
