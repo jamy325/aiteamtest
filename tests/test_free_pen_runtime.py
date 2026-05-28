@@ -10,6 +10,7 @@ from services.ai_adapters import create_vision_adapter
 from services.free_pen_prompt import build_free_pen_prompt
 from services.free_pen_runtime import (
     FileSequenceFreePenAdapter,
+    FreePenImageTransportConfig,
     FreePenReviewInput,
     FreePenRuntime,
     FreePenToolRuntime,
@@ -18,6 +19,7 @@ from vector_reconstruction.cli import main
 
 
 def _write_source_image(image_path: Path) -> None:
+    image_path.parent.mkdir(parents=True, exist_ok=True)
     image = np.full((72, 96, 3), 255, dtype=np.uint8)
     cv2.line(image, (12, 52), (84, 18), (0, 0, 0), thickness=3)
     assert cv2.imwrite(str(image_path), image)
@@ -655,18 +657,144 @@ def test_prompt_contains_source_overlay_distinction_and_history_summary(tmp_path
     )
 
     captured_prompts: list[str] = []
+    captured_messages: list[tuple[dict[str, object], ...]] = []
 
     class _PromptCaptureAdapter(FileSequenceFreePenAdapter):
         def review(self, prompt: str, review_input: object) -> dict[str, object]:
             captured_prompts.append(prompt)
+            captured_messages.append(tuple(getattr(review_input, "messages", ())))
             return super().review(prompt, review_input)
 
     runtime = FreePenToolRuntime(adapter=_PromptCaptureAdapter(response_path=response_path), max_steps=3)
     runtime.run(input_path, output_dir)
 
     assert len(captured_prompts) >= 2
-    prompt = captured_prompts[1]
-    assert "The source image is the target." in prompt
-    assert "The overlay image is your previous drawing only." in prompt
-    assert "Do not trace the overlay." in prompt
-    assert "Recent history:" in prompt
+    system_prompt = captured_prompts[1]
+    assert "The source image is the target." in system_prompt
+    assert "The overlay image is your previous drawing only." in system_prompt
+    assert "Do not trace the overlay." in system_prompt
+    messages = captured_messages[1]
+    assert messages[0]["role"] == "system"
+    assert "Recent history:" in messages[-1]["content"]
+
+
+def test_round_request_snapshot_contains_messages_and_image_urls(tmp_path: Path) -> None:
+    input_path = tmp_path / "samples" / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "out" / "request_snapshot_out"
+    response_path = tmp_path / "request_snapshot_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "stalled", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=2,
+        image_transport_config=FreePenImageTransportConfig(
+            mode="url",
+            public_image_base_url="https://img.jinyao.qzz.io/",
+            public_image_root=tmp_path,
+            conversation_max_turns=30,
+        ),
+    )
+    runtime.run(input_path, output_dir)
+
+    request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
+    assert request_payload["image_transport"] == "url"
+    assert request_payload["messages"][0]["role"] == "system"
+    assert request_payload["image_urls"][0] == "https://img.jinyao.qzz.io/samples/source.png"
+    assert "session_state" in request_payload
+
+
+def test_session_state_sent_each_round(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "session_state_out"
+    response_path = tmp_path / "session_state_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "stalled", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=2)
+    runtime.run(input_path, output_dir)
+
+    request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
+    session_state = request_payload["session_state"]
+    assert "path_count" in session_state
+    assert "closed_path_count" in session_state
+    assert "path_open" in session_state
+    assert "allowed_next_actions" in session_state
+    assert "forbidden_next_actions" in session_state
+    assert "current_goal" in session_state
+
+
+def test_base64_transport_still_available(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "base64_out"
+    response_path = tmp_path / "base64_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "stalled", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=2,
+        image_transport_config=FreePenImageTransportConfig(mode="base64"),
+    )
+    runtime.run(input_path, output_dir)
+
+    request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
+    image_url = request_payload["messages"][1]["content"][1]["image_url"]["url"]
+    assert image_url.endswith("<base64 data omitted>")
+
+
+def test_free_pen_tool_url_mode_file_provider_smoke(tmp_path: Path) -> None:
+    input_path = tmp_path / "samples" / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "out" / "url_mode_out"
+    response_path = tmp_path / "url_mode_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "stalled", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=2,
+        image_transport_config=FreePenImageTransportConfig(
+            mode="url",
+            public_image_base_url="https://img.jinyao.qzz.io/",
+            public_image_root=tmp_path,
+        ),
+    )
+    result = runtime.run(input_path, output_dir)
+
+    request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
+    assert result.final_overlay_path.exists()
+    assert (output_dir / "conversation_messages.json").exists()
+    assert (output_dir / "round_001_request.json").exists()
+    assert request_payload["image_urls"][0] == "https://img.jinyao.qzz.io/samples/source.png"

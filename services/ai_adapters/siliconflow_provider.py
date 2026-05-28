@@ -11,6 +11,7 @@ from services.ai_adapters.common import (
     ProviderConfigurationError,
     collect_image_paths,
     encode_image_as_data_url,
+    get_review_messages,
     load_response_schema,
     parse_json_response_text,
     resolve_api_key,
@@ -34,22 +35,27 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
-        content: list[dict[str, Any]] = []
-        for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": encode_image_as_data_url(image_path, max_image_bytes=self.max_image_bytes),
-                        "detail": self.image_detail,
-                    },
-                }
-            )
-        content.append({"type": "text", "text": prompt})
+        review_messages = get_review_messages(review_input)
+        if review_messages is not None:
+            request_messages = [self._convert_message(message) for message in review_messages]
+        else:
+            content: list[dict[str, Any]] = []
+            for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": encode_image_as_data_url(image_path, max_image_bytes=self.max_image_bytes),
+                            "detail": self.image_detail,
+                        },
+                    }
+                )
+            content.append({"type": "text", "text": prompt})
+            request_messages = [{"role": "user", "content": content}]
         response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": content}],
+            messages=request_messages,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -62,6 +68,38 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
         )
         response_text = self._extract_message_content(response)
         return parse_json_response_text(response_text, provider_name="siliconflow")
+
+    def _convert_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        role = str(message.get("role", "user")).strip().lower() or "user"
+        content = message.get("content")
+        if isinstance(content, str):
+            return {"role": role, "content": [{"type": "text", "text": content}]}
+        if not isinstance(content, list):
+            raise ValueError("SiliconFlow review_input.messages content must be a string or list")
+        converted_parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError("SiliconFlow review_input.messages parts must be dicts")
+            part_type = str(part.get("type", "")).strip().lower()
+            if part_type == "text":
+                converted_parts.append({"type": "text", "text": str(part.get("text", ""))})
+                continue
+            if part_type == "image_url":
+                image_url = part.get("image_url")
+                if not isinstance(image_url, dict) or not isinstance(image_url.get("url"), str):
+                    raise ValueError("SiliconFlow image_url parts must contain image_url.url")
+                converted_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": str(image_url["url"]),
+                            "detail": str(image_url.get("detail", self.image_detail)),
+                        },
+                    }
+                )
+                continue
+            raise ValueError(f"unsupported SiliconFlow message part type: {part_type}")
+        return {"role": role, "content": converted_parts}
 
     def _resolve_client(self) -> Any:
         if self.client is not None:

@@ -4,6 +4,7 @@ import json
 import hashlib
 import math
 import mimetypes
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -14,17 +15,22 @@ import numpy as np
 from jsonschema import Draft202012Validator
 
 from services.ai_adapters.base import VisionReviewAdapter
+from services.ai_adapters.common import encode_image_as_data_url
 from services.free_pen_canvas import FreePenCanvasError, FreePenCanvasState
+from services.free_pen_conversation import FreePenConversationMemory
 from services.free_pen_prompt import (
     FreePenPromptInput,
     FreePenToolPromptInput,
     build_free_pen_prompt,
-    build_free_pen_tool_prompt,
+    build_free_pen_tool_state_text,
+    build_free_pen_tool_system_prompt,
 )
+from services.public_image_resolver import PublicImageResolver
 
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "ai_free_pen.schema.json"
 TOOL_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "ai_free_pen_tool.schema.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,10 +473,20 @@ class FreePenToolReviewInput:
     current_point: list[float] | None = None
     current_subpath_start: list[float] | None = None
     path_count: int = 0
+    closed_path_count: int = 0
     successful_step_count: int = 0
     invalid_step_count: int = 0
     recent_history: tuple[str, ...] = ()
     current_feedback: tuple[str, ...] = ()
+    current_goal: str = ""
+    last_action: str = ""
+    allowed_next_actions: tuple[str, ...] = ()
+    forbidden_next_actions: tuple[str, ...] = ()
+    messages: tuple[dict[str, Any], ...] = ()
+    session_state: dict[str, Any] | None = None
+    image_transport: str = "base64"
+    public_image_base_url: str | None = None
+    image_urls: tuple[str, ...] = ()
 
     def prompt_input(self) -> FreePenToolPromptInput:
         return FreePenToolPromptInput(
@@ -484,11 +500,24 @@ class FreePenToolReviewInput:
             current_point=self.current_point,
             current_subpath_start=self.current_subpath_start,
             path_count=self.path_count,
+            closed_path_count=self.closed_path_count,
             successful_step_count=self.successful_step_count,
             invalid_step_count=self.invalid_step_count,
             recent_history=self.recent_history,
             current_feedback=self.current_feedback,
+            current_goal=self.current_goal,
+            last_action=self.last_action,
+            allowed_next_actions=self.allowed_next_actions,
+            forbidden_next_actions=self.forbidden_next_actions,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class FreePenImageTransportConfig:
+    mode: str = "base64"
+    public_image_base_url: str | None = None
+    public_image_root: Path = PROJECT_ROOT
+    conversation_max_turns: int = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,6 +644,7 @@ class FreePenToolRuntime:
     history_summary_steps: int = 8
     max_rollbacks: int = 3
     closed_contour_mode: bool = True
+    image_transport_config: FreePenImageTransportConfig = FreePenImageTransportConfig()
 
     _SMOOTH_REASON_HINTS = ("curve", "curved", "oval", "ellipse", "circle", "arc", "smooth")
     _OVERLAY_CONFUSION_HINTS = ("orange line", "overlay", "previous line", "current drawing", "draft line")
@@ -628,6 +658,7 @@ class FreePenToolRuntime:
         canvas = FreePenCanvasState(width=int(width), height=int(height))
         response_files: list[Path] = []
         overlay_files: list[Path] = []
+        request_snapshot_paths: list[str] = []
         trace_rounds: list[dict[str, Any]] = []
         history: list[dict[str, Any]] = []
         successful_drawing_tool_calls: list[dict[str, Any]] = []
@@ -640,8 +671,31 @@ class FreePenToolRuntime:
         rejected_step_count = 0
         invalid_step_count = 0
         rollback_count = 0
+        resolver = self._build_public_image_resolver()
+        conversation = FreePenConversationMemory(
+            system_message={"role": "system", "content": build_free_pen_tool_system_prompt()},
+            max_turns=max(1, int(self.image_transport_config.conversation_max_turns)),
+        )
+        conversation_history_path = output_dir / "conversation_messages.json"
 
         for step_index in range(1, max(1, int(self.max_steps)) + 1):
+            current_composite_path = self._write_round_composite_context(
+                output_dir=output_dir,
+                step_index=step_index,
+                canvas=canvas,
+                source_image=source_image,
+            )
+            session_state = self._build_session_state(
+                canvas=canvas,
+                history=history,
+                current_feedback=current_feedback,
+            )
+            image_message_content = self._build_round_image_message_content(
+                source_image_path=source_image_path,
+                overlay_image_path=previous_overlay_path,
+                composite_image_path=current_composite_path,
+                resolver=resolver,
+            )
             review_input = FreePenToolReviewInput(
                 original_image=str(source_image_path),
                 overlay_image=None if previous_overlay_path is None else str(previous_overlay_path),
@@ -659,12 +713,40 @@ class FreePenToolRuntime:
                 if canvas.current_subpath_start is None
                 else [canvas.current_subpath_start[0], canvas.current_subpath_start[1]],
                 path_count=len(canvas.paths),
+                closed_path_count=sum(1 for path in canvas.paths if path.closed),
                 successful_step_count=len(successful_drawing_tool_calls),
                 invalid_step_count=invalid_step_count,
                 recent_history=tuple(self._recent_history_summary(history)),
                 current_feedback=tuple(current_feedback),
+                current_goal=str(session_state["current_goal"]),
+                last_action=str(session_state["last_action"]),
+                allowed_next_actions=tuple(session_state["allowed_next_actions"]),
+                forbidden_next_actions=tuple(session_state["forbidden_next_actions"]),
+                session_state=session_state,
+                image_transport=self.image_transport_config.mode,
+                public_image_base_url=self.image_transport_config.public_image_base_url,
+                image_urls=tuple(
+                    self._sanitize_image_url(str(part["image_url"]["url"]))
+                    for part in image_message_content
+                    if part.get("type") == "image_url"
+                ),
             )
-            prompt = build_free_pen_tool_prompt(review_input.prompt_input())
+            state_text = build_free_pen_tool_state_text(review_input.prompt_input())
+            conversation.append_user_message(image_message_content)
+            conversation.append_user_message(state_text)
+            request_messages = conversation.build_messages_for_request()
+            request_snapshot_path = output_dir / f"round_{step_index:03d}_request.json"
+            self._write_request_snapshot(
+                request_snapshot_path=request_snapshot_path,
+                provider=self.provider_name,
+                model=self.provider_model,
+                image_transport=self.image_transport_config.mode,
+                public_image_base_url=self.image_transport_config.public_image_base_url,
+                messages=request_messages,
+                session_state=session_state,
+            )
+            request_snapshot_paths.append(str(request_snapshot_path))
+            prompt = build_free_pen_tool_system_prompt()
             interaction_id = f"free_pen_tool_{uuid4().hex}"
             raw_response: Any = None
             normalized_response: dict[str, Any] | None = None
@@ -686,18 +768,30 @@ class FreePenToolRuntime:
                     "step_index": step_index,
                     "prompt": prompt,
                     "prompt_char_count": len(prompt),
-                    "image_paths": [str(source_image_path)] + ([] if previous_overlay_path is None else [str(previous_overlay_path)]),
-                    "image_file_count": 1 if previous_overlay_path is None else 2,
+                    "image_transport": self.image_transport_config.mode,
+                    "public_image_base_url": self.image_transport_config.public_image_base_url,
+                    "messages": self._sanitize_messages_for_snapshot(request_messages),
+                    "image_urls": review_input.image_urls,
+                    "image_file_count": len(review_input.image_urls),
                     "canvas_width": width,
                     "canvas_height": height,
                     "review_input_summary": review_input.prompt_input().to_payload(),
+                    "session_state": session_state,
                 }
             )
             try:
+                review_input = FreePenToolReviewInput(
+                    **{**asdict(review_input), "messages": tuple(request_messages)}
+                )
                 raw_response = self.adapter.review(prompt, review_input)
                 self._record_raw_response(step_index, raw_response)
                 normalized_response = normalize_free_pen_tool_response(raw_response)
                 validate_free_pen_tool_response(normalized_response)
+                conversation.append_assistant_message(normalized_response)
+                conversation.save(
+                    conversation_history_path,
+                    message_sanitizer=self._sanitize_messages_for_snapshot,
+                )
                 final_decision = str(normalized_response["decision"])
                 final_reason = str(normalized_response.get("reason") or "").strip() or None
                 if final_decision == "tool_call":
@@ -779,6 +873,10 @@ class FreePenToolRuntime:
                     else f"Failed to parse or validate the model response at step {step_index}."
                 )
                 current_feedback = []
+                conversation.save(
+                    conversation_history_path,
+                    message_sanitizer=self._sanitize_messages_for_snapshot,
+                )
 
             overlay = canvas.render_overlay(
                 stroke_width=max(1, int(self.stroke_width)),
@@ -833,6 +931,8 @@ class FreePenToolRuntime:
                     "canvas_state_summary": canvas.state_summary(),
                     "reason": final_reason,
                     "output_overlay_path": str(overlay_path),
+                    "request_snapshot_path": str(request_snapshot_path),
+                    "image_urls": list(review_input.image_urls),
                 }
             )
             self._record_interaction(
@@ -852,6 +952,8 @@ class FreePenToolRuntime:
                     "runtime_description": runtime_description,
                     "quality_summary": quality_summary,
                     "final_decision": final_decision,
+                    "request_snapshot_path": str(request_snapshot_path),
+                    "conversation_history_path": str(conversation_history_path),
                 }
             )
 
@@ -891,6 +993,9 @@ class FreePenToolRuntime:
                     "rejected_step_count": rejected_step_count,
                     "rollback_count": rollback_count,
                     "final_status": canvas.final_status,
+                    "conversation_history_path": str(conversation_history_path),
+                    "request_snapshot_paths": request_snapshot_paths,
+                    "image_transport": self.image_transport_config.mode,
                     "history": history,
                     "rounds": trace_rounds,
                 },
@@ -1272,6 +1377,199 @@ class FreePenToolRuntime:
         name = type(exc).__name__.lower()
         message = str(exc).lower()
         return "timeout" in name or "timed out" in message or isinstance(exc, TimeoutError)
+
+    def _build_public_image_resolver(self) -> PublicImageResolver | None:
+        if self.image_transport_config.mode != "url" or not self.image_transport_config.public_image_base_url:
+            return None
+        return PublicImageResolver(
+            project_root=self.image_transport_config.public_image_root,
+            base_url=self.image_transport_config.public_image_base_url,
+        )
+
+    def _build_round_image_message_content(
+        self,
+        *,
+        source_image_path: Path,
+        overlay_image_path: Path | None,
+        composite_image_path: Path | None,
+        resolver: PublicImageResolver | None,
+    ) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = []
+        content.extend(
+            self._build_image_parts(
+                semantic_text="This is the target source image. Trace the single black contour in this image.",
+                image_path=source_image_path,
+                resolver=resolver,
+            )
+        )
+        if overlay_image_path is not None:
+            content.extend(
+                self._build_image_parts(
+                    semantic_text="This is the overlay after the previous accepted tool call. It is your previous drawing, not the target.",
+                    image_path=overlay_image_path,
+                    resolver=resolver,
+                )
+            )
+        if composite_image_path is not None:
+            content.extend(
+                self._build_image_parts(
+                    semantic_text="This is the current composite preview. Use it only as auxiliary context while the source image remains the ground truth target.",
+                    image_path=composite_image_path,
+                    resolver=resolver,
+                )
+            )
+        return content
+
+    def _build_image_parts(
+        self,
+        *,
+        semantic_text: str,
+        image_path: Path,
+        resolver: PublicImageResolver | None,
+    ) -> list[dict[str, Any]]:
+        image_url = self._image_url_for_request(image_path=image_path, resolver=resolver)
+        mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
+        return [
+            {"type": "text", "text": semantic_text},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url,
+                    "detail": "auto",
+                    "mime_type": mime_type,
+                },
+            },
+        ]
+
+    def _image_url_for_request(self, *, image_path: Path, resolver: PublicImageResolver | None) -> str:
+        if self.image_transport_config.mode == "url":
+            if resolver is None:
+                raise ValueError("URL image transport requires a configured PublicImageResolver")
+            return resolver.to_public_url(image_path)
+        return encode_image_as_data_url(image_path, max_image_bytes=20 * 1024 * 1024)
+
+    def _build_session_state(
+        self,
+        *,
+        canvas: FreePenCanvasState,
+        history: list[dict[str, Any]],
+        current_feedback: list[str],
+    ) -> dict[str, Any]:
+        closed_path_count = sum(1 for path in canvas.paths if path.closed)
+        last_action = str(history[-1]["runtime_description"]) if history else "none"
+        if canvas.path_open:
+            current_goal = "Continue tracing the current open target contour. Use close_path only when the current point is near the start."
+            allowed_next_actions = ("line_to", "curve_to", "close_path", "undo_last", "rollback_to_step", "inspect_history", "restart_path")
+            forbidden_next_actions = ("finish", "start_path")
+        elif closed_path_count >= 1:
+            current_goal = "Return finish if the closed path matches the source; otherwise use rollback_to_step or restart_path."
+            allowed_next_actions = ("finish", "rollback_to_step", "restart_path", "inspect_history", "undo_last")
+            forbidden_next_actions = ("start_path", "line_to", "curve_to")
+        else:
+            current_goal = "Start tracing the single black target contour."
+            allowed_next_actions = ("start_path", "inspect_history", "stalled")
+            forbidden_next_actions = ("line_to", "curve_to", "close_path", "finish")
+        return {
+            "task": "continue tracing the same single black target contour",
+            "mode": "single_contour_pen_tracing",
+            "path_count": len(canvas.paths),
+            "closed_path_count": closed_path_count,
+            "path_open": canvas.path_open,
+            "current_point": None if canvas.current_point is None else [canvas.current_point[0], canvas.current_point[1]],
+            "current_subpath_start": None
+            if canvas.current_subpath_start is None
+            else [canvas.current_subpath_start[0], canvas.current_subpath_start[1]],
+            "last_action": last_action,
+            "current_goal": current_goal,
+            "allowed_next_actions": list(allowed_next_actions),
+            "forbidden_next_actions": list(forbidden_next_actions),
+            "current_feedback": list(current_feedback),
+        }
+
+    def _write_round_composite_context(
+        self,
+        *,
+        output_dir: Path,
+        step_index: int,
+        canvas: FreePenCanvasState,
+        source_image: np.ndarray,
+    ) -> Path | None:
+        if not canvas.paths:
+            return None
+        composite = canvas.render_composite(
+            source_image,
+            stroke_width=max(1, int(self.stroke_width)),
+            stroke_rgba=self.stroke_rgba,
+            sample_count_per_segment=max(8, int(self.sample_count_per_segment)),
+        )
+        composite_path = output_dir / f"round_{step_index:03d}_composite_context.png"
+        cv2.imwrite(str(composite_path), composite)
+        return composite_path
+
+    def _write_request_snapshot(
+        self,
+        *,
+        request_snapshot_path: Path,
+        provider: str,
+        model: str,
+        image_transport: str,
+        public_image_base_url: str | None,
+        messages: list[dict[str, Any]],
+        session_state: dict[str, Any],
+    ) -> None:
+        image_urls = []
+        sanitized_messages = self._sanitize_messages_for_snapshot(messages)
+        for message in sanitized_messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    image_url = part.get("image_url")
+                    if isinstance(image_url, dict):
+                        url = image_url.get("url")
+                        if isinstance(url, str):
+                            image_urls.append(url)
+        payload = {
+            "provider": provider,
+            "model": model,
+            "image_transport": image_transport,
+            "public_image_base_url": public_image_base_url,
+            "messages": sanitized_messages,
+            "image_urls": image_urls,
+            "session_state": session_state,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        request_snapshot_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _sanitize_messages_for_snapshot(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        sanitized_messages: list[dict[str, Any]] = []
+        for message in messages:
+            sanitized_message = {"role": message.get("role"), "content": message.get("content")}
+            content = sanitized_message["content"]
+            if isinstance(content, list):
+                sanitized_parts: list[dict[str, Any]] = []
+                for part in content:
+                    if not isinstance(part, dict):
+                        sanitized_parts.append(part)
+                        continue
+                    if part.get("type") != "image_url":
+                        sanitized_parts.append(dict(part))
+                        continue
+                    image_url = dict(part.get("image_url", {}))
+                    if isinstance(image_url.get("url"), str):
+                        image_url["url"] = self._sanitize_image_url(str(image_url["url"]))
+                    sanitized_parts.append({"type": "image_url", "image_url": image_url})
+                sanitized_message["content"] = sanitized_parts
+            sanitized_messages.append(sanitized_message)
+        return sanitized_messages
+
+    @staticmethod
+    def _sanitize_image_url(url: str) -> str:
+        if url.startswith("data:"):
+            header = url.split(",", 1)[0]
+            return f"{header},<base64 data omitted>"
+        return url
 
     def _record_interaction(self, payload: dict[str, Any]) -> None:
         if self.interaction_logger is not None:

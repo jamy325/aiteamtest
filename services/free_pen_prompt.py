@@ -86,19 +86,12 @@ def build_free_pen_prompt(prompt_input: FreePenPromptInput) -> str:
     payload = json.dumps(prompt_input.to_payload(), ensure_ascii=True, sort_keys=True, indent=2)
     return f"{FREE_PEN_PROMPT}\n\nRuntime input:\n{payload}"
 
-FREE_PEN_TOOL_PROMPT = """
-You are tracing the visible strokes in the provided source image.
+FREE_PEN_TOOL_SYSTEM_PROMPT = """
+You are using a constrained headless pen tool to trace a single black target contour.
 
 Return JSON only.
 
 You are not reviewing. You are drawing by calling exactly one tool per round.
-
-Image semantics:
-- The source image is the target.
-- The overlay image is your previous drawing only.
-- Do not trace the overlay.
-- If the overlay conflicts with the source image, the source image is always correct.
-- Use the overlay only to understand what you have already drawn.
 
 Coordinate system:
 - coordinate_space: image_px
@@ -106,6 +99,14 @@ Coordinate system:
 - x increases to the right
 - y increases downward
 - canvas size equals the source image size
+
+Image semantics:
+- The source image is the target.
+- The overlay image is your previous drawing only.
+- The composite image is only an auxiliary preview.
+- Do not trace the overlay.
+- If the overlay conflicts with the source image, the source image is always correct.
+- Use the overlay only to understand what you have already drawn.
 
 Allowed decisions:
 - tool_call
@@ -122,23 +123,19 @@ Allowed tools:
 - inspect_history(last_n)
 - restart_path(x, y)
 
-Rules:
+Tool usage rules:
 - Call exactly one tool per round when you can continue drawing.
-- The source image contains the real target stroke. The overlay is only your draft.
-- For smooth curved strokes, prefer curve_to.
+- Prefer curve_to for smooth curved strokes.
 - Use line_to only for visibly straight segments.
 - Do not approximate an oval, circle, or arc using many line_to calls.
-- Do not call close_path unless the current point is already near the starting point.
+- Do not call close_path unless the current point is already near the start point.
 - Do not finish while path_open=true.
+- If a path already exists for the single contour, do not start a second path unless runtime feedback tells you to restart.
 - If an action is rejected, revise the action instead of repeating it.
-- If the path became wrong, use undo_last or rollback_to_step.
+- If the path became wrong, use undo_last, rollback_to_step, or restart_path.
 - Use inspect_history if you need to understand recent mistakes.
 - Use finish only when the tracing is complete enough and the current path is not open.
 - Use stalled only when you cannot continue reliably.
-- Do not output SVG.
-- Do not output VectorDocument.
-- Do not output AI review commands, candidates, or planner objects.
-- Keep reason short and visual.
 
 Bad sequence for an oval:
 - start_path(50, 100)
@@ -157,6 +154,13 @@ Good sequence style for a smooth oval:
 - close_path()
 
 The numeric points above are only illustrative. Do not copy them blindly. They show that smooth boundaries should usually use curve_to.
+
+Return format:
+- Do not output SVG.
+- Do not output VectorDocument.
+- Do not output AI review commands, candidates, or planner objects.
+- Do not output natural language outside the JSON object.
+- Keep reason short and visual.
 
 If you can continue drawing, return:
 {
@@ -196,32 +200,60 @@ class FreePenToolPromptInput:
     current_point: list[float] | None = None
     current_subpath_start: list[float] | None = None
     path_count: int = 0
+    closed_path_count: int = 0
     successful_step_count: int = 0
     invalid_step_count: int = 0
     recent_history: tuple[str, ...] = ()
     current_feedback: tuple[str, ...] = ()
+    current_goal: str = ""
+    last_action: str = ""
+    allowed_next_actions: tuple[str, ...] = ()
+    forbidden_next_actions: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, object]:
         return asdict(self)
 
 
-def build_free_pen_tool_prompt(prompt_input: FreePenToolPromptInput) -> str:
-    payload = json.dumps(prompt_input.to_payload(), ensure_ascii=True, sort_keys=True, indent=2)
+def build_free_pen_tool_system_prompt() -> str:
+    return FREE_PEN_TOOL_SYSTEM_PROMPT.strip()
+
+
+def build_free_pen_tool_state_text(prompt_input: FreePenToolPromptInput) -> str:
     history_text = "\n".join(f"- {entry}" for entry in prompt_input.recent_history) or "- none"
     feedback_text = "\n".join(f"- {entry}" for entry in prompt_input.current_feedback) or "- none"
+    allowed_text = ", ".join(prompt_input.allowed_next_actions) if prompt_input.allowed_next_actions else "none"
+    forbidden_text = ", ".join(prompt_input.forbidden_next_actions) if prompt_input.forbidden_next_actions else "none"
+    payload = json.dumps(prompt_input.to_payload(), ensure_ascii=True, sort_keys=True, indent=2)
     return (
-        f"{FREE_PEN_TOOL_PROMPT}\n\n"
+        "Session state:\n"
+        f"- task: continue tracing the same single black target contour\n"
+        f"- mode: single_contour_pen_tracing\n"
+        f"- path_count: {prompt_input.path_count}\n"
+        f"- closed_path_count: {prompt_input.closed_path_count}\n"
+        f"- path_open: {str(prompt_input.path_open).lower()}\n"
+        f"- current_point: {prompt_input.current_point}\n"
+        f"- current_subpath_start: {prompt_input.current_subpath_start}\n"
+        f"- last_action: {prompt_input.last_action or 'none'}\n"
+        f"- current_goal: {prompt_input.current_goal or 'continue tracing the same target contour'}\n"
+        f"- allowed_next_actions: {allowed_text}\n"
+        f"- forbidden_next_actions: {forbidden_text}\n\n"
         f"Recent history:\n{history_text}\n\n"
         f"Current feedback:\n{feedback_text}\n\n"
         f"Runtime input:\n{payload}"
     )
 
 
+def build_free_pen_tool_prompt(prompt_input: FreePenToolPromptInput) -> str:
+    return f"{build_free_pen_tool_system_prompt()}\n\n{build_free_pen_tool_state_text(prompt_input)}"
+
+
 __all__ = [
     "FREE_PEN_PROMPT",
-    "FREE_PEN_TOOL_PROMPT",
+    "FREE_PEN_TOOL_SYSTEM_PROMPT",
     "FreePenPromptInput",
     "FreePenToolPromptInput",
     "build_free_pen_prompt",
+    "build_free_pen_tool_state_text",
+    "build_free_pen_tool_system_prompt",
     "build_free_pen_tool_prompt",
 ]

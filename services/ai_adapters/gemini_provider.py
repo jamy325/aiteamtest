@@ -12,6 +12,7 @@ from services.ai_adapters.common import (
     collect_image_paths,
     ensure_review_image_path,
     extract_text_value,
+    get_review_messages,
     load_response_schema,
     parse_json_response_text,
     resolve_api_key,
@@ -34,10 +35,14 @@ class GeminiVisionAdapter(VisionReviewAdapter):
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
-        contents: list[Any] = []
-        for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
-            contents.append(self._load_image(image_path))
-        contents.append(prompt)
+        review_messages = get_review_messages(review_input)
+        if review_messages is not None:
+            contents = [self._convert_message(message) for message in review_messages]
+        else:
+            contents: list[Any] = []
+            for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
+                contents.append(self._load_image(image_path))
+            contents.append(prompt)
         response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.models.generate_content(
             model=self.model,
@@ -49,6 +54,38 @@ class GeminiVisionAdapter(VisionReviewAdapter):
         )
         response_text = extract_text_value(response, provider_name="gemini", attr_names=("text", "output_text"))
         return parse_json_response_text(response_text, provider_name="gemini")
+
+    def _convert_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        role = str(message.get("role", "user")).strip().lower() or "user"
+        content = message.get("content")
+        parts: list[dict[str, Any]] = []
+        if isinstance(content, str):
+            parts.append({"text": content})
+            return {"role": role, "parts": parts}
+        if not isinstance(content, list):
+            raise ValueError("Gemini review_input.messages content must be a string or list")
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError("Gemini review_input.messages parts must be dicts")
+            part_type = str(part.get("type", "")).strip().lower()
+            if part_type == "text":
+                parts.append({"text": str(part.get("text", ""))})
+                continue
+            if part_type == "image_url":
+                image_url = part.get("image_url")
+                if not isinstance(image_url, dict) or not isinstance(image_url.get("url"), str):
+                    raise ValueError("Gemini image_url parts must contain image_url.url")
+                parts.append(
+                    {
+                        "file_data": {
+                            "file_uri": str(image_url["url"]),
+                            "mime_type": str(image_url.get("mime_type", "image/png")),
+                        }
+                    }
+                )
+                continue
+            raise ValueError(f"unsupported Gemini message part type: {part_type}")
+        return {"role": role, "parts": parts}
 
     def _resolve_client(self) -> Any:
         if self.client is not None:

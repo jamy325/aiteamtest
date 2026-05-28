@@ -13,6 +13,7 @@ from services.ai_adapters import ProviderConfigurationError, create_vision_adapt
 from services.ai_agent import AIReviewService
 from services.free_pen_runtime import (
     FileSequenceFreePenAdapter,
+    FreePenImageTransportConfig,
     FreePenRuntime,
     FreePenToolRuntime,
     load_free_pen_schema,
@@ -126,6 +127,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Optional timeout for a single FreePen tool provider call.",
+    )
+    free_pen_tool_parser.add_argument(
+        "--image-transport",
+        default=None,
+        choices=("url", "base64"),
+        help="Optional image transport override for FreePen tool requests.",
+    )
+    free_pen_tool_parser.add_argument(
+        "--public-image-base-url",
+        default=None,
+        help="Optional public image base URL for URL-based FreePen tool image transport.",
+    )
+    free_pen_tool_parser.add_argument(
+        "--conversation-max-turns",
+        type=int,
+        default=None,
+        help="Optional maximum number of assistant turns to retain in FreePen tool conversation history.",
     )
     return parser
 
@@ -289,6 +307,15 @@ def _free_pen_tool_command(args: argparse.Namespace) -> int:
         runtime_env = _merged_ai_environment()
         adapter = _build_free_pen_tool_adapter(ai_review_timeout_seconds=args.ai_review_timeout_seconds)
         interaction_logger = _AIReviewInteractionLogWriter(Path(args.ai_review_log_path)) if args.ai_review_log_path else None
+        public_image_base_url = str(
+            args.public_image_base_url or runtime_env.get("AI_PUBLIC_IMAGE_BASE_URL", "")
+        ).strip() or None
+        raw_image_transport = str(args.image_transport or runtime_env.get("AI_IMAGE_TRANSPORT", "")).strip().lower()
+        image_transport = raw_image_transport or ("url" if public_image_base_url else "base64")
+        conversation_max_turns_raw = args.conversation_max_turns
+        if conversation_max_turns_raw is None:
+            conversation_max_turns_raw = runtime_env.get("AI_CONVERSATION_MAX_TURNS", "30")
+        conversation_max_turns = max(1, int(conversation_max_turns_raw))
         runtime = FreePenToolRuntime(
             adapter=adapter,
             max_steps=max(1, int(args.max_steps)),
@@ -297,6 +324,12 @@ def _free_pen_tool_command(args: argparse.Namespace) -> int:
             raw_response_logger=_print_free_pen_raw_response,
             provider_name=str(getattr(adapter, "provider_name", "") or runtime_env.get("AI_PROVIDER", "")).strip().lower(),
             provider_model=str(getattr(adapter, "model", "") or runtime_env.get("AI_PROVIDER_MODEL", "")).strip(),
+            image_transport_config=FreePenImageTransportConfig(
+                mode=image_transport,
+                public_image_base_url=public_image_base_url,
+                public_image_root=_REPO_ROOT,
+                conversation_max_turns=conversation_max_turns,
+            ),
         )
         result = runtime.run(input_path, output_dir)
         print(

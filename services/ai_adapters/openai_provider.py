@@ -12,6 +12,7 @@ from services.ai_adapters.common import (
     collect_image_paths,
     encode_image_as_data_url,
     extract_text_value,
+    get_review_messages,
     load_response_schema,
     parse_json_response_text,
     resolve_api_key,
@@ -34,20 +35,25 @@ class OpenAIVisionAdapter(VisionReviewAdapter):
 
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
-        content: list[dict[str, Any]] = []
-        for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
-            content.append(
-                {
-                    "type": "input_image",
-                    "image_url": encode_image_as_data_url(image_path, max_image_bytes=self.max_image_bytes),
-                    "detail": self.image_detail,
-                }
-            )
-        content.append({"type": "input_text", "text": prompt})
+        review_messages = get_review_messages(review_input)
+        if review_messages is not None:
+            request_messages = [self._convert_message(message) for message in review_messages]
+        else:
+            content: list[dict[str, Any]] = []
+            for image_path in collect_image_paths(review_input, max_image_bytes=self.max_image_bytes):
+                content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": encode_image_as_data_url(image_path, max_image_bytes=self.max_image_bytes),
+                        "detail": self.image_detail,
+                    }
+                )
+            content.append({"type": "input_text", "text": prompt})
+            request_messages = [{"role": "user", "content": content}]
         response_schema = self.response_schema or load_response_schema(self.response_schema_path)
         response = client.responses.create(
             model=self.model,
-            input=[{"role": "user", "content": content}],
+            input=request_messages,
             text={
                 "format": {
                     "type": "json_schema",
@@ -60,6 +66,36 @@ class OpenAIVisionAdapter(VisionReviewAdapter):
         )
         response_text = extract_text_value(response, provider_name="openai", attr_names=("output_text", "text"))
         return parse_json_response_text(response_text, provider_name="openai")
+
+    def _convert_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        role = str(message.get("role", "user")).strip().lower() or "user"
+        content = message.get("content")
+        if isinstance(content, str):
+            return {"role": role, "content": [{"type": "input_text", "text": content}]}
+        if not isinstance(content, list):
+            raise ValueError("OpenAI review_input.messages content must be a string or list")
+        converted_parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError("OpenAI review_input.messages parts must be dicts")
+            part_type = str(part.get("type", "")).strip().lower()
+            if part_type == "text":
+                converted_parts.append({"type": "input_text", "text": str(part.get("text", ""))})
+                continue
+            if part_type == "image_url":
+                image_url = part.get("image_url")
+                if not isinstance(image_url, dict) or not isinstance(image_url.get("url"), str):
+                    raise ValueError("OpenAI image_url parts must contain image_url.url")
+                converted_parts.append(
+                    {
+                        "type": "input_image",
+                        "image_url": str(image_url["url"]),
+                        "detail": str(image_url.get("detail", self.image_detail)),
+                    }
+                )
+                continue
+            raise ValueError(f"unsupported OpenAI message part type: {part_type}")
+        return {"role": role, "content": converted_parts}
 
     def _resolve_client(self) -> Any:
         if self.client is not None:

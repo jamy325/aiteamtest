@@ -129,6 +129,14 @@ class _SiliconFlowClientStub:
         self.chat = type("SiliconFlowChat", (), {"completions": _SiliconFlowCompletionsStub()})()
 
 
+class _MessageReviewInput:
+    def __init__(self, messages: list[dict[str, object]]) -> None:
+        self.messages = tuple(messages)
+        self.original_image = None
+        self.overlay_image = None
+        self.distance_field_diff_image = None
+
+
 def test_create_vision_adapter_supports_mock_and_file(tmp_path: Path) -> None:
     response = json.loads(_valid_response_text())
     response_path = tmp_path / "response.json"
@@ -188,6 +196,34 @@ def test_create_vision_adapter_supports_siliconflow_stub(tmp_path: Path) -> None
     assert any(item["type"] == "image_url" for item in content)  # type: ignore[index]
     assert content[0]["type"] == "image_url"  # type: ignore[index]
     assert content[-1]["type"] == "text"  # type: ignore[index]
+
+
+def test_url_transport_uses_image_url_not_base64_in_message_mode() -> None:
+    public_url = "https://img.jinyao.qzz.io/out/free_pen_real07/final_composite.png"
+    review_input = _MessageReviewInput(
+        [
+            {"role": "system", "content": "system rules"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "target image"},
+                    {"type": "image_url", "image_url": {"url": public_url}},
+                ],
+            },
+        ]
+    )
+    siliconflow_client = _SiliconFlowClientStub()
+    adapter = create_vision_adapter("siliconflow", client=siliconflow_client)
+
+    response = adapter.review("ignored prompt", review_input)
+
+    assert response["summary"] == "Provider review succeeded."
+    messages = siliconflow_client.chat.completions.last_kwargs["messages"]  # type: ignore[index]
+    assert messages[0]["role"] == "system"  # type: ignore[index]
+    user_parts = messages[1]["content"]  # type: ignore[index]
+    image_parts = [part for part in user_parts if part["type"] == "image_url"]
+    assert image_parts[0]["image_url"]["url"] == public_url
+    assert not image_parts[0]["image_url"]["url"].startswith("data:image")
 
 
 def test_collect_image_paths_allows_small_images_by_default(tmp_path: Path) -> None:
