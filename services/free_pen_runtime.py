@@ -1430,7 +1430,6 @@ class FreePenToolRuntime:
         image_url = self._image_url_for_request(image_path=image_path, resolver=resolver)
         mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
         return [
-            {"type": "text", "text": semantic_text},
             {
                 "type": "image_url",
                 "image_url": {
@@ -1439,6 +1438,7 @@ class FreePenToolRuntime:
                     "mime_type": mime_type,
                 },
             },
+            {"type": "text", "text": semantic_text},
         ]
 
     def _image_url_for_request(self, *, image_path: Path, resolver: PublicImageResolver | None) -> str:

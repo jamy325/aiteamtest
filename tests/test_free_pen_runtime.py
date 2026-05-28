@@ -709,6 +709,9 @@ def test_round_request_snapshot_contains_messages_and_image_urls(tmp_path: Path)
     assert request_payload["image_transport"] == "url"
     assert request_payload["messages"][0]["role"] == "system"
     assert request_payload["image_urls"][0] == "https://img.jinyao.qzz.io/samples/source.png"
+    first_user_content = request_payload["messages"][1]["content"]
+    assert first_user_content[0]["type"] == "image_url"
+    assert first_user_content[1]["type"] == "text"
     assert "session_state" in request_payload
 
 
@@ -763,7 +766,10 @@ def test_base64_transport_still_available(tmp_path: Path) -> None:
     runtime.run(input_path, output_dir)
 
     request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
-    image_url = request_payload["messages"][1]["content"][1]["image_url"]["url"]
+    first_user_content = request_payload["messages"][1]["content"]
+    assert first_user_content[0]["type"] == "image_url"
+    assert first_user_content[1]["type"] == "text"
+    image_url = first_user_content[0]["image_url"]["url"]
     assert image_url.endswith("<base64 data omitted>")
 
 
