@@ -35,16 +35,13 @@ class FreePenConversationMemory:
     ) -> None:
         system_message = self.system_message
         messages = self.messages
-        request_messages = self.build_messages_for_request()
         if message_sanitizer is not None:
             system_message = message_sanitizer([self.system_message])[0]
             messages = message_sanitizer(self.messages)
-            request_messages = message_sanitizer(request_messages)
         payload = {
             "system_message": system_message,
             "messages": messages,
             "max_turns": self.max_turns,
-            "request_messages": request_messages,
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 

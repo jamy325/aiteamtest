@@ -695,6 +695,7 @@ class FreePenToolRuntime:
                 overlay_image_path=previous_overlay_path,
                 composite_image_path=current_composite_path,
                 resolver=resolver,
+                include_source_image=step_index == 1,
             )
             review_input = FreePenToolReviewInput(
                 original_image=str(source_image_path),
@@ -1067,6 +1068,8 @@ class FreePenToolRuntime:
         if tool == "start_path" and canvas.path_open:
             reject_codes.add("path_already_open")
             warnings.append(self._warning("path_already_open", "A path is already open. Use restart_path, rollback_to_step, or close_path first."))
+        if tool == "line_to" and any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
+            reject_codes.add("line_to_used_on_smooth_curve_hint")
         if tool == "close_path" and canvas.path_open:
             if canvas.current_path_drawable_segment_count() < 2 or not canvas.current_path_has_cubic_segment():
                 reject_codes.add("close_path_used_too_early")
@@ -1104,12 +1107,17 @@ class FreePenToolRuntime:
             warnings.append(self._warning("rollback_budget_exceeded", "Rollback budget has already been exceeded. Prefer a direct correction."))
 
         if reject_codes:
+            runtime_description = f"Rejected {tool} during preflight validation."
+            quality_summary = " ; ".join(warning["message"] for warning in warnings)
+            if tool == "line_to" and "line_to_used_on_smooth_curve_hint" in reject_codes:
+                runtime_description = "Rejected line_to because the model described a smooth curve but used a straight line tool."
+                quality_summary = "line_to draws a straight segment and is not appropriate for the described smooth curve."
             return {
                 "success": False,
                 "rejected": True,
                 "warnings": warnings,
-                "runtime_description": f"Rejected {tool} during preflight validation.",
-                "quality_summary": " ; ".join(warning["message"] for warning in warnings),
+                "runtime_description": runtime_description,
+                "quality_summary": quality_summary,
             }
         return {
             "success": True,
@@ -1317,6 +1325,10 @@ class FreePenToolRuntime:
     @staticmethod
     def _feedback_from_rejected_action(*, warnings: list[dict[str, Any]], quality_summary: str) -> list[str]:
         feedback = [warning["message"] for warning in warnings]
+        if any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
+            feedback.append("You described a smooth curve but used line_to.")
+            feedback.append("line_to draws a straight segment and is rejected for this smooth curve.")
+            feedback.append("Use curve_to with c1, c2, and p.")
         if not feedback and quality_summary:
             feedback.append(quality_summary)
         return feedback
@@ -1328,7 +1340,7 @@ class FreePenToolRuntime:
             warnings.append(
                 self._warning(
                     "line_to_used_on_smooth_curve_hint",
-                    "The model described a smooth curve but used line_to, which draws a straight segment.",
+                    "The model described a smooth curve but used line_to, which draws a straight segment. Use curve_to instead.",
                 )
             )
         if any(token in reason_lower for token in self._OVERLAY_CONFUSION_HINTS):
@@ -1393,15 +1405,17 @@ class FreePenToolRuntime:
         overlay_image_path: Path | None,
         composite_image_path: Path | None,
         resolver: PublicImageResolver | None,
+        include_source_image: bool,
     ) -> list[dict[str, Any]]:
         content: list[dict[str, Any]] = []
-        content.extend(
-            self._build_image_parts(
-                semantic_text="This is the target source image. Trace the single black contour in this image.",
-                image_path=source_image_path,
-                resolver=resolver,
+        if include_source_image:
+            content.extend(
+                self._build_image_parts(
+                    semantic_text="This is the target source image. Trace the single black contour in this image.",
+                    image_path=source_image_path,
+                    resolver=resolver,
+                )
             )
-        )
         if overlay_image_path is not None:
             content.extend(
                 self._build_image_parts(
@@ -1517,26 +1531,13 @@ class FreePenToolRuntime:
         messages: list[dict[str, Any]],
         session_state: dict[str, Any],
     ) -> None:
-        image_urls = []
         sanitized_messages = self._sanitize_messages_for_snapshot(messages)
-        for message in sanitized_messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    image_url = part.get("image_url")
-                    if isinstance(image_url, dict):
-                        url = image_url.get("url")
-                        if isinstance(url, str):
-                            image_urls.append(url)
         payload = {
             "provider": provider,
             "model": model,
             "image_transport": image_transport,
             "public_image_base_url": public_image_base_url,
             "messages": sanitized_messages,
-            "image_urls": image_urls,
             "session_state": session_state,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }

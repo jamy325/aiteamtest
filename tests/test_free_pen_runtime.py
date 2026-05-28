@@ -476,7 +476,11 @@ def test_close_path_too_early_is_rejected(tmp_path: Path) -> None:
         json.dumps(
             [
                 {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
-                {"decision": "tool_call", "tool_call": {"tool": "line_to", "x": 24, "y": 48}, "reason": "ellipse curve start"},
+                {
+                    "decision": "tool_call",
+                    "tool_call": {"tool": "curve_to", "c1": [18, 44], "c2": [22, 40], "p": [24, 48]},
+                    "reason": "ellipse curve start",
+                },
                 {"decision": "tool_call", "tool_call": {"tool": "close_path"}, "reason": "close the oval"},
                 {"decision": "finish", "reason": "done"},
             ]
@@ -526,7 +530,7 @@ def test_finish_with_open_path_is_rejected_in_closed_contour_mode(tmp_path: Path
     assert "finish_with_open_path" in warning_codes
 
 
-def test_line_to_on_smooth_reason_generates_warning(tmp_path: Path) -> None:
+def test_line_to_on_smooth_curve_reason_is_rejected(tmp_path: Path) -> None:
     input_path = tmp_path / "source.png"
     _write_source_image(input_path)
     output_dir = tmp_path / "line_warning_out"
@@ -550,9 +554,48 @@ def test_line_to_on_smooth_reason_generates_warning(tmp_path: Path) -> None:
     result = runtime.run(input_path, output_dir)
 
     trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    request_payload = json.loads((output_dir / "round_003_request.json").read_text(encoding="utf-8"))
+    line_round = trace_payload["rounds"][1]
     warning_codes = {warning["code"] for warning in trace_payload["history"][1]["warnings"]}
-    assert result.status == "finished"
+    assert line_round["rejected_tool_call"]["tool"] == "line_to"
+    assert trace_payload["history"][1]["round_status"] == "rejected_action"
+    assert result.rejected_step_count >= 1
+    assert line_round["canvas_state_summary"]["current_point"] == [12.0, 52.0]
+    assert trace_payload["history"][1]["runtime_description"] == "Rejected line_to because the model described a smooth curve but used a straight line tool."
+    assert trace_payload["history"][1]["quality_summary"] == "line_to draws a straight segment and is not appropriate for the described smooth curve."
     assert "line_to_used_on_smooth_curve_hint" in warning_codes
+    round_three_state_text = request_payload["messages"][-1]["content"]
+    assert "You described a smooth curve but used line_to." in round_three_state_text
+    assert "Use curve_to with c1, c2, and p." in round_three_state_text
+
+
+def test_line_to_for_straight_segment_still_allowed(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "line_straight_out"
+    response_path = tmp_path / "line_straight_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "line_to", "x": 24, "y": 48}, "reason": "Drawing a visible straight edge."},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=3,
+        closed_contour_mode=False,
+    )
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    assert result.status == "finished"
+    assert trace_payload["rounds"][1]["executed_tool_call"]["tool"] == "line_to"
+    assert trace_payload["history"][1]["round_status"] == "tool_applied"
 
 
 def test_overlay_confusion_reason_generates_warning(tmp_path: Path) -> None:
@@ -708,11 +751,57 @@ def test_round_request_snapshot_contains_messages_and_image_urls(tmp_path: Path)
     request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
     assert request_payload["image_transport"] == "url"
     assert request_payload["messages"][0]["role"] == "system"
-    assert request_payload["image_urls"][0] == "https://img.jinyao.qzz.io/samples/source.png"
     first_user_content = request_payload["messages"][1]["content"]
     assert first_user_content[0]["type"] == "image_url"
+    assert first_user_content[0]["image_url"]["url"] == "https://img.jinyao.qzz.io/samples/source.png"
     assert first_user_content[1]["type"] == "text"
     assert "session_state" in request_payload
+
+
+def test_source_image_appended_once_in_conversation(tmp_path: Path) -> None:
+    input_path = tmp_path / "samples" / "circle_quickstart.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "out" / "source_once_url_out"
+    response_path = tmp_path / "source_once_url_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "inspect_history", "last_n": 5}, "reason": "inspect"},
+                {"decision": "stalled", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=3,
+        image_transport_config=FreePenImageTransportConfig(
+            mode="url",
+            public_image_base_url="https://img.jinyao.qzz.io/",
+            public_image_root=tmp_path,
+        ),
+    )
+    runtime.run(input_path, output_dir)
+
+    source_url = "https://img.jinyao.qzz.io/samples/circle_quickstart.png"
+    conversation_payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    assert json.dumps(conversation_payload).count(source_url) == 1
+    for round_name in ("round_001_request.json", "round_002_request.json", "round_003_request.json"):
+        request_payload = json.loads((output_dir / round_name).read_text(encoding="utf-8"))
+        request_text = json.dumps(request_payload)
+        assert request_text.count(source_url) == 1
+        assert request_payload["messages"][0]["role"] == "system"
+        assert "image_url" not in str(request_payload["messages"][0]["content"])
+    round_two_payload = json.loads((output_dir / "round_002_request.json").read_text(encoding="utf-8"))
+    round_three_payload = json.loads((output_dir / "round_003_request.json").read_text(encoding="utf-8"))
+    assert any(part.get("type") == "image_url" and "round_001_overlay.png" in part["image_url"]["url"] for part in round_two_payload["messages"][-2]["content"])
+    assert any(
+        part.get("type") == "image_url"
+        and ("round_002_overlay.png" in part["image_url"]["url"] or "round_003_composite_context.png" in part["image_url"]["url"])
+        for part in round_three_payload["messages"][-2]["content"]
+    )
 
 
 def test_session_state_sent_each_round(tmp_path: Path) -> None:
@@ -773,6 +862,40 @@ def test_base64_transport_still_available(tmp_path: Path) -> None:
     assert image_url.endswith("<base64 data omitted>")
 
 
+def test_source_not_reappended_after_first_round_base64_mode(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "base64_source_once_out"
+    response_path = tmp_path / "base64_source_once_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "inspect_history", "last_n": 5}, "reason": "inspect"},
+                {"decision": "stalled", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=3,
+        image_transport_config=FreePenImageTransportConfig(mode="base64"),
+    )
+    runtime.run(input_path, output_dir)
+
+    conversation_payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    conversation_text = json.dumps(conversation_payload)
+    assert conversation_text.count("data:image/png;base64,<base64 data omitted>") >= 1
+    round_one = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
+    round_two = json.loads((output_dir / "round_002_request.json").read_text(encoding="utf-8"))
+    round_three = json.loads((output_dir / "round_003_request.json").read_text(encoding="utf-8"))
+    assert json.dumps(round_one).count("This is the target source image. Trace the single black contour in this image.") == 1
+    assert json.dumps(round_two).count("This is the target source image. Trace the single black contour in this image.") == 1
+    assert json.dumps(round_three).count("This is the target source image. Trace the single black contour in this image.") == 1
+
+
 def test_free_pen_tool_url_mode_file_provider_smoke(tmp_path: Path) -> None:
     input_path = tmp_path / "samples" / "source.png"
     _write_source_image(input_path)
@@ -803,4 +926,4 @@ def test_free_pen_tool_url_mode_file_provider_smoke(tmp_path: Path) -> None:
     assert result.final_overlay_path.exists()
     assert (output_dir / "conversation_messages.json").exists()
     assert (output_dir / "round_001_request.json").exists()
-    assert request_payload["image_urls"][0] == "https://img.jinyao.qzz.io/samples/source.png"
+    assert request_payload["messages"][1]["content"][0]["image_url"]["url"] == "https://img.jinyao.qzz.io/samples/source.png"
