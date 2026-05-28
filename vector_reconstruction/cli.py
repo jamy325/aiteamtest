@@ -312,8 +312,11 @@ def _free_pen_tool_command(args: argparse.Namespace) -> int:
                     "rounds_executed": result.rounds_executed,
                     "successful_step_count": result.successful_step_count,
                     "invalid_step_count": result.invalid_step_count,
+                    "rejected_step_count": result.rejected_step_count,
+                    "rollback_count": result.rollback_count,
                     "final_decision": result.final_decision,
                     "error_message": result.error_message,
+                    "error_type": result.error_type,
                 },
                 ensure_ascii=False,
             )

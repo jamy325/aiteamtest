@@ -264,7 +264,11 @@ def test_free_pen_tool_runtime_sequence_generates_overlay_paths_and_trace(tmp_pa
         encoding="utf-8",
     )
 
-    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=4)
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=4,
+        closed_contour_mode=False,
+    )
     result = runtime.run(input_path, output_dir)
 
     assert result.status == "finished"
@@ -307,7 +311,7 @@ def test_free_pen_tool_runtime_records_invalid_tool_call_without_crashing(tmp_pa
     assert result.error_message is not None
     trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
     assert trace_payload["invalid_step_count"] >= 1
-    assert trace_payload["rounds"][0]["validation_result"]["success"] is False
+    assert trace_payload["rounds"][-1]["validation_result"]["success"] is False
 
 
 def test_free_pen_tool_cli_uses_file_sequence_provider_and_writes_outputs(tmp_path: Path, monkeypatch) -> None:
@@ -329,7 +333,7 @@ def test_free_pen_tool_cli_uses_file_sequence_provider_and_writes_outputs(tmp_pa
                     "reason": "curve",
                 },
                 {
-                    "decision": "finish",
+                    "decision": "stalled",
                     "reason": "done",
                 },
             ]
@@ -354,3 +358,304 @@ def test_free_pen_tool_cli_uses_file_sequence_provider_and_writes_outputs(tmp_pa
     assert exit_code == 0
     for name in ("final_overlay.png", "final_composite.png", "free_pen_paths.json", "tool_trace.json"):
         assert (output_dir / name).exists()
+
+
+def test_rollback_to_step_restores_canvas_state(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "rollback_out"
+    response_path = tmp_path / "rollback_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "line_to", "x": 24, "y": 48}, "reason": "straight setup"},
+                {
+                    "decision": "tool_call",
+                    "tool_call": {"tool": "curve_to", "c1": [32, 44], "c2": [56, 28], "p": [84, 18]},
+                    "reason": "smooth curve",
+                },
+                {"decision": "tool_call", "tool_call": {"tool": "rollback_to_step", "step": 1}, "reason": "retry from step 1"},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=5,
+        closed_contour_mode=False,
+    )
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    history = trace_payload["history"]
+    rollback_entry = history[3]
+    assert result.status == "finished"
+    assert rollback_entry["tool"] == "rollback_to_step"
+    assert rollback_entry["runtime_description"].startswith("Rolled back the canvas to successful drawing step 1")
+    assert rollback_entry["state_after"]["current_point"] == [12.0, 52.0]
+    assert rollback_entry["state_after"]["path_count"] == 1
+    paths_payload = json.loads(result.paths_json_path.read_text(encoding="utf-8"))
+    assert paths_payload["paths"][0]["segments"] == [{"type": "move", "p": [12.0, 52.0]}]
+
+
+def test_undo_last_restores_previous_step(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "undo_out"
+    response_path = tmp_path / "undo_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "line_to", "x": 24, "y": 48}, "reason": "straight step"},
+                {"decision": "tool_call", "tool_call": {"tool": "undo_last"}, "reason": "remove the wrong line"},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=4,
+        closed_contour_mode=False,
+    )
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    history = trace_payload["history"]
+    undo_entry = history[2]
+    assert result.status == "finished"
+    assert undo_entry["tool"] == "undo_last"
+    assert undo_entry["state_after"]["current_point"] == [12.0, 52.0]
+    assert trace_payload["rollback_count"] == 1
+
+
+def test_inspect_history_returns_recent_descriptions_without_mutating_canvas(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "inspect_out"
+    response_path = tmp_path / "inspect_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "inspect_history", "last_n": 8}, "reason": "review recent mistakes"},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=3)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    inspect_entry = trace_payload["history"][1]
+    assert result.status == "finished"
+    assert inspect_entry["tool"] == "inspect_history"
+    assert inspect_entry["runtime_description"].startswith("Reviewed the most recent 8 history entries")
+    assert inspect_entry["state_after"]["current_point"] == [12.0, 52.0]
+
+
+def test_close_path_too_early_is_rejected(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "close_reject_out"
+    response_path = tmp_path / "close_reject_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "line_to", "x": 24, "y": 48}, "reason": "ellipse curve start"},
+                {"decision": "tool_call", "tool_call": {"tool": "close_path"}, "reason": "close the oval"},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=4)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    rejected_round = trace_payload["rounds"][2]
+    assert rejected_round["rejected_tool_call"]["tool"] == "close_path"
+    warning_codes = {warning["code"] for warning in rejected_round["warnings"]}
+    assert "close_path_used_too_early" in warning_codes
+    assert "long_chord_if_closed" in warning_codes
+    assert rejected_round["canvas_state_summary"]["path_open"] is True
+
+
+def test_finish_with_open_path_is_rejected_in_closed_contour_mode(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "finish_reject_out"
+    response_path = tmp_path / "finish_reject_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "finish", "reason": "the current path looks good enough"},
+                {"decision": "stalled", "reason": "stop after rejection"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=3)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    finish_round = trace_payload["rounds"][1]
+    assert result.status == "stalled"
+    assert finish_round["rejected_tool_call"] is None
+    warning_codes = {warning["code"] for warning in trace_payload["history"][1]["warnings"]}
+    assert "finish_with_open_path" in warning_codes
+
+
+def test_line_to_on_smooth_reason_generates_warning(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "line_warning_out"
+    response_path = tmp_path / "line_warning_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "line_to", "x": 24, "y": 48}, "reason": "Tracing the bottom ellipse curve"},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=3)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    warning_codes = {warning["code"] for warning in trace_payload["history"][1]["warnings"]}
+    assert result.status == "finished"
+    assert "line_to_used_on_smooth_curve_hint" in warning_codes
+
+
+def test_overlay_confusion_reason_generates_warning(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "overlay_warning_out"
+    response_path = tmp_path / "overlay_warning_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "follow the orange overlay start"},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=2,
+        closed_contour_mode=False,
+    )
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    warning_codes = {warning["code"] for warning in trace_payload["history"][0]["warnings"]}
+    assert result.status == "finished"
+    assert "overlay_target_confusion_hint" in warning_codes
+
+
+class _TimeoutAdapter:
+    provider_name = "fake"
+    model = "timeout-model"
+
+    def review(self, prompt: str, review_input: object) -> dict[str, object]:
+        raise TimeoutError("timed out while waiting for provider response")
+
+
+def test_provider_timeout_status_is_provider_timeout(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "timeout_out"
+
+    runtime = FreePenToolRuntime(adapter=_TimeoutAdapter(), max_steps=2)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    assert result.status == "provider_timeout"
+    assert result.error_type == "ProviderTimeout"
+    assert trace_payload["final_status"] == "provider_timeout"
+    assert result.final_overlay_path.exists()
+    assert result.paths_json_path.exists()
+
+
+def test_rejected_action_does_not_mutate_canvas(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "reject_nomutate_out"
+    response_path = tmp_path / "reject_nomutate_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "line_to", "x": 24, "y": 48}, "reason": "ellipse curve"},
+                {"decision": "tool_call", "tool_call": {"tool": "close_path"}, "reason": "close now"},
+                {"decision": "finish", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=4,
+        closed_contour_mode=False,
+    )
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    state_before = trace_payload["history"][1]["state_after"]
+    state_after = trace_payload["history"][2]["state_after"]
+    assert result.status == "finished"
+    assert state_before["current_point"] == state_after["current_point"]
+    assert state_before["path_count"] == state_after["path_count"]
+    assert state_before["line_to_streak"] == state_after["line_to_streak"]
+
+
+def test_prompt_contains_source_overlay_distinction_and_history_summary(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "prompt_out"
+    response_path = tmp_path / "prompt_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                {"decision": "tool_call", "tool_call": {"tool": "start_path", "x": 12, "y": 52}, "reason": "start"},
+                {"decision": "tool_call", "tool_call": {"tool": "inspect_history", "last_n": 8}, "reason": "review history"},
+                {"decision": "stalled", "reason": "done"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    captured_prompts: list[str] = []
+
+    class _PromptCaptureAdapter(FileSequenceFreePenAdapter):
+        def review(self, prompt: str, review_input: object) -> dict[str, object]:
+            captured_prompts.append(prompt)
+            return super().review(prompt, review_input)
+
+    runtime = FreePenToolRuntime(adapter=_PromptCaptureAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    assert len(captured_prompts) >= 2
+    prompt = captured_prompts[1]
+    assert "The source image is the target." in prompt
+    assert "The overlay image is your previous drawing only." in prompt
+    assert "Do not trace the overlay." in prompt
+    assert "Recent history:" in prompt

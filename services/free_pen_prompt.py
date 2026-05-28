@@ -93,6 +93,13 @@ Return JSON only.
 
 You are not reviewing. You are drawing by calling exactly one tool per round.
 
+Image semantics:
+- The source image is the target.
+- The overlay image is your previous drawing only.
+- Do not trace the overlay.
+- If the overlay conflicts with the source image, the source image is always correct.
+- Use the overlay only to understand what you have already drawn.
+
 Coordinate system:
 - coordinate_space: image_px
 - origin: top-left
@@ -110,15 +117,46 @@ Allowed tools:
 - line_to(x, y)
 - curve_to(c1, c2, p)
 - close_path()
+- undo_last()
+- rollback_to_step(step)
+- inspect_history(last_n)
+- restart_path(x, y)
 
 Rules:
 - Call exactly one tool per round when you can continue drawing.
-- Use finish only when the tracing is complete enough.
+- The source image contains the real target stroke. The overlay is only your draft.
+- For smooth curved strokes, prefer curve_to.
+- Use line_to only for visibly straight segments.
+- Do not approximate an oval, circle, or arc using many line_to calls.
+- Do not call close_path unless the current point is already near the starting point.
+- Do not finish while path_open=true.
+- If an action is rejected, revise the action instead of repeating it.
+- If the path became wrong, use undo_last or rollback_to_step.
+- Use inspect_history if you need to understand recent mistakes.
+- Use finish only when the tracing is complete enough and the current path is not open.
 - Use stalled only when you cannot continue reliably.
 - Do not output SVG.
 - Do not output VectorDocument.
 - Do not output AI review commands, candidates, or planner objects.
 - Keep reason short and visual.
+
+Bad sequence for an oval:
+- start_path(50, 100)
+- line_to(90, 152)
+- close_path()
+
+Why it is bad:
+- line_to creates a straight chord instead of following a smooth curved boundary.
+- close_path too early creates a triangle or long straight closure instead of a smooth oval.
+
+Good sequence style for a smooth oval:
+- start_path(50, 100)
+- curve_to(c1=[55,70], c2=[120,55], p=[170,95])
+- curve_to(c1=[190,120], c2=[150,175], p=[90,160])
+- curve_to(c1=[45,145], c2=[35,115], p=[50,100])
+- close_path()
+
+The numeric points above are only illustrative. Do not copy them blindly. They show that smooth boundaries should usually use curve_to.
 
 If you can continue drawing, return:
 {
@@ -160,6 +198,8 @@ class FreePenToolPromptInput:
     path_count: int = 0
     successful_step_count: int = 0
     invalid_step_count: int = 0
+    recent_history: tuple[str, ...] = ()
+    current_feedback: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, object]:
         return asdict(self)
@@ -167,7 +207,14 @@ class FreePenToolPromptInput:
 
 def build_free_pen_tool_prompt(prompt_input: FreePenToolPromptInput) -> str:
     payload = json.dumps(prompt_input.to_payload(), ensure_ascii=True, sort_keys=True, indent=2)
-    return f"{FREE_PEN_TOOL_PROMPT}\n\nRuntime input:\n{payload}"
+    history_text = "\n".join(f"- {entry}" for entry in prompt_input.recent_history) or "- none"
+    feedback_text = "\n".join(f"- {entry}" for entry in prompt_input.current_feedback) or "- none"
+    return (
+        f"{FREE_PEN_TOOL_PROMPT}\n\n"
+        f"Recent history:\n{history_text}\n\n"
+        f"Current feedback:\n{feedback_text}\n\n"
+        f"Runtime input:\n{payload}"
+    )
 
 
 __all__ = [

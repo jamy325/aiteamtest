@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import mimetypes
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -468,6 +469,8 @@ class FreePenToolReviewInput:
     path_count: int = 0
     successful_step_count: int = 0
     invalid_step_count: int = 0
+    recent_history: tuple[str, ...] = ()
+    current_feedback: tuple[str, ...] = ()
 
     def prompt_input(self) -> FreePenToolPromptInput:
         return FreePenToolPromptInput(
@@ -483,6 +486,8 @@ class FreePenToolReviewInput:
             path_count=self.path_count,
             successful_step_count=self.successful_step_count,
             invalid_step_count=self.invalid_step_count,
+            recent_history=self.recent_history,
+            current_feedback=self.current_feedback,
         )
 
 
@@ -496,9 +501,12 @@ class FreePenToolRunResult:
     rounds_executed: int
     successful_step_count: int
     invalid_step_count: int
+    rejected_step_count: int
+    rollback_count: int
     final_decision: str | None
     final_reason: str | None
     error_message: str | None = None
+    error_type: str | None = None
     response_files: tuple[Path, ...] = ()
     overlay_files: tuple[Path, ...] = ()
 
@@ -552,6 +560,19 @@ def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         return normalized
     if tool == "close_path":
         return {"tool": "close_path"}
+    if tool == "undo_last":
+        return {"tool": "undo_last"}
+    if tool == "rollback_to_step":
+        normalized["step"] = int(normalized["step"])
+        return normalized
+    if tool == "inspect_history":
+        last_n = normalized.get("last_n", 8)
+        normalized["last_n"] = int(last_n)
+        return normalized
+    if tool == "restart_path":
+        normalized["x"] = float(normalized["x"])
+        normalized["y"] = float(normalized["y"])
+        return normalized
     raise ValueError(f"unsupported free-pen tool: {tool}")
 
 
@@ -591,6 +612,12 @@ class FreePenToolRuntime:
     raw_response_logger: Callable[[int, Any], None] | None = None
     provider_name: str = ""
     provider_model: str = ""
+    history_summary_steps: int = 8
+    max_rollbacks: int = 3
+    closed_contour_mode: bool = True
+
+    _SMOOTH_REASON_HINTS = ("curve", "curved", "oval", "ellipse", "circle", "arc", "smooth")
+    _OVERLAY_CONFUSION_HINTS = ("orange line", "overlay", "previous line", "current drawing", "draft line")
 
     def run(self, source_image_path: Path, output_dir: Path) -> FreePenToolRunResult:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -602,10 +629,17 @@ class FreePenToolRuntime:
         response_files: list[Path] = []
         overlay_files: list[Path] = []
         trace_rounds: list[dict[str, Any]] = []
+        history: list[dict[str, Any]] = []
+        successful_drawing_tool_calls: list[dict[str, Any]] = []
         final_decision: str | None = None
         final_reason: str | None = None
         error_message: str | None = None
+        error_type: str | None = None
         previous_overlay_path: Path | None = None
+        current_feedback: list[str] = []
+        rejected_step_count = 0
+        invalid_step_count = 0
+        rollback_count = 0
 
         for step_index in range(1, max(1, int(self.max_steps)) + 1):
             review_input = FreePenToolReviewInput(
@@ -625,15 +659,23 @@ class FreePenToolRuntime:
                 if canvas.current_subpath_start is None
                 else [canvas.current_subpath_start[0], canvas.current_subpath_start[1]],
                 path_count=len(canvas.paths),
-                successful_step_count=canvas.successful_step_count,
-                invalid_step_count=canvas.invalid_step_count,
+                successful_step_count=len(successful_drawing_tool_calls),
+                invalid_step_count=invalid_step_count,
+                recent_history=tuple(self._recent_history_summary(history)),
+                current_feedback=tuple(current_feedback),
             )
             prompt = build_free_pen_tool_prompt(review_input.prompt_input())
             interaction_id = f"free_pen_tool_{uuid4().hex}"
             raw_response: Any = None
             normalized_response: dict[str, Any] | None = None
             validation_error: str | None = None
+            preflight_result: dict[str, Any] | None = None
             executed_tool_call: dict[str, Any] | None = None
+            rejected_tool_call: dict[str, Any] | None = None
+            runtime_description = ""
+            quality = "good"
+            quality_summary = ""
+            warnings: list[dict[str, Any]] = []
             round_status = "received"
             self._record_interaction(
                 {
@@ -659,21 +701,83 @@ class FreePenToolRuntime:
                 final_decision = str(normalized_response["decision"])
                 final_reason = str(normalized_response.get("reason") or "").strip() or None
                 if final_decision == "tool_call":
-                    executed_tool_call = canvas.apply_tool_call(dict(normalized_response["tool_call"]))
-                    round_status = "tool_applied"
+                    tool_call = dict(normalized_response["tool_call"])
+                    preflight_result = self._preflight_tool_call(
+                        tool_call=tool_call,
+                        ai_reason=final_reason or "",
+                        canvas=canvas,
+                        successful_drawing_step_count=len(successful_drawing_tool_calls),
+                        rollback_count=rollback_count,
+                    )
+                    warnings = list(preflight_result["warnings"])
+                    if not preflight_result["success"]:
+                        rejected_step_count += 1
+                        rejected_tool_call = tool_call
+                        round_status = "rejected_action"
+                        runtime_description = str(preflight_result["runtime_description"])
+                        quality = "bad"
+                        quality_summary = str(preflight_result["quality_summary"])
+                        current_feedback = self._feedback_from_rejected_action(warnings=warnings, quality_summary=quality_summary)
+                    else:
+                        (
+                            executed_tool_call,
+                            runtime_description,
+                            quality,
+                            quality_summary,
+                            warnings,
+                            rollback_applied,
+                            current_feedback,
+                        ) = self._execute_tool_call(
+                            tool_call=tool_call,
+                            ai_reason=final_reason or "",
+                            canvas=canvas,
+                            successful_drawing_tool_calls=successful_drawing_tool_calls,
+                            history=history,
+                        )
+                        rollback_count += rollback_applied
+                        round_status = "tool_applied"
                 elif final_decision == "finish":
-                    round_status = "finished"
-                    canvas.final_status = "finish"
+                    finish_warning = self._warning(
+                        code="finish_with_open_path",
+                        message="The current path is still open. Continue drawing, close_path when appropriate, or rollback.",
+                    )
+                    if self.closed_contour_mode and canvas.path_open:
+                        warnings = [finish_warning]
+                        rejected_step_count += 1
+                        round_status = "rejected_action"
+                        quality = "bad"
+                        quality_summary = finish_warning["message"]
+                        runtime_description = "Rejected finish because the current path is still open."
+                        current_feedback = self._feedback_from_rejected_action(warnings=warnings, quality_summary=quality_summary)
+                    else:
+                        round_status = "finished"
+                        canvas.final_status = "finish"
+                        quality = "good"
+                        quality_summary = "Finished tracing without validation warnings."
+                        runtime_description = "Finished the tracing loop."
                 elif final_decision == "stalled":
                     round_status = "stalled"
                     canvas.final_status = "stalled"
+                    quality = "warning"
+                    quality_summary = "The model reported that it could not continue reliably."
+                    runtime_description = "Stopped the tracing loop because the model returned stalled."
                 else:
                     raise ValueError(f"unsupported free-pen tool decision: {final_decision}")
             except Exception as exc:
                 validation_error = str(exc)
                 error_message = validation_error
-                round_status = "invalid_response"
-                canvas.final_status = "invalid_response"
+                error_type = "ProviderTimeout" if self._is_timeout_error(exc) else type(exc).__name__
+                round_status = "provider_timeout" if error_type == "ProviderTimeout" else "invalid_response"
+                canvas.final_status = round_status
+                invalid_step_count += 1
+                quality = "bad"
+                quality_summary = validation_error
+                runtime_description = (
+                    f"Provider call timed out at step {step_index}."
+                    if round_status == "provider_timeout"
+                    else f"Failed to parse or validate the model response at step {step_index}."
+                )
+                current_feedback = []
 
             overlay = canvas.render_overlay(
                 stroke_width=max(1, int(self.stroke_width)),
@@ -696,6 +800,20 @@ class FreePenToolRuntime:
                     error=validation_error,
                 )
             )
+            history_entry = {
+                "step": step_index,
+                "tool": None if normalized_response is None or final_decision != "tool_call" else normalized_response["tool_call"]["tool"],
+                "args": {} if normalized_response is None or final_decision != "tool_call" else dict(normalized_response["tool_call"]),
+                "ai_reason": final_reason,
+                "runtime_description": runtime_description,
+                "quality": quality,
+                "quality_summary": quality_summary,
+                "warnings": warnings,
+                "state_after": canvas.state_summary(),
+                "overlay_path": overlay_path.name,
+                "round_status": round_status,
+            }
+            history.append(history_entry)
             trace_rounds.append(
                 {
                     "step_index": step_index,
@@ -705,7 +823,12 @@ class FreePenToolRuntime:
                         "success": validation_error is None,
                         "error": validation_error,
                     },
+                    "preflight_result": preflight_result,
                     "executed_tool_call": executed_tool_call,
+                    "rejected_tool_call": rejected_tool_call,
+                    "warnings": warnings,
+                    "runtime_description": runtime_description,
+                    "quality_summary": quality_summary,
                     "canvas_state_summary": canvas.state_summary(),
                     "reason": final_reason,
                     "output_overlay_path": str(overlay_path),
@@ -721,12 +844,19 @@ class FreePenToolRuntime:
                     "raw_response": raw_response,
                     "normalized_response": normalized_response,
                     "validation_error": validation_error,
+                    "preflight_result": preflight_result,
                     "executed_tool_call": executed_tool_call,
+                    "rejected_tool_call": rejected_tool_call,
+                    "warnings": warnings,
+                    "runtime_description": runtime_description,
+                    "quality_summary": quality_summary,
                     "final_decision": final_decision,
                 }
             )
 
-            if validation_error is not None or final_decision in {"finish", "stalled"}:
+            if round_status in {"provider_timeout", "invalid_response"}:
+                break
+            if final_decision in {"finish", "stalled"} and round_status != "rejected_action":
                 break
 
         if canvas.final_status == "initialized":
@@ -755,9 +885,12 @@ class FreePenToolRuntime:
         tool_trace_path.write_text(
             json.dumps(
                 {
-                    "successful_step_count": canvas.successful_step_count,
-                    "invalid_step_count": canvas.invalid_step_count,
+                    "successful_step_count": len(successful_drawing_tool_calls),
+                    "invalid_step_count": invalid_step_count,
+                    "rejected_step_count": rejected_step_count,
+                    "rollback_count": rollback_count,
                     "final_status": canvas.final_status,
+                    "history": history,
                     "rounds": trace_rounds,
                 },
                 indent=2,
@@ -771,6 +904,8 @@ class FreePenToolRuntime:
             status = "finished"
         elif final_decision == "stalled":
             status = "stalled"
+        elif error_type == "ProviderTimeout":
+            status = "provider_timeout"
         elif error_message is not None:
             status = "invalid_response"
         elif final_decision == "tool_call":
@@ -783,14 +918,359 @@ class FreePenToolRuntime:
             paths_json_path=paths_json_path,
             tool_trace_path=tool_trace_path,
             rounds_executed=len(trace_rounds),
-            successful_step_count=canvas.successful_step_count,
-            invalid_step_count=canvas.invalid_step_count,
+            successful_step_count=len(successful_drawing_tool_calls),
+            invalid_step_count=invalid_step_count,
+            rejected_step_count=rejected_step_count,
+            rollback_count=rollback_count,
             final_decision=final_decision,
             final_reason=final_reason,
             error_message=error_message,
+            error_type=error_type,
             response_files=tuple(response_files),
             overlay_files=tuple(overlay_files),
         )
+
+    def _preflight_tool_call(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        ai_reason: str,
+        canvas: FreePenCanvasState,
+        successful_drawing_step_count: int,
+        rollback_count: int,
+    ) -> dict[str, Any]:
+        tool = str(tool_call["tool"])
+        warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
+        if tool in {"start_path", "line_to", "restart_path"}:
+            warnings.extend(self._coordinate_warnings(x=tool_call["x"], y=tool_call["y"], width=canvas.width, height=canvas.height))
+        elif tool == "curve_to":
+            for key in ("c1", "c2", "p"):
+                warnings.extend(
+                    self._coordinate_warnings(
+                        x=tool_call[key][0],
+                        y=tool_call[key][1],
+                        width=canvas.width,
+                        height=canvas.height,
+                        point_name=key,
+                    )
+                )
+        reject_codes = {warning["code"] for warning in warnings if warning["code"] in {"non_finite_coordinate", "out_of_bounds_coordinate"}}
+        if tool in {"line_to", "curve_to", "close_path"} and not canvas.path_open:
+            reject_codes.add("path_not_open")
+            warnings.append(self._warning("path_not_open", f"{tool} requires an open path started by start_path."))
+        if tool == "start_path" and canvas.path_open:
+            reject_codes.add("path_already_open")
+            warnings.append(self._warning("path_already_open", "A path is already open. Use restart_path, rollback_to_step, or close_path first."))
+        if tool == "close_path" and canvas.path_open:
+            if canvas.current_path_drawable_segment_count() < 2 or not canvas.current_path_has_cubic_segment():
+                reject_codes.add("close_path_used_too_early")
+                warnings.append(
+                    self._warning(
+                        "close_path_used_too_early",
+                        "close_path was called when the path had too few smooth drawable segments.",
+                    )
+                )
+            distance_to_start = canvas.distance_to_start()
+            if distance_to_start is not None:
+                threshold = max(8.0, canvas.current_path_bbox_diagonal() * 0.10)
+                if distance_to_start > threshold:
+                    reject_codes.add("long_chord_if_closed")
+                    warnings.append(
+                        self._warning(
+                            "long_chord_if_closed",
+                            f"Closing now would create a long straight chord of length {distance_to_start:.2f} back to the start point.",
+                        )
+                    )
+        if tool == "undo_last" and successful_drawing_step_count == 0:
+            reject_codes.add("undo_without_history")
+            warnings.append(self._warning("undo_without_history", "There is no successful drawing step to undo."))
+        if tool == "rollback_to_step":
+            target_step = int(tool_call["step"])
+            if target_step < 0 or target_step > successful_drawing_step_count:
+                reject_codes.add("rollback_step_out_of_range")
+                warnings.append(
+                    self._warning(
+                        "rollback_step_out_of_range",
+                        f"rollback_to_step must target an existing successful drawing step between 0 and {successful_drawing_step_count}.",
+                    )
+                )
+        if tool == "inspect_history" and rollback_count > self.max_rollbacks:
+            warnings.append(self._warning("rollback_budget_exceeded", "Rollback budget has already been exceeded. Prefer a direct correction."))
+
+        if reject_codes:
+            return {
+                "success": False,
+                "rejected": True,
+                "warnings": warnings,
+                "runtime_description": f"Rejected {tool} during preflight validation.",
+                "quality_summary": " ; ".join(warning["message"] for warning in warnings),
+            }
+        return {
+            "success": True,
+            "rejected": False,
+            "warnings": warnings,
+            "runtime_description": f"Accepted {tool} for execution.",
+            "quality_summary": "",
+        }
+
+    def _execute_tool_call(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        ai_reason: str,
+        canvas: FreePenCanvasState,
+        successful_drawing_tool_calls: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, str, str, str, list[dict[str, Any]], int, list[str]]:
+        tool = str(tool_call["tool"])
+        warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
+        rollback_applied = 0
+        current_feedback: list[str] = []
+        if tool == "inspect_history":
+            last_n = max(1, min(20, int(tool_call.get("last_n", 8))))
+            summary = self._recent_history_summary(history, last_n=last_n)
+            runtime_description = f"Reviewed the most recent {last_n} history entries without changing the canvas."
+            quality_summary = "Recent history was inspected successfully."
+            current_feedback = summary if summary else ["No prior history is available yet."]
+            return (
+                {"tool": "inspect_history", "last_n": last_n},
+                runtime_description,
+                "good",
+                quality_summary,
+                warnings,
+                rollback_applied,
+                current_feedback,
+            )
+
+        if tool == "undo_last":
+            target_step = max(0, len(successful_drawing_tool_calls) - 1)
+            removed_steps = len(successful_drawing_tool_calls) - target_step
+            del successful_drawing_tool_calls[target_step:]
+            canvas.replay_tool_calls(successful_drawing_tool_calls)
+            rollback_applied = 1
+            runtime_description = f"Rolled back the canvas by undoing the most recent successful drawing step to step {target_step}."
+            quality_summary = f"Undo removed {removed_steps} previously successful drawing step(s)."
+            current_feedback = ["The previous drawing step was removed. Continue from the corrected canvas state."]
+            return (
+                {"tool": "undo_last", "target_step": target_step},
+                runtime_description,
+                "good",
+                quality_summary,
+                warnings,
+                rollback_applied,
+                current_feedback,
+            )
+
+        if tool == "rollback_to_step":
+            target_step = int(tool_call["step"])
+            removed_steps = len(successful_drawing_tool_calls) - target_step
+            del successful_drawing_tool_calls[target_step:]
+            canvas.replay_tool_calls(successful_drawing_tool_calls)
+            rollback_applied = 1
+            runtime_description = f"Rolled back the canvas to successful drawing step {target_step}."
+            quality_summary = f"Rollback removed {removed_steps} drawing step(s) after step {target_step}."
+            current_feedback = [
+                f"The canvas was restored to drawing step {target_step}.",
+                "Retry the next action from the corrected canvas state.",
+            ]
+            return (
+                {"tool": "rollback_to_step", "step": target_step, "removed_steps": removed_steps},
+                runtime_description,
+                "good",
+                quality_summary,
+                warnings,
+                rollback_applied,
+                current_feedback,
+            )
+
+        if tool == "restart_path":
+            successful_drawing_tool_calls.clear()
+            canvas.replay_tool_calls(())
+            restart_call = {"tool": "start_path", "x": tool_call["x"], "y": tool_call["y"]}
+            executed = canvas.apply_tool_call(restart_call)
+            successful_drawing_tool_calls.append(restart_call)
+            rollback_applied = 1
+            runtime_description = f"Cleared the canvas and restarted a path at [{tool_call['x']:.2f}, {tool_call['y']:.2f}]."
+            quality_summary = "Restarted the drawing from a new anchor point."
+            current_feedback = ["The previous path was discarded. Continue tracing the black source stroke from the new start point."]
+            return (
+                {"tool": "restart_path", "x": tool_call["x"], "y": tool_call["y"], "executed_start_path": executed},
+                runtime_description,
+                "good",
+                quality_summary,
+                warnings,
+                rollback_applied,
+                current_feedback,
+            )
+
+        before_current_point = canvas.current_point
+        executed = canvas.apply_tool_call(tool_call)
+        successful_drawing_tool_calls.append(dict(tool_call))
+        warnings.extend(self._post_execution_warnings(tool_call=tool_call, ai_reason=ai_reason, canvas=canvas, before_current_point=before_current_point))
+        quality = "good" if not warnings else "warning"
+        quality_summary = (
+            "Executed the requested tool call without validation warnings."
+            if not warnings
+            else " ; ".join(warning["message"] for warning in warnings)
+        )
+        runtime_description = self._runtime_description_for_tool(tool_call=tool_call, executed_tool_call=executed, before_current_point=before_current_point)
+        current_feedback = self._feedback_from_executed_action(warnings=warnings, quality_summary=quality_summary, canvas=canvas)
+        return (executed, runtime_description, quality, quality_summary, warnings, rollback_applied, current_feedback)
+
+    def _post_execution_warnings(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        ai_reason: str,
+        canvas: FreePenCanvasState,
+        before_current_point: tuple[float, float] | None,
+    ) -> list[dict[str, Any]]:
+        tool = str(tool_call["tool"])
+        warnings: list[dict[str, Any]] = []
+        if tool in {"line_to", "curve_to"} and before_current_point is not None and canvas.current_point is not None:
+            segment_length = math.hypot(
+                canvas.current_point[0] - before_current_point[0],
+                canvas.current_point[1] - before_current_point[1],
+            )
+            if segment_length < 1.0:
+                warnings.append(self._warning("duplicate_point", "The new segment endpoint is almost identical to the previous current point."))
+                warnings.append(self._warning("zero_length_segment", "The drawn segment has near-zero length."))
+        if tool == "line_to":
+            if canvas.line_to_streak() >= 2:
+                warnings.append(
+                    self._warning(
+                        "line_to_streak_too_long",
+                        f"The current path now contains a line_to streak of {canvas.line_to_streak()} consecutive straight segments.",
+                    )
+                )
+            if any(token in ai_reason.lower() for token in self._SMOOTH_REASON_HINTS):
+                warnings.append(
+                    self._warning(
+                        "line_to_used_on_smooth_curve_hint",
+                        "The model described a smooth curve but used line_to, which draws a straight segment.",
+                    )
+                )
+        return warnings
+
+    def _runtime_description_for_tool(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        executed_tool_call: dict[str, Any],
+        before_current_point: tuple[float, float] | None,
+    ) -> str:
+        tool = str(tool_call["tool"])
+        if tool == "start_path":
+            return f"Started a new path at [{tool_call['x']:.2f}, {tool_call['y']:.2f}]."
+        if tool == "line_to":
+            if before_current_point is None:
+                return f"Drew a straight line to [{tool_call['x']:.2f}, {tool_call['y']:.2f}]."
+            return (
+                f"Drew a straight line from [{before_current_point[0]:.2f},{before_current_point[1]:.2f}] "
+                f"to [{tool_call['x']:.2f},{tool_call['y']:.2f}]."
+            )
+        if tool == "curve_to":
+            start = before_current_point if before_current_point is not None else (tool_call["p"][0], tool_call["p"][1])
+            return (
+                f"Drew a cubic curve from [{start[0]:.2f},{start[1]:.2f}] to [{tool_call['p'][0]:.2f},{tool_call['p'][1]:.2f}] "
+                f"using c1=[{tool_call['c1'][0]:.2f},{tool_call['c1'][1]:.2f}] and c2=[{tool_call['c2'][0]:.2f},{tool_call['c2'][1]:.2f}]."
+            )
+        if tool == "close_path":
+            return "Closed the current path by drawing a straight chord from the current point back to the path start."
+        return f"Executed {tool}."
+
+    def _recent_history_summary(self, history: list[dict[str, Any]], *, last_n: int | None = None) -> list[str]:
+        effective_last_n = max(1, min(20, int(last_n if last_n is not None else self.history_summary_steps)))
+        lines: list[str] = []
+        for entry in history[-effective_last_n:]:
+            prefix = f"{entry['step']}. "
+            description = str(entry.get("runtime_description") or "").strip()
+            quality_summary = str(entry.get("quality_summary") or "").strip()
+            if quality_summary:
+                lines.append(f"{prefix}{description} {quality_summary}")
+            else:
+                lines.append(f"{prefix}{description}")
+        return lines
+
+    def _feedback_from_executed_action(
+        self,
+        *,
+        warnings: list[dict[str, Any]],
+        quality_summary: str,
+        canvas: FreePenCanvasState,
+    ) -> list[str]:
+        feedback: list[str] = []
+        if warnings:
+            feedback.extend(warning["message"] for warning in warnings)
+        else:
+            feedback.append(quality_summary)
+        if canvas.path_open:
+            feedback.append("The current path is open.")
+        return feedback
+
+    @staticmethod
+    def _feedback_from_rejected_action(*, warnings: list[dict[str, Any]], quality_summary: str) -> list[str]:
+        feedback = [warning["message"] for warning in warnings]
+        if not feedback and quality_summary:
+            feedback.append(quality_summary)
+        return feedback
+
+    def _reason_based_warnings(self, *, ai_reason: str, tool: str) -> list[dict[str, Any]]:
+        reason_lower = ai_reason.lower()
+        warnings: list[dict[str, Any]] = []
+        if tool == "line_to" and any(token in reason_lower for token in self._SMOOTH_REASON_HINTS):
+            warnings.append(
+                self._warning(
+                    "line_to_used_on_smooth_curve_hint",
+                    "The model described a smooth curve but used line_to, which draws a straight segment.",
+                )
+            )
+        if any(token in reason_lower for token in self._OVERLAY_CONFUSION_HINTS):
+            warnings.append(
+                self._warning(
+                    "overlay_target_confusion_hint",
+                    "The overlay is your previous drawing, not the target. Trace the black source stroke, not the overlay.",
+                )
+            )
+        return warnings
+
+    def _coordinate_warnings(
+        self,
+        *,
+        x: Any,
+        y: Any,
+        width: int,
+        height: int,
+        point_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        label = point_name or "point"
+        warnings: list[dict[str, Any]] = []
+        numeric_x = self._finite_number_or_none(x)
+        numeric_y = self._finite_number_or_none(y)
+        if numeric_x is None or numeric_y is None:
+            warnings.append(self._warning("non_finite_coordinate", f"{label} contains NaN, Infinity, or another non-finite coordinate."))
+            return warnings
+        if numeric_x < 0.0 or numeric_x >= float(width) or numeric_y < 0.0 or numeric_y >= float(height):
+            warnings.append(self._warning("out_of_bounds_coordinate", f"{label} lies outside the canvas bounds."))
+        return warnings
+
+    @staticmethod
+    def _finite_number_or_none(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if np.isfinite(numeric) else None
+
+    @staticmethod
+    def _warning(code: str, message: str) -> dict[str, Any]:
+        return {"code": code, "message": message}
+
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        name = type(exc).__name__.lower()
+        message = str(exc).lower()
+        return "timeout" in name or "timed out" in message or isinstance(exc, TimeoutError)
 
     def _record_interaction(self, payload: dict[str, Any]) -> None:
         if self.interaction_logger is not None:

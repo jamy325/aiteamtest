@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 import cv2
 import numpy as np
@@ -25,6 +25,34 @@ class FreePenPathRecord:
             "segments": [dict(segment) for segment in self.segments],
         }
 
+    def drawable_segment_count(self) -> int:
+        return sum(1 for segment in self.segments if segment["type"] in {"line", "cubic"})
+
+    def has_cubic_segment(self) -> bool:
+        return any(segment["type"] == "cubic" for segment in self.segments)
+
+    def points(self) -> list[tuple[float, float]]:
+        points: list[tuple[float, float]] = []
+        current_point: tuple[float, float] | None = None
+        subpath_start: tuple[float, float] | None = None
+        for segment in self.segments:
+            segment_type = segment["type"]
+            if segment_type == "move":
+                current_point = (float(segment["p"][0]), float(segment["p"][1]))
+                subpath_start = current_point
+                points.append(current_point)
+            elif segment_type == "line":
+                current_point = (float(segment["p"][0]), float(segment["p"][1]))
+                points.append(current_point)
+            elif segment_type == "cubic":
+                current_point = (float(segment["p"][0]), float(segment["p"][1]))
+                points.append(current_point)
+                points.append((float(segment["c1"][0]), float(segment["c1"][1])))
+                points.append((float(segment["c2"][0]), float(segment["c2"][1])))
+            elif segment_type == "close" and subpath_start is not None:
+                points.append(subpath_start)
+        return points
+
 
 @dataclass(slots=True)
 class FreePenCanvasState:
@@ -41,8 +69,24 @@ class FreePenCanvasState:
     invalid_step_count: int = 0
     final_status: str = "initialized"
 
-    def apply_tool_call(self, tool_call: dict[str, Any]) -> dict[str, Any]:
-        self.step_count += 1
+    def clear(self) -> None:
+        self.path_open = False
+        self.current_point = None
+        self.current_subpath_start = None
+        self.current_path_id = None
+        self.paths = []
+
+    def replay_tool_calls(self, tool_calls: Iterable[dict[str, Any]]) -> None:
+        self.clear()
+        self.step_count = 0
+        self.successful_step_count = 0
+        self.invalid_step_count = 0
+        for tool_call in tool_calls:
+            self.apply_tool_call(tool_call, count_step=False)
+
+    def apply_tool_call(self, tool_call: dict[str, Any], *, count_step: bool = True) -> dict[str, Any]:
+        if count_step:
+            self.step_count += 1
         tool = str(tool_call.get("tool", "")).strip()
         if tool == "start_path":
             executed = self.start_path(x=tool_call.get("x"), y=tool_call.get("y"))
@@ -129,6 +173,55 @@ class FreePenCanvasState:
             "tool": "close_path",
             "path_id": closed_path_id,
         }
+
+    def current_path(self) -> FreePenPathRecord | None:
+        if self.current_path_id is None:
+            return None
+        for path in self.paths:
+            if path.path_id == self.current_path_id:
+                return path
+        return None
+
+    def current_path_drawable_segment_count(self) -> int:
+        path = self.current_path()
+        return 0 if path is None else path.drawable_segment_count()
+
+    def current_path_has_cubic_segment(self) -> bool:
+        path = self.current_path()
+        return False if path is None else path.has_cubic_segment()
+
+    def current_path_bbox_diagonal(self) -> float:
+        path = self.current_path()
+        if path is None:
+            return 0.0
+        points = path.points()
+        if not points:
+            return 0.0
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+    def distance_to_start(self) -> float | None:
+        if self.current_point is None or self.current_subpath_start is None:
+            return None
+        return math.hypot(
+            self.current_point[0] - self.current_subpath_start[0],
+            self.current_point[1] - self.current_subpath_start[1],
+        )
+
+    def line_to_streak(self) -> int:
+        path = self.current_path()
+        if path is None:
+            return 0
+        streak = 0
+        for segment in reversed(path.segments):
+            segment_type = segment["type"]
+            if segment_type == "line":
+                streak += 1
+                continue
+            if segment_type in {"cubic", "move", "close"}:
+                break
+        return streak
 
     def render_overlay(
         self,
@@ -255,6 +348,8 @@ class FreePenCanvasState:
             "step_count": int(self.step_count),
             "successful_step_count": int(self.successful_step_count),
             "invalid_step_count": int(self.invalid_step_count),
+            "distance_to_start": self.distance_to_start(),
+            "line_to_streak": self.line_to_streak(),
             "final_status": self.final_status,
         }
 
@@ -269,8 +364,7 @@ class FreePenCanvasState:
         raise FreePenCanvasError(f"{tool} requires an existing current path")
 
     def _validated_point(self, *, x: Any, y: Any, label: str) -> tuple[float, float]:
-        point = self._validated_point_like([x, y], label=label)
-        return point
+        return self._validated_point_like([x, y], label=label)
 
     def _validated_point_like(self, point: Any, *, label: str) -> tuple[float, float]:
         if not isinstance(point, (list, tuple)) or len(point) != 2:
@@ -331,20 +425,9 @@ class FreePenCanvasState:
     @staticmethod
     def _to_rgba(image: np.ndarray) -> np.ndarray:
         if image.ndim == 2:
-            rgba = cv2.cvtColor(image, cv2.COLOR_GRAY2BGRA)
-            rgba[:, :, 3] = 255
-            return rgba
-        if image.ndim == 3 and image.shape[2] == 3:
-            rgba = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
-            rgba[:, :, 3] = 255
-            return rgba
-        if image.ndim == 3 and image.shape[2] == 4:
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2RGBA)
+        if image.shape[2] == 4:
             return image.copy()
-        raise FreePenCanvasError("unsupported source image shape for composite rendering")
-
-
-__all__ = [
-    "FreePenCanvasError",
-    "FreePenCanvasState",
-    "FreePenPathRecord",
-]
+        if image.shape[2] == 3:
+            return cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+        raise FreePenCanvasError(f"unsupported source image shape: {image.shape}")

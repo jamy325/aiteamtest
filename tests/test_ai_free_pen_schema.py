@@ -131,6 +131,46 @@ def test_ai_free_pen_tool_schema_accepts_valid_tools_and_terminal_decisions() ->
             "reason": "close",
         }
     )
+    validate_free_pen_tool_response(
+        {
+            "decision": "tool_call",
+            "tool_call": {
+                "tool": "undo_last",
+            },
+            "reason": "undo",
+        }
+    )
+    validate_free_pen_tool_response(
+        {
+            "decision": "tool_call",
+            "tool_call": {
+                "tool": "rollback_to_step",
+                "step": 1,
+            },
+            "reason": "rollback",
+        }
+    )
+    validate_free_pen_tool_response(
+        {
+            "decision": "tool_call",
+            "tool_call": {
+                "tool": "inspect_history",
+                "last_n": 8,
+            },
+            "reason": "inspect",
+        }
+    )
+    validate_free_pen_tool_response(
+        {
+            "decision": "tool_call",
+            "tool_call": {
+                "tool": "restart_path",
+                "x": 20,
+                "y": 30,
+            },
+            "reason": "restart",
+        }
+    )
     validate_free_pen_tool_response({"decision": "finish", "reason": "done"})
     validate_free_pen_tool_response({"decision": "stalled", "reason": "ambiguous"})
 
@@ -181,13 +221,11 @@ def test_ai_free_pen_tool_schema_prompt_helpers_stay_json_schema_compatible() ->
         {
             "decision": "tool_call",
             "tool_call": {
-                "tool": "curve_to",
-                "c1": [1, 2],
-                "c2": [3, 4],
-                "p": [5, 6],
+                "tool": "inspect_history",
+                "last_n": 5,
             },
-            "reason": "curve",
+            "reason": "inspect",
         }
     )
     assert normalized["decision"] == "tool_call"
-    assert normalized["tool_call"]["c1"] == [1.0, 2.0]
+    assert normalized["tool_call"]["last_n"] == 5

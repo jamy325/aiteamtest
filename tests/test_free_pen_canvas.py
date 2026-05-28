@@ -70,3 +70,31 @@ def test_free_pen_canvas_render_composite_matches_source_size(tmp_path: Path) ->
 
     assert composite.shape == (72, 96, 4)
     assert int(np.count_nonzero(composite[:, :, :3])) > 0
+
+
+def test_free_pen_canvas_replay_restores_previous_state() -> None:
+    canvas = FreePenCanvasState(width=96, height=72)
+    tool_calls = [
+        {"tool": "start_path", "x": 12, "y": 52},
+        {"tool": "line_to", "x": 24, "y": 48},
+        {"tool": "curve_to", "c1": [32, 44], "c2": [56, 28], "p": [84, 18]},
+    ]
+    for tool_call in tool_calls:
+        canvas.apply_tool_call(tool_call)
+
+    canvas.replay_tool_calls(tool_calls[:1])
+
+    assert canvas.current_point == (12.0, 52.0)
+    assert canvas.current_path_drawable_segment_count() == 0
+    assert canvas.path_open is True
+    assert canvas.line_to_streak() == 0
+
+
+def test_free_pen_canvas_state_summary_exposes_distance_and_line_streak() -> None:
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 10, "y": 10})
+    canvas.apply_tool_call({"tool": "line_to", "x": 30, "y": 10})
+    summary = canvas.state_summary()
+
+    assert summary["distance_to_start"] == 20.0
+    assert summary["line_to_streak"] == 1

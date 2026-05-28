@@ -80,6 +80,42 @@
           "properties": {
             "tool": { "const": "close_path" }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool"],
+          "properties": {
+            "tool": { "const": "undo_last" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "step"],
+          "properties": {
+            "tool": { "const": "rollback_to_step" },
+            "step": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool"],
+          "properties": {
+            "tool": { "const": "inspect_history" },
+            "last_n": { "type": "integer", "minimum": 1, "maximum": 20 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "x", "y"],
+          "properties": {
+            "tool": { "const": "restart_path" },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
         }
       ]
     }
