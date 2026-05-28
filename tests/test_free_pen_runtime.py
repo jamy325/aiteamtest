@@ -450,7 +450,11 @@ def test_inspect_history_returns_recent_descriptions_without_mutating_canvas(tmp
         encoding="utf-8",
     )
 
-    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=3)
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=3,
+        closed_contour_mode=False,
+    )
     result = runtime.run(input_path, output_dir)
 
     trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
@@ -511,8 +515,11 @@ def test_finish_with_open_path_is_rejected_in_closed_contour_mode(tmp_path: Path
 
     trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
     finish_round = trace_payload["rounds"][1]
+    assert result.status != "finished"
     assert result.status == "stalled"
     assert finish_round["rejected_tool_call"] is None
+    assert trace_payload["final_status"] != "finish"
+    assert trace_payload["rejected_step_count"] == 1
     warning_codes = {warning["code"] for warning in trace_payload["history"][1]["warnings"]}
     assert "finish_with_open_path" in warning_codes
 
@@ -533,7 +540,11 @@ def test_line_to_on_smooth_reason_generates_warning(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    runtime = FreePenToolRuntime(adapter=FileSequenceFreePenAdapter(response_path=response_path), max_steps=3)
+    runtime = FreePenToolRuntime(
+        adapter=FileSequenceFreePenAdapter(response_path=response_path),
+        max_steps=3,
+        closed_contour_mode=False,
+    )
     result = runtime.run(input_path, output_dir)
 
     trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))

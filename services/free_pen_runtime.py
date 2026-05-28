@@ -745,6 +745,7 @@ class FreePenToolRuntime:
                         warnings = [finish_warning]
                         rejected_step_count += 1
                         round_status = "rejected_action"
+                        canvas.final_status = "invalid_finish"
                         quality = "bad"
                         quality_summary = finish_warning["message"]
                         runtime_description = "Rejected finish because the current path is still open."
@@ -900,7 +901,7 @@ class FreePenToolRuntime:
         )
 
         status = canvas.final_status
-        if final_decision == "finish":
+        if final_decision == "finish" and canvas.final_status != "invalid_finish":
             status = "finished"
         elif final_decision == "stalled":
             status = "stalled"
