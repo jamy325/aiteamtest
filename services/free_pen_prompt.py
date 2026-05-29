@@ -86,106 +86,7 @@ def build_free_pen_prompt(prompt_input: FreePenPromptInput) -> str:
     payload = json.dumps(prompt_input.to_payload(), ensure_ascii=True, sort_keys=True, indent=2)
     return f"{FREE_PEN_PROMPT}\n\nRuntime input:\n{payload}"
 
-FREE_PEN_TOOL_SYSTEM_PROMPT = """
-You are using a constrained headless pen tool to trace a single black target contour.
 
-Return JSON only.
-
-You are not reviewing. You are drawing by calling exactly one tool per round.
-
-Coordinate system:
-- coordinate_space: image_px
-- origin: top-left
-- x increases to the right
-- y increases downward
-- canvas size equals the source image size
-
-Image semantics:
-- The source image is the target.
-- The overlay image is your previous drawing only.
-- The composite image is only an auxiliary preview.
-- Do not trace the overlay.
-- If the overlay conflicts with the source image, the source image is always correct.
-- Use the overlay only to understand what you have already drawn.
-
-Allowed decisions:
-- tool_call
-- finish
-- stalled
-
-Allowed tools:
-- start_path(x, y)
-- line_to(x, y)
-- curve_to(c1, c2, p)
-- close_path()
-- undo_last()
-- rollback_to_step(step)
-- inspect_history(last_n)
-- restart_path(x, y)
-
-Tool usage rules:
-- Call exactly one tool per round when you can continue drawing.
-- Prefer curve_to for smooth curved strokes.
-- Use line_to only for visibly straight segments.
-- Do not approximate an oval, circle, or arc using many line_to calls.
-- Do not call close_path unless the current point is already near the start point.
-- Do not finish while path_open=true.
-- If a path already exists for the single contour, do not start a second path unless runtime feedback tells you to restart.
-- If an action is rejected, revise the action instead of repeating it.
-- If the path became wrong, use undo_last, rollback_to_step, or restart_path.
-- Use inspect_history if you need to understand recent mistakes.
-- Use finish only when the tracing is complete enough and the current path is not open.
-- Use stalled only when you cannot continue reliably.
-
-Bad sequence for an oval:
-- start_path(50, 100)
-- line_to(90, 152)
-- close_path()
-
-Why it is bad:
-- line_to creates a straight chord instead of following a smooth curved boundary.
-- close_path too early creates a triangle or long straight closure instead of a smooth oval.
-
-Good sequence style for a smooth oval:
-- start_path(50, 100)
-- curve_to(c1=[55,70], c2=[120,55], p=[170,95])
-- curve_to(c1=[190,120], c2=[150,175], p=[90,160])
-- curve_to(c1=[45,145], c2=[35,115], p=[50,100])
-- close_path()
-
-The numeric points above are only illustrative. Do not copy them blindly. They show that smooth boundaries should usually use curve_to.
-
-Return format:
-- Do not output SVG.
-- Do not output VectorDocument.
-- Do not output AI review commands, candidates, or planner objects.
-- Do not output natural language outside the JSON object.
-- Keep reason short and visual.
-
-If you can continue drawing, return:
-{
-  "decision": "tool_call",
-  "tool_call": {
-    "tool": "curve_to",
-    "c1": [x, y],
-    "c2": [x, y],
-    "p": [x, y]
-  },
-  "reason": "short visual reason"
-}
-
-If tracing is complete enough, return:
-{
-  "decision": "finish",
-  "reason": "short visual reason"
-}
-
-If you cannot continue reliably, return:
-{
-  "decision": "stalled",
-  "reason": "short visual reason"
-}
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,8 +115,66 @@ class FreePenToolPromptInput:
         return asdict(self)
 
 
+FREE_PEN_TOOL_NATIVE_SYSTEM_PROMPT = """
+You are using a constrained headless pen tool to trace a single black target contour.
+
+You must use exactly one provided function tool per round.
+Use function tool calls only.
+Do not write JSON manually.
+Do not answer in natural language.
+Put the short visual reason in the function argument field named "reason".
+The tool arguments must satisfy the provided function schema.
+
+Coordinate system:
+- coordinate_space: image_px
+- origin: top-left
+- x increases to the right
+- y increases downward
+- canvas size equals the source image size
+- All coordinates must be estimated from the provided images and current session state.
+- Do not reuse or invent template coordinates.
+
+Image semantics:
+- The source image is the target.
+- The overlay image is your previous drawing only.
+- The composite image is an auxiliary preview.
+- Do not trace the overlay.
+- If the overlay conflicts with the source image, the source image is always correct.
+- Use the overlay only to understand what you have already drawn.
+
+Available tools:
+- start_path
+- line_to
+- curve_to
+- close_path
+- undo_last
+- rollback_to_step
+- inspect_history
+- restart_path
+- finish_trace
+- stalled
+
+Tool rules:
+- Before line_to, curve_to, or close_path, start_path must have succeeded.
+- For curved, smooth, oval, ellipse, circle, arc, rounded, or non-straight contour segments, use curve_to.
+- line_to draws straight segments only.
+- Do not use many line_to calls to approximate a curved contour.
+- Do not use line_to for a curved, smooth, oval, ellipse, circle, arc, or rounded contour segment.
+- Do not call close_path unless the current point is already near the start point and the contour has been sufficiently traced.
+- If path_open=true, do not use finish_trace.
+- If a closed path already exists for this single contour, do not start a second path.
+- Follow runtime allowed_next_actions and forbidden_next_actions.
+- If runtime feedback rejects a tool call, do not repeat the same call.
+- If the path is wrong, use undo_last, rollback_to_step, or restart_path.
+- If you are unsure about recent mistakes, use inspect_history.
+- Use stalled only when you cannot continue reliably.
+"""
+
+FREE_PEN_TOOL_SYSTEM_PROMPT = FREE_PEN_TOOL_NATIVE_SYSTEM_PROMPT
+
+
 def build_free_pen_tool_system_prompt() -> str:
-    return FREE_PEN_TOOL_SYSTEM_PROMPT.strip()
+    return FREE_PEN_TOOL_NATIVE_SYSTEM_PROMPT.strip()
 
 
 def build_free_pen_tool_state_text(prompt_input: FreePenToolPromptInput) -> str:
@@ -250,6 +209,7 @@ def build_free_pen_tool_prompt(prompt_input: FreePenToolPromptInput) -> str:
 __all__ = [
     "FREE_PEN_PROMPT",
     "FREE_PEN_TOOL_SYSTEM_PROMPT",
+    "FREE_PEN_TOOL_NATIVE_SYSTEM_PROMPT",
     "FreePenPromptInput",
     "FreePenToolPromptInput",
     "build_free_pen_prompt",

@@ -15,9 +15,9 @@ from services.free_pen_runtime import (
     FileSequenceFreePenAdapter,
     FreePenImageTransportConfig,
     FreePenRuntime,
+    NativeToolCallSequenceAdapter,
     FreePenToolRuntime,
     load_free_pen_schema,
-    load_free_pen_tool_schema,
 )
 from services.engine_protocol import AutonomyLevel, EngineStatus
 from services.vector_reconstruction_engine import VectorReconstructionEngine, VectorReconstructionEngineConfig
@@ -545,9 +545,7 @@ def _build_free_pen_tool_adapter(*, ai_review_timeout_seconds: float | None = No
         raise AIProviderNotConfigured("AI_PROVIDER is required for `vector_reconstruction free-pen-tool`")
 
     model = str(runtime_env.get("AI_PROVIDER_MODEL", "")).strip() or None
-    adapter_kwargs: dict[str, object] = {
-        "response_schema": load_free_pen_tool_schema(),
-    }
+    adapter_kwargs: dict[str, object] = {}
     if model:
         adapter_kwargs["model"] = model
     if ai_review_timeout_seconds is not None:
@@ -562,7 +560,7 @@ def _build_free_pen_tool_adapter(*, ai_review_timeout_seconds: float | None = No
         response_path = str(runtime_env.get("AI_FILE_RESPONSE_PATH", "")).strip()
         if not response_path:
             raise AIProviderConfigurationError("file provider requires AI_FILE_RESPONSE_PATH")
-        return FileSequenceFreePenAdapter(response_path=_resolve_config_path(response_path))
+        return NativeToolCallSequenceAdapter(response_path=_resolve_config_path(response_path))
 
     if provider == "openai" and openai_key:
         adapter_kwargs["api_key"] = openai_key

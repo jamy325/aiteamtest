@@ -16,12 +16,31 @@ class FreePenConversationMemory:
         self.messages.append({"role": "user", "content": content})
 
     def append_assistant_message(self, response: dict[str, Any]) -> None:
+        if response.get("role") == "assistant" and isinstance(response.get("tool_calls"), list):
+            self.messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.get("content"),
+                    "tool_calls": list(response["tool_calls"]),
+                }
+            )
+        else:
+            self.messages.append(
+                {
+                    "role": "assistant",
+                    "content": json.dumps(response, ensure_ascii=False),
+                }
+            )
+
+    def append_tool_result(self, tool_call_id: str, content: dict[str, Any]) -> None:
         self.messages.append(
             {
-                "role": "assistant",
-                "content": json.dumps(response, ensure_ascii=False),
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": json.dumps(content, ensure_ascii=False),
             }
         )
+
 
     def build_messages_for_request(self) -> list[dict[str, Any]]:
         trimmed_messages = self._trimmed_messages()

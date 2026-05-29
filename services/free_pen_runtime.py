@@ -18,6 +18,7 @@ from services.ai_adapters.base import VisionReviewAdapter
 from services.ai_adapters.common import encode_image_as_data_url
 from services.free_pen_canvas import FreePenCanvasError, FreePenCanvasState
 from services.free_pen_conversation import FreePenConversationMemory
+from services.free_pen_native_tools import build_free_pen_native_tools_schema, parse_native_tool_call
 from services.free_pen_prompt import (
     FreePenPromptInput,
     FreePenToolPromptInput,
@@ -486,7 +487,9 @@ class FreePenToolReviewInput:
     session_state: dict[str, Any] | None = None
     image_transport: str = "base64"
     public_image_base_url: str | None = None
-    image_urls: tuple[str, ...] = ()
+    tool_mode: str = "native_tools"
+    tools: tuple[dict[str, Any], ...] = ()
+    tool_choice: str | None = None
 
     def prompt_input(self) -> FreePenToolPromptInput:
         return FreePenToolPromptInput(
@@ -564,10 +567,23 @@ def normalize_free_pen_tool_response(response: Any) -> dict[str, Any]:
     normalized = dict(response)
     decision = str(normalized.get("decision", "")).strip().lower()
     normalized["decision"] = decision
+    if decision in {"finish", "stalled"}:
+        reason = normalized.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"{decision} decision requires a non-empty reason")
+        normalized["reason"] = reason.strip()
+        return normalized
     if decision == "tool_call":
         tool_call = normalized.get("tool_call")
         if not isinstance(tool_call, dict):
             raise ValueError("tool_call decision requires a tool_call object")
+        reason = normalized.get("reason")
+        nested_reason = tool_call.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            if isinstance(nested_reason, str) and nested_reason.strip():
+                normalized["reason"] = nested_reason.strip()
+            else:
+                raise ValueError("tool_call decision requires a non-empty reason")
         normalized["tool_call"] = _normalize_tool_call(tool_call)
     return normalized
 
@@ -631,6 +647,51 @@ class FileSequenceFreePenAdapter(VisionReviewAdapter):
 
 
 @dataclass(slots=True)
+class NativeToolCallSequenceAdapter(VisionReviewAdapter):
+    response_path: Path
+    _response_index: int = 0
+
+    def review(self, prompt: str, review_input: object) -> dict[str, Any]:
+        payload = json.loads(Path(self.response_path).read_text(encoding="utf-8-sig"))
+        if isinstance(payload, list):
+            if self._response_index >= len(payload):
+                raise ValueError("free pen native tool response sequence exhausted")
+            entry = payload[self._response_index]
+            self._response_index += 1
+        else:
+            entry = payload
+        if not isinstance(entry, dict):
+            raise ValueError("free pen native tool response adapter expects object entries")
+        tool_call_payload = entry.get("tool_call")
+        if not isinstance(tool_call_payload, dict):
+            raise ValueError("native tool sequence entry requires a tool_call object")
+        call_id = str(tool_call_payload.get("id") or f"call_{self._response_index:03d}")
+        name = str(tool_call_payload.get("name") or "").strip()
+        arguments = tool_call_payload.get("arguments")
+        canonical = parse_native_tool_call(name, arguments)
+        raw_tool_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, dict) else str(arguments),
+            },
+        }
+        canonical["_parsed_from"] = "native_tool_call"
+        canonical["_raw_tool_calls"] = [raw_tool_call]
+        canonical["_assistant_message"] = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [raw_tool_call],
+        }
+        canonical["_raw_response"] = {
+            "tool_calls": [raw_tool_call],
+            "content": None,
+        }
+        return canonical
+
+
+@dataclass(slots=True)
 class FreePenToolRuntime:
     adapter: VisionReviewAdapter
     max_steps: int = 16
@@ -650,6 +711,9 @@ class FreePenToolRuntime:
     _OVERLAY_CONFUSION_HINTS = ("orange line", "overlay", "previous line", "current drawing", "draft line")
 
     def run(self, source_image_path: Path, output_dir: Path) -> FreePenToolRunResult:
+        import os
+
+        # 1. 优先级：显式参数 > 环境变量
         output_dir.mkdir(parents=True, exist_ok=True)
         source_image = cv2.imread(str(source_image_path), cv2.IMREAD_UNCHANGED)
         if source_image is None:
@@ -697,6 +761,9 @@ class FreePenToolRuntime:
                 resolver=resolver,
                 include_source_image=step_index == 1,
             )
+            current_tools = tuple(build_free_pen_native_tools_schema())
+            current_tool_choice = os.environ.get("AI_FREE_PEN_TOOL_CHOICE", "none")
+
             review_input = FreePenToolReviewInput(
                 original_image=str(source_image_path),
                 overlay_image=None if previous_overlay_path is None else str(previous_overlay_path),
@@ -726,11 +793,9 @@ class FreePenToolRuntime:
                 session_state=session_state,
                 image_transport=self.image_transport_config.mode,
                 public_image_base_url=self.image_transport_config.public_image_base_url,
-                image_urls=tuple(
-                    self._sanitize_image_url(str(part["image_url"]["url"]))
-                    for part in image_message_content
-                    if part.get("type") == "image_url"
-                ),
+                tool_mode="native_tools",
+                tools=current_tools,
+                tool_choice=current_tool_choice,
             )
             state_text = build_free_pen_tool_state_text(review_input.prompt_input())
             conversation.append_user_message(image_message_content)
@@ -745,6 +810,9 @@ class FreePenToolRuntime:
                 public_image_base_url=self.image_transport_config.public_image_base_url,
                 messages=request_messages,
                 session_state=session_state,
+                tool_mode="native_tools",
+                tools=current_tools,
+                tool_choice=current_tool_choice,
             )
             request_snapshot_paths.append(str(request_snapshot_path))
             prompt = build_free_pen_tool_system_prompt()
@@ -760,6 +828,8 @@ class FreePenToolRuntime:
             quality_summary = ""
             warnings: list[dict[str, Any]] = []
             round_status = "received"
+            execution_result: dict[str, Any] | None = None
+            tool_result_message: dict[str, Any] | None = None
             self._record_interaction(
                 {
                     "interaction_id": interaction_id,
@@ -772,29 +842,42 @@ class FreePenToolRuntime:
                     "image_transport": self.image_transport_config.mode,
                     "public_image_base_url": self.image_transport_config.public_image_base_url,
                     "messages": self._sanitize_messages_for_snapshot(request_messages),
-                    "image_urls": review_input.image_urls,
-                    "image_file_count": len(review_input.image_urls),
+                    "image_urls": self._collect_image_urls_from_messages(request_messages),
+                    "image_file_count": len(self._collect_image_urls_from_messages(request_messages)),
                     "canvas_width": width,
                     "canvas_height": height,
                     "review_input_summary": review_input.prompt_input().to_payload(),
                     "session_state": session_state,
                 }
             )
+            parsed_from = "native_tool_call"
+            raw_tool_calls = None
+            raw_response_for_save = None
+
             try:
                 review_input = FreePenToolReviewInput(
                     **{**asdict(review_input), "messages": tuple(request_messages)}
                 )
                 raw_response = self.adapter.review(prompt, review_input)
                 self._record_raw_response(step_index, raw_response)
-                normalized_response = normalize_free_pen_tool_response(raw_response)
+
+                assistant_message = raw_response.get("_assistant_message")
+                if assistant_message:
+                    conversation.append_assistant_message(assistant_message)
+                
+                raw_response_for_save = raw_response.get("_raw_response", raw_response)
+                parsed_from = raw_response.get("_parsed_from", "native_tool_call")
+                raw_tool_calls = raw_response.get("_raw_tool_calls")
+                
+                clean_response = {k: v for k, v in raw_response.items() if not k.startswith("_")}
+
+                normalized_response = normalize_free_pen_tool_response(clean_response)
                 validate_free_pen_tool_response(normalized_response)
-                conversation.append_assistant_message(normalized_response)
-                conversation.save(
-                    conversation_history_path,
-                    message_sanitizer=self._sanitize_messages_for_snapshot,
-                )
+                
                 final_decision = str(normalized_response["decision"])
                 final_reason = str(normalized_response.get("reason") or "").strip() or None
+
+                execution_result = {}
                 if final_decision == "tool_call":
                     tool_call = dict(normalized_response["tool_call"])
                     preflight_result = self._preflight_tool_call(
@@ -813,6 +896,13 @@ class FreePenToolRuntime:
                         quality = "bad"
                         quality_summary = str(preflight_result["quality_summary"])
                         current_feedback = self._feedback_from_rejected_action(warnings=warnings, quality_summary=quality_summary)
+                        execution_result = {
+                            "ok": False,
+                            "accepted": False,
+                            "runtime_description": runtime_description,
+                            "quality_summary": quality_summary,
+                            "warnings": warnings,
+                        }
                     else:
                         (
                             executed_tool_call,
@@ -831,6 +921,13 @@ class FreePenToolRuntime:
                         )
                         rollback_count += rollback_applied
                         round_status = "tool_applied"
+                        execution_result = {
+                            "ok": True,
+                            "accepted": True,
+                            "runtime_description": runtime_description,
+                            "quality_summary": quality_summary,
+                            "warnings": warnings,
+                        }
                 elif final_decision == "finish":
                     finish_warning = self._warning(
                         code="finish_with_open_path",
@@ -845,20 +942,76 @@ class FreePenToolRuntime:
                         quality_summary = finish_warning["message"]
                         runtime_description = "Rejected finish because the current path is still open."
                         current_feedback = self._feedback_from_rejected_action(warnings=warnings, quality_summary=quality_summary)
+                        execution_result = {
+                            "ok": False,
+                            "accepted": False,
+                            "runtime_description": runtime_description,
+                            "quality_summary": quality_summary,
+                            "warnings": warnings,
+                        }
                     else:
                         round_status = "finished"
                         canvas.final_status = "finish"
                         quality = "good"
                         quality_summary = "Finished tracing without validation warnings."
                         runtime_description = "Finished the tracing loop."
+                        execution_result = {
+                            "ok": True,
+                            "accepted": True,
+                            "runtime_description": runtime_description,
+                            "quality_summary": quality_summary,
+                            "warnings": warnings,
+                        }
                 elif final_decision == "stalled":
                     round_status = "stalled"
                     canvas.final_status = "stalled"
                     quality = "warning"
                     quality_summary = "The model reported that it could not continue reliably."
                     runtime_description = "Stopped the tracing loop because the model returned stalled."
+                    execution_result = {
+                        "ok": True,
+                        "accepted": True,
+                        "runtime_description": runtime_description,
+                        "quality_summary": quality_summary,
+                        "warnings": warnings,
+                    }
                 else:
                     raise ValueError(f"unsupported free-pen tool decision: {final_decision}")
+                
+                if raw_tool_calls:
+                    tool_call_id = raw_tool_calls[0].get("id")
+                    if tool_call_id:
+                        session_state_after = self._build_session_state(
+                            canvas=canvas,
+                            history=history,
+                            current_feedback=current_feedback,
+                        )
+                        tool_result_content = {
+                            **execution_result,
+                            "state_after": session_state_after,
+                            "runtime_description": runtime_description,
+                            "quality_summary": quality_summary,
+                            "warnings": warnings,
+                            "allowed_next_actions": session_state_after["allowed_next_actions"],
+                            "forbidden_next_actions": session_state_after["forbidden_next_actions"],
+                            "next_hint": self._next_hint(
+                                final_decision=final_decision,
+                                round_status=round_status,
+                                warnings=warnings,
+                                session_state=session_state_after,
+                            ),
+                        }
+                        conversation.append_tool_result(tool_call_id, tool_result_content)
+                        tool_result_message = {
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps(tool_result_content, ensure_ascii=False),
+                        }
+
+                conversation.save(
+                    conversation_history_path,
+                    message_sanitizer=self._sanitize_messages_for_snapshot,
+                )
             except Exception as exc:
                 validation_error = str(exc)
                 error_message = validation_error
@@ -894,7 +1047,7 @@ class FreePenToolRuntime:
                     output_dir=output_dir,
                     round_index=step_index,
                     prompt=prompt,
-                    raw_response=raw_response,
+                    raw_response=raw_response_for_save,
                     normalized_response=normalized_response,
                     status=round_status,
                     error=validation_error,
@@ -917,7 +1070,7 @@ class FreePenToolRuntime:
             trace_rounds.append(
                 {
                     "step_index": step_index,
-                    "raw_response": raw_response,
+                    "raw_response": raw_response_for_save,
                     "parsed_decision": final_decision,
                     "validation_result": {
                         "success": validation_error is None,
@@ -933,7 +1086,13 @@ class FreePenToolRuntime:
                     "reason": final_reason,
                     "output_overlay_path": str(overlay_path),
                     "request_snapshot_path": str(request_snapshot_path),
-                    "image_urls": list(review_input.image_urls),
+                    "image_urls": self._collect_image_urls_from_messages(request_messages),
+                    "parsed_from": parsed_from,
+                    "raw_tool_calls": raw_tool_calls,
+                    "normalized_response": normalized_response,
+                    "provider_parse_error": validation_error if validation_error else None,
+                    "execution_result": execution_result,
+                    "tool_result_message": tool_result_message,
                 }
             )
             self._record_interaction(
@@ -1530,6 +1689,9 @@ class FreePenToolRuntime:
         public_image_base_url: str | None,
         messages: list[dict[str, Any]],
         session_state: dict[str, Any],
+        tool_mode: str = "native_tools",
+        tools: tuple[dict[str, Any], ...] = (),
+        tool_choice: str | None = None,
     ) -> None:
         sanitized_messages = self._sanitize_messages_for_snapshot(messages)
         payload = {
@@ -1538,15 +1700,24 @@ class FreePenToolRuntime:
             "image_transport": image_transport,
             "public_image_base_url": public_image_base_url,
             "messages": sanitized_messages,
+            "image_urls": self._collect_image_urls_from_messages(sanitized_messages),
             "session_state": session_state,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tool_mode": tool_mode,
+            "tools": list(tools),
         }
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         request_snapshot_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _sanitize_messages_for_snapshot(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         sanitized_messages: list[dict[str, Any]] = []
         for message in messages:
-            sanitized_message = {"role": message.get("role"), "content": message.get("content")}
+            sanitized_message: dict[str, Any] = {"role": message.get("role"), "content": message.get("content")}
+            if "tool_calls" in message:
+                sanitized_message["tool_calls"] = message.get("tool_calls")
+            if "tool_call_id" in message:
+                sanitized_message["tool_call_id"] = message.get("tool_call_id")
             content = sanitized_message["content"]
             if isinstance(content, list):
                 sanitized_parts: list[dict[str, Any]] = []
@@ -1572,6 +1743,41 @@ class FreePenToolRuntime:
             return f"{header},<base64 data omitted>"
         return url
 
+    def _collect_image_urls_from_messages(self, messages: list[dict[str, Any]]) -> list[str]:
+        image_urls: list[str] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "image_url":
+                    continue
+                image_url = part.get("image_url")
+                if isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+                    image_urls.append(str(image_url["url"]))
+        return image_urls
+
+    @staticmethod
+    def _next_hint(
+        *,
+        final_decision: str | None,
+        round_status: str,
+        warnings: list[dict[str, Any]],
+        session_state: dict[str, Any],
+    ) -> str:
+        if round_status == "rejected_action" and any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
+            return "Use curve_to with c1, c2, and p."
+        if round_status == "rejected_action":
+            return "Revise the action instead of repeating the rejected call."
+        if final_decision == "finish":
+            return "Tracing is complete."
+        if final_decision == "stalled":
+            return "Stop the tracing loop."
+        allowed = session_state.get("allowed_next_actions") or []
+        if allowed:
+            return f"Choose one of the allowed next actions: {', '.join(str(item) for item in allowed)}."
+        return "Continue with the next step."
+
     def _record_interaction(self, payload: dict[str, Any]) -> None:
         if self.interaction_logger is not None:
             self.interaction_logger(payload)
@@ -1583,6 +1789,7 @@ class FreePenToolRuntime:
 
 __all__ = [
     "FileSequenceFreePenAdapter",
+    "NativeToolCallSequenceAdapter",
     "FreePenReviewInput",
     "FreePenRunResult",
     "FreePenRuntime",

@@ -13,6 +13,7 @@ from services.free_pen_runtime import (
     FreePenImageTransportConfig,
     FreePenReviewInput,
     FreePenRuntime,
+    NativeToolCallSequenceAdapter,
     FreePenToolRuntime,
 )
 from vector_reconstruction.cli import main
@@ -38,6 +39,16 @@ def _draw_response() -> dict[str, object]:
             }
         ],
         "reason": "Single Bezier segment traces the line.",
+    }
+
+
+def _native_tool_call(name: str, arguments: dict[str, object], *, call_id: str) -> dict[str, object]:
+    return {
+        "tool_call": {
+            "id": call_id,
+            "name": name,
+            "arguments": arguments,
+        }
     }
 
 
@@ -324,20 +335,13 @@ def test_free_pen_tool_cli_uses_file_sequence_provider_and_writes_outputs(tmp_pa
     response_path.write_text(
         json.dumps(
             [
-                {
-                    "decision": "tool_call",
-                    "tool_call": {"tool": "start_path", "x": 12, "y": 52},
-                    "reason": "start",
-                },
-                {
-                    "decision": "tool_call",
-                    "tool_call": {"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]},
-                    "reason": "curve",
-                },
-                {
-                    "decision": "stalled",
-                    "reason": "done",
-                },
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "done"}, call_id="call_003"),
             ]
         ),
         encoding="utf-8",
@@ -716,6 +720,10 @@ def test_prompt_contains_source_overlay_distinction_and_history_summary(tmp_path
     assert "The source image is the target." in system_prompt
     assert "The overlay image is your previous drawing only." in system_prompt
     assert "Do not trace the overlay." in system_prompt
+    assert "Use function tool calls only" in system_prompt
+    assert "Do not write JSON manually" in system_prompt
+    assert '"decision"' not in system_prompt
+    assert '"tool_call"' not in system_prompt
     messages = captured_messages[1]
     assert messages[0]["role"] == "system"
     assert "Recent history:" in messages[-1]["content"]
@@ -750,6 +758,9 @@ def test_round_request_snapshot_contains_messages_and_image_urls(tmp_path: Path)
 
     request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
     assert request_payload["image_transport"] == "url"
+    assert request_payload["tool_mode"] == "native_tools"
+    assert request_payload["tools"]
+    assert request_payload["image_urls"] == ["https://img.jinyao.qzz.io/samples/source.png"]
     assert request_payload["messages"][0]["role"] == "system"
     first_user_content = request_payload["messages"][1]["content"]
     assert first_user_content[0]["type"] == "image_url"
@@ -790,8 +801,8 @@ def test_source_image_appended_once_in_conversation(tmp_path: Path) -> None:
     assert json.dumps(conversation_payload).count(source_url) == 1
     for round_name in ("round_001_request.json", "round_002_request.json", "round_003_request.json"):
         request_payload = json.loads((output_dir / round_name).read_text(encoding="utf-8"))
-        request_text = json.dumps(request_payload)
-        assert request_text.count(source_url) == 1
+        assert json.dumps(request_payload["messages"]).count(source_url) == 1
+        assert request_payload["image_urls"].count(source_url) == 1
         assert request_payload["messages"][0]["role"] == "system"
         assert "image_url" not in str(request_payload["messages"][0]["content"])
     round_two_payload = json.loads((output_dir / "round_002_request.json").read_text(encoding="utf-8"))
@@ -927,3 +938,103 @@ def test_free_pen_tool_url_mode_file_provider_smoke(tmp_path: Path) -> None:
     assert (output_dir / "conversation_messages.json").exists()
     assert (output_dir / "round_001_request.json").exists()
     assert request_payload["messages"][1]["content"][0]["image_url"]["url"] == "https://img.jinyao.qzz.io/samples/source.png"
+
+
+def test_free_pen_runtime_always_uses_native_tools(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "native_tools_out"
+    response_path = tmp_path / "native_tools_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_002"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=2)
+    runtime.run(input_path, output_dir)
+
+    request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
+    assert request_payload["tool_mode"] == "native_tools"
+    tool_names = {tool["function"]["name"] for tool in request_payload["tools"]}
+    assert {"curve_to", "finish_trace", "stalled"} <= tool_names
+
+
+def test_free_pen_ignores_ai_free_pen_tool_mode_env(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "ignore_tool_mode_env_out"
+    response_path = tmp_path / "ignore_tool_mode_env_sequence.json"
+    response_path.write_text(
+        json.dumps([_native_tool_call("stalled", {"reason": "stop"}, call_id="call_001")]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("AI_FREE_PEN_TOOL_MODE", "prompt_json")
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=1)
+    runtime.run(input_path, output_dir)
+
+    request_payload = json.loads((output_dir / "round_001_request.json").read_text(encoding="utf-8"))
+    assert request_payload["tool_mode"] == "native_tools"
+    assert request_payload["tools"]
+
+
+def test_conversation_uses_assistant_tool_calls_not_content_json(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "assistant_tool_calls_out"
+    response_path = tmp_path / "assistant_tool_calls_sequence.json"
+    response_path.write_text(
+        json.dumps([_native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001")]),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=1)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    assistant_messages = [message for message in payload["messages"] if message["role"] == "assistant"]
+    assert assistant_messages
+    assert assistant_messages[0]["content"] is None
+    assert assistant_messages[0]["tool_calls"][0]["function"]["name"] == "start_path"
+
+
+def test_conversation_appends_tool_result_after_assistant_tool_call(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "tool_result_message_out"
+    response_path = tmp_path / "tool_result_message_sequence.json"
+    response_path.write_text(
+        json.dumps([_native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001")]),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=1)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    assistant_index = next(index for index, message in enumerate(payload["messages"]) if message["role"] == "assistant")
+    tool_message = payload["messages"][assistant_index + 1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == "call_001"
+    parsed_tool_content = json.loads(tool_message["content"])
+    assert "runtime_description" in parsed_tool_content
+    assert "state_after" in parsed_tool_content
+    assert "allowed_next_actions" in parsed_tool_content
+
+
+def test_system_prompt_has_no_decision_tool_call_json_protocol() -> None:
+    from services.free_pen_prompt import build_free_pen_tool_system_prompt
+
+    system_prompt = build_free_pen_tool_system_prompt()
+    assert "Return JSON only" not in system_prompt
+    assert '"decision"' not in system_prompt
+    assert '"tool_call"' not in system_prompt
+    assert "Response format for tool_call" not in system_prompt
+    assert "Use function tool calls only" in system_prompt
+    assert "Do not write JSON manually" in system_prompt
+    assert "reason" in system_prompt

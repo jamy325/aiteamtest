@@ -36,6 +36,8 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
         client = self._resolve_client()
         review_messages = get_review_messages(review_input)
+        tools = tuple(getattr(review_input, "tools", ()) or ())
+        tool_choice = getattr(review_input, "tool_choice", None)
         if review_messages is not None:
             request_messages = [self._convert_message(message) for message in review_messages]
         else:
@@ -52,22 +54,82 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                 )
             content.append({"type": "text", "text": prompt})
             request_messages = [{"role": "user", "content": content}]
-        response_schema = self.response_schema or load_response_schema(self.response_schema_path)
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=request_messages,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "ai_review_response",
-                    "schema": response_schema,
-                    "strict": True,
-                },
-            },
-            timeout=self.timeout_seconds,
-        )
-        response_text = self._extract_message_content(response)
-        return parse_json_response_text(response_text, provider_name="siliconflow")
+
+        kwargs_create = {
+            "model": self.model,
+            "messages": request_messages,
+            "timeout": self.timeout_seconds,
+        }
+
+        if tools:
+            kwargs_create["tools"] = list(tools)
+            if tool_choice and str(tool_choice).strip().lower() != "none":
+                kwargs_create["tool_choice"] = tool_choice
+        else:
+            response_schema = self.response_schema or load_response_schema(self.response_schema_path)
+            if response_schema:
+                kwargs_create["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "ai_review_response",
+                        "schema": response_schema,
+                        "strict": True,
+                    },
+                }
+
+        response = client.chat.completions.create(**kwargs_create)
+
+        choices = getattr(response, "choices", None)
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("siliconflow provider response does not contain choices")
+
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        if message is None:
+            raise ValueError("siliconflow provider response does not contain a message")
+
+        tool_calls = getattr(message, "tool_calls", None)
+        if tools:
+            if tool_calls and len(tool_calls) == 1:
+                tool_call = tool_calls[0]
+                function_obj = getattr(tool_call, "function", None)
+                if function_obj is None:
+                    raise ValueError("tool_call does not contain function")
+
+                name = getattr(function_obj, "name", "")
+                arguments = getattr(function_obj, "arguments", "")
+
+                from services.free_pen_native_tools import parse_native_tool_call
+                parsed = parse_native_tool_call(name, arguments)
+                raw_tool_call_dict = {
+                    "id": getattr(tool_call, "id", None),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments,
+                    },
+                }
+                parsed["_parsed_from"] = "native_tool_call"
+                parsed["_raw_tool_calls"] = [raw_tool_call_dict]
+                parsed["_assistant_message"] = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [raw_tool_call_dict],
+                }
+                parsed["_raw_response"] = {
+                    "tool_calls": [raw_tool_call_dict],
+                    "content": None,
+                }
+                return parsed
+            if tool_calls and len(tool_calls) > 1:
+                raise ValueError("too_many_tool_calls")
+            raise ValueError("missing_native_tool_calls")
+
+        # Fallback for non-tool-use cases (e.g., AI Review)
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            return parse_json_response_text(content, provider_name="siliconflow")
+        raise ValueError("siliconflow provider response does not contain content or tool_calls")
 
     def _convert_message(self, message: dict[str, Any]) -> dict[str, Any]:
         role = str(message.get("role", "user")).strip().lower() or "user"
