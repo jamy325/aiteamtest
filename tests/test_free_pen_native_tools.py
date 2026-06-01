@@ -119,6 +119,15 @@ def test_native_tools_schema_contains_convert_line_to_curve() -> None:
     assert "convert_line_to_curve" in tool_names
 
 
+def test_native_tools_schema_contains_restore_best_segment() -> None:
+    tool_names = {
+        entry["function"]["name"]
+        for entry in build_free_pen_native_tools_schema()
+        if entry.get("type") == "function"
+    }
+    assert "restore_best_segment" in tool_names
+
+
 def test_parse_native_move_anchor() -> None:
     result = parse_native_tool_call(
         "move_anchor",
@@ -174,4 +183,19 @@ def test_parse_native_convert_line_to_curve() -> None:
             "c2": [1000, 258],
         },
         "reason": "make editable",
+    }
+
+
+def test_parse_native_restore_best_segment() -> None:
+    result = parse_native_tool_call(
+        "restore_best_segment",
+        {"segment_id": "S3", "reason": "restore best"},
+    )
+    assert result == {
+        "decision": "tool_call",
+        "tool_call": {
+            "tool": "restore_best_segment",
+            "segment_id": "S3",
+        },
+        "reason": "restore best",
     }

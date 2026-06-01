@@ -197,6 +197,17 @@ Anchor validation rule:
 - Control handles c1/c2 may leave the contour, but anchor endpoints must stay on the contour.
 - If an anchor is far from the BLACK contour, do not adjust handles. Move the anchor or restart the path.
 
+Best restore rule:
+- If repeated edits make a segment worse, use restore_best_segment to return to the best-known version.
+- Do not keep tuning handles after runtime says refinement_limit_reached.
+- If the best-known version is still not acceptable, change strategy.
+
+Segment split rule:
+- If both anchors are on the black contour but one cubic still cannot fit after repeated handle edits, the segment may be too long.
+- Use rollback_to_step to remove the bad segment and redraw that region as two shorter curve_to segments.
+- Place the intermediate anchor on the black contour.
+- Do not continue to later segments until the replacement segment is acceptable.
+
 Single tool rule:
 - Call exactly one function tool per response.
 - Never call multiple function tools in the same response.

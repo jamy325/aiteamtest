@@ -13,6 +13,7 @@ _ALLOWED_TOOL_NAMES = (
     "line_to",
     "curve_to",
     "convert_line_to_curve",
+    "restore_best_segment",
     "move_anchor",
     "move_handle",
     "set_segment_handles",
@@ -94,6 +95,22 @@ def build_free_pen_native_tools_schema() -> list[dict[str, Any]]:
                         "reason": {"type": "string"},
                     },
                     "required": ["segment_id", "c1", "c2", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "restore_best_segment",
+                "description": "Restore an existing segment to the best-known geometry recorded by runtime quality tracking.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "segment_id": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["segment_id", "reason"],
                     "additionalProperties": False,
                 },
             },
@@ -287,6 +304,12 @@ def parse_native_tool_call(name: str, arguments: str | dict[str, Any]) -> dict[s
                 "c1": _require_key(parsed_args, "c1"),
                 "c2": _require_key(parsed_args, "c2"),
             },
+            reason,
+        )
+    if normalized_name == "restore_best_segment":
+        return _tool_call_response(
+            "restore_best_segment",
+            {"segment_id": _require_key(parsed_args, "segment_id")},
             reason,
         )
     if normalized_name == "move_anchor":
