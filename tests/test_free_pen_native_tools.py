@@ -110,6 +110,15 @@ def test_native_tools_schema_contains_handle_edit_tools() -> None:
     assert {"move_anchor", "move_handle", "set_segment_handles"} <= tool_names
 
 
+def test_native_tools_schema_contains_convert_line_to_curve() -> None:
+    tool_names = {
+        entry["function"]["name"]
+        for entry in build_free_pen_native_tools_schema()
+        if entry.get("type") == "function"
+    }
+    assert "convert_line_to_curve" in tool_names
+
+
 def test_parse_native_move_anchor() -> None:
     result = parse_native_tool_call(
         "move_anchor",
@@ -148,4 +157,21 @@ def test_parse_native_set_segment_handles() -> None:
             "c2": [155.0, 66.0],
         },
         "reason": "refine both handles",
+    }
+
+
+def test_parse_native_convert_line_to_curve() -> None:
+    result = parse_native_tool_call(
+        "convert_line_to_curve",
+        {"segment_id": "S3", "c1": [800, 258], "c2": [1000, 258], "reason": "make editable"},
+    )
+    assert result == {
+        "decision": "tool_call",
+        "tool_call": {
+            "tool": "convert_line_to_curve",
+            "segment_id": "S3",
+            "c1": [800, 258],
+            "c2": [1000, 258],
+        },
+        "reason": "make editable",
     }

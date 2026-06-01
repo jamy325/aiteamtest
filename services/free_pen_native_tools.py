@@ -12,6 +12,7 @@ _ALLOWED_TOOL_NAMES = (
     "start_path",
     "line_to",
     "curve_to",
+    "convert_line_to_curve",
     "move_anchor",
     "move_handle",
     "set_segment_handles",
@@ -75,6 +76,24 @@ def build_free_pen_native_tools_schema() -> list[dict[str, Any]]:
                         "reason": {"type": "string"},
                     },
                     "required": ["c1", "c2", "p", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_line_to_curve",
+                "description": "Convert an existing line segment into a cubic Bezier segment so it can be refined with control handles.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "segment_id": {"type": "string"},
+                        "c1": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                        "c2": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["segment_id", "c1", "c2", "reason"],
                     "additionalProperties": False,
                 },
             },
@@ -257,6 +276,16 @@ def parse_native_tool_call(name: str, arguments: str | dict[str, Any]) -> dict[s
                 "c1": _require_key(parsed_args, "c1"),
                 "c2": _require_key(parsed_args, "c2"),
                 "p": _require_key(parsed_args, "p"),
+            },
+            reason,
+        )
+    if normalized_name == "convert_line_to_curve":
+        return _tool_call_response(
+            "convert_line_to_curve",
+            {
+                "segment_id": _require_key(parsed_args, "segment_id"),
+                "c1": _require_key(parsed_args, "c1"),
+                "c2": _require_key(parsed_args, "c2"),
             },
             reason,
         )

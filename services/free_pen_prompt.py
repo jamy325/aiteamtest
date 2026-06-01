@@ -141,20 +141,46 @@ Human pen-tool tracing workflow:
 - Green control handles adjust tangent direction and curvature and do not need to lie on the contour.
 - Start by placing anchors on the black contour.
 - Each start_path point and each curve_to endpoint p should be on the target contour or very close to it.
-- If the orange curve deviates from the black contour, do not blindly continue to the next segment.
-- Prefer move_handle or set_segment_handles to refine curvature.
+- Then adjust control handles between two anchors until the orange curve follows the black contour.
+- After each curve_to, inspect the latest visual feedback image.
+- If the newest/current segment is visibly misaligned, do not blindly continue to the next segment.
+- Prefer set_segment_handles or move_handle to refine the newest segment before drawing another segment.
 - Use move_anchor only when the anchor itself is wrong.
-- After a segment is aligned, continue to the next segment.
+- If a line segment later needs curvature or local handle editing, use convert_line_to_curve first.
+- Only continue to the next segment after the current segment is visually acceptable.
 - If the path has already returned to the start point and matches the contour, close_path before finish_trace.
 
 Tool rules:
+- Use curve_to for curved, rounded, slightly curved, organic, or uncertain segments.
+- Use line_to only when the source contour segment is visibly straight.
+- Prefer editable cubic segments over line segments unless the source is truly straight.
 - line_to draws straight segments only.
 - curve_to is required for curved, smooth, oval, ellipse, circle, arc, or rounded contour segments.
+- convert_line_to_curve turns an existing line segment into an editable cubic segment.
 - move_handle edits one handle of an existing cubic segment.
 - set_segment_handles edits both handles of an existing cubic segment.
 - close_path only when the current point is already near the path start and the contour has been sufficiently traced.
 - Follow runtime allowed_next_actions and forbidden_next_actions.
 - If a tool is rejected, do not repeat the same call.
+
+Sequential segment rule:
+- Work strictly from the current segment forward.
+- Do not move on to the next segment until the newest/current segment is acceptable.
+- If the newest segment is visibly misaligned with the BLACK contour, fix it first.
+- Prefer set_segment_handles or move_handle to repair the newest segment.
+- Use move_anchor only if the endpoint anchor is not on the BLACK contour.
+- Do not draw a new curve_to or line_to while the current segment is still wrong.
+- Do not plan to come back later to fix previous segments.
+- A later segment must not be used to compensate for an earlier bad segment.
+- Finish each local segment properly before advancing.
+
+Single tool rule:
+- Call exactly one function tool per response.
+- Never call multiple function tools in the same response.
+- After calling one tool, wait for runtime feedback and visual feedback.
+- Do not call close_path and finish_trace together.
+- Do not call undo_last and curve_to together.
+- Do not plan multiple actions in one response.
 """
 
 FREE_PEN_TOOL_SYSTEM_PROMPT = FREE_PEN_TOOL_NATIVE_SYSTEM_PROMPT

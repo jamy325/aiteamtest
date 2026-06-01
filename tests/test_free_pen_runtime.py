@@ -367,6 +367,45 @@ def test_execute_set_segment_handles_updates_both_handles() -> None:
     assert canvas.paths[0].segments[1]["c2"] == [66.0, 60.0]
 
 
+def test_editable_geometry_marks_line_as_not_handle_editable() -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=Path("dummy.json")))
+    canvas = FreePenCanvasState(width=220, height=220)
+    canvas.apply_tool_call({"tool": "start_path", "x": 33, "y": 91})
+    canvas.apply_tool_call({"tool": "line_to", "x": 85, "y": 58})
+
+    geometry = runtime._build_editable_geometry(canvas)
+
+    assert geometry["paths"][0]["segments"] == [
+        {
+            "id": "S1",
+            "type": "line",
+            "from_anchor": "A1",
+            "to_anchor": "A2",
+            "p": [85.0, 58.0],
+            "editable_with_handles": False,
+            "conversion_tool": "convert_line_to_curve",
+        }
+    ]
+
+
+def test_convert_line_to_curve_updates_path_segment() -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=Path("dummy.json")))
+    canvas = FreePenCanvasState(width=220, height=220)
+    canvas.apply_tool_call({"tool": "start_path", "x": 33, "y": 91})
+    canvas.apply_tool_call({"tool": "line_to", "x": 85, "y": 58})
+
+    executed = runtime._convert_line_to_curve(
+        canvas=canvas,
+        tool_call={"tool": "convert_line_to_curve", "segment_id": "S1", "c1": [45, 80], "c2": [70, 60]},
+    )
+
+    assert executed["segment_id"] == "S1"
+    assert canvas.paths[0].segments[1]["type"] == "cubic"
+    assert canvas.paths[0].segments[1]["p"] == [85.0, 58.0]
+    assert canvas.paths[0].segments[1]["c1"] == [45.0, 80.0]
+    assert canvas.paths[0].segments[1]["c2"] == [70.0, 60.0]
+
+
 def test_free_pen_tool_runtime_records_invalid_tool_call_without_crashing(tmp_path: Path) -> None:
     input_path = tmp_path / "source.png"
     _write_source_image(input_path)
@@ -670,6 +709,257 @@ def test_line_to_for_straight_segment_still_allowed(tmp_path: Path) -> None:
     assert result.status == "finished"
     assert trace_payload["rounds"][1]["executed_tool_call"]["tool"] == "line_to"
     assert trace_payload["history"][1]["round_status"] == "tool_applied"
+
+
+def test_current_segment_status_blocks_advancing_when_quality_bad(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "segment_gate_reject_out"
+    response_path = tmp_path / "segment_gate_reject_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "initial curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [90, 20], "c2": [120, 20], "p": [140, 24], "reason": "should be blocked"},
+                    call_id="call_003",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_004"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    original = FreePenToolRuntime._build_current_segment_context
+
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
+        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+        if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
+            context["focus"] = {
+                "segment_id": "S1",
+                "type": "cubic",
+                "from_anchor": "A1",
+                "to_anchor": "A2",
+                "recommended_action": "inspect_or_refine",
+                "hint": "Refine S1 first.",
+            }
+            context["status"] = {
+                "segment_id": "S1",
+                "status": "needs_refinement",
+                "reason": "Newest segment needs refinement.",
+                "recommended_next_tools": ["set_segment_handles", "move_handle", "move_anchor", "undo_last", "rollback_to_step", "inspect_history", "stalled"],
+                "may_advance_to_next_segment": False,
+            }
+        return context
+
+    monkeypatch.setattr(FreePenToolRuntime, "_build_current_segment_context", fake_context)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=4)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    blocked_round = trace_payload["rounds"][2]
+    warning_codes = {warning["code"] for warning in blocked_round["warnings"]}
+    assert blocked_round["rejected_tool_call"]["tool"] == "curve_to"
+    assert "current_segment_needs_refinement" in warning_codes
+
+
+def test_current_segment_status_allows_handle_edit_when_quality_bad(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "segment_gate_edit_out"
+    response_path = tmp_path / "segment_gate_edit_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "initial curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "set_segment_handles",
+                    {"segment_id": "S1", "c1": [22, 42], "c2": [58, 24], "reason": "refine"},
+                    call_id="call_003",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_004"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    original = FreePenToolRuntime._build_current_segment_context
+
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
+        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+        if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
+            context["focus"] = {
+                "segment_id": "S1",
+                "type": "cubic",
+                "from_anchor": "A1",
+                "to_anchor": "A2",
+                "recommended_action": "inspect_or_refine",
+                "hint": "Refine S1 first.",
+            }
+            context["status"] = {
+                "segment_id": "S1",
+                "status": "needs_refinement",
+                "reason": "Newest segment needs refinement.",
+                "recommended_next_tools": ["set_segment_handles", "move_handle", "move_anchor", "undo_last", "rollback_to_step", "inspect_history", "stalled"],
+                "may_advance_to_next_segment": False,
+            }
+        return context
+
+    monkeypatch.setattr(FreePenToolRuntime, "_build_current_segment_context", fake_context)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=4)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    edit_round = trace_payload["rounds"][2]
+    assert edit_round["executed_tool_call"]["tool"] == "set_segment_handles"
+
+
+def test_current_segment_status_allows_advancing_when_quality_acceptable(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "segment_gate_allow_out"
+    response_path = tmp_path / "segment_gate_allow_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "advance"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    original = FreePenToolRuntime._build_current_segment_context
+
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
+        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+        if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
+            context["focus"] = {
+                "segment_id": "S1",
+                "type": "cubic",
+                "from_anchor": "A1",
+                "to_anchor": "A2",
+                "recommended_action": "inspect_or_refine",
+                "hint": "S1 acceptable.",
+            }
+            context["status"] = {
+                "segment_id": "S1",
+                "status": "acceptable",
+                "reason": "acceptable",
+                "recommended_next_tools": ["curve_to", "line_to", "close_path"],
+                "may_advance_to_next_segment": True,
+            }
+        return context
+
+    monkeypatch.setattr(FreePenToolRuntime, "_build_current_segment_context", fake_context)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    result = runtime.run(input_path, output_dir)
+
+    trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
+    allowed_round = trace_payload["rounds"][1]
+    assert allowed_round["executed_tool_call"]["tool"] == "curve_to"
+
+
+def test_reject_next_hint_mentions_retry_same_segment(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "reject_hint_out"
+    response_path = tmp_path / "reject_hint_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [-10, 40], "c2": [60, 26], "p": [84, 18], "reason": "out of bounds"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[1]["content"])
+    next_hint = parsed_tool_content["next_hint"].lower()
+    assert "rejected" in next_hint
+    assert "do not continue" in next_hint
+    assert "retry the same segment" in next_hint
+
+
+def test_next_hint_says_do_not_continue_when_segment_bad(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "segment_bad_hint_out"
+    response_path = tmp_path / "segment_bad_hint_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    original = FreePenToolRuntime._build_current_segment_context
+
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
+        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+        if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
+            context["focus"] = {
+                "segment_id": "S1",
+                "type": "cubic",
+                "from_anchor": "A1",
+                "to_anchor": "A2",
+                "recommended_action": "inspect_or_refine",
+                "hint": "Refine S1 first.",
+            }
+            context["status"] = {
+                "segment_id": "S1",
+                "status": "needs_refinement",
+                "reason": "Newest segment needs refinement.",
+                "recommended_next_tools": ["set_segment_handles", "move_handle", "move_anchor", "undo_last", "rollback_to_step", "inspect_history", "stalled"],
+                "may_advance_to_next_segment": False,
+            }
+        return context
+
+    monkeypatch.setattr(FreePenToolRuntime, "_build_current_segment_context", fake_context)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[1]["content"])
+    next_hint = parsed_tool_content["next_hint"].lower()
+    assert "do not draw the next segment" in next_hint
+    assert "refine the current segment first" in next_hint
 
 
 def test_overlay_confusion_reason_generates_warning(tmp_path: Path) -> None:
@@ -1129,6 +1419,97 @@ def test_tool_result_contains_editable_geometry(tmp_path: Path) -> None:
     assert parsed_tool_content["editable_geometry"]["paths"][0]["segments"][0]["id"] == "S1"
 
 
+def test_tool_result_contains_current_segment_focus_after_curve_to(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "segment_focus_out"
+    response_path = tmp_path / "segment_focus_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[1]["content"])
+    assert parsed_tool_content["current_segment_focus"]["segment_id"] == "S1"
+    assert parsed_tool_content["current_segment_focus"]["type"] == "cubic"
+
+
+def test_tool_result_contains_current_segment_status(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "segment_status_out"
+    response_path = tmp_path / "segment_status_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[1]["content"])
+    assert "current_segment_status" in parsed_tool_content
+    assert parsed_tool_content["current_segment_status"]["segment_id"] == "S1"
+
+
+def test_tool_result_contains_quality_metrics_for_current_segment(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "segment_metrics_out"
+    response_path = tmp_path / "segment_metrics_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[1]["content"])
+    current_segment = parsed_tool_content["quality_metrics"]["current_segment"]
+    assert current_segment["segment_id"] == "S1"
+    assert "path_to_source_mean_px" in current_segment or "unavailable_reason" in current_segment
+
+
 def test_visual_feedback_contains_handle_composite_or_handle_annotations(tmp_path: Path) -> None:
     input_path = tmp_path / "samples" / "source.png"
     _write_source_image(input_path)
@@ -1170,10 +1551,13 @@ def test_visual_feedback_contains_handle_composite_or_handle_annotations(tmp_pat
     )
     assert any(
         part.get("type") == "text"
-        and "BLUE points = anchors." in part["text"]
-        and "GREEN points and lines = control handles." in part["text"]
+        and "BLACK = source target." in part["text"]
+        and "BLUE = anchors." in part["text"]
+        and "GREEN = control handles." in part["text"]
         for part in visual_feedback_content
     )
+    feedback_text = next(part["text"] for part in visual_feedback_content if part.get("type") == "text")
+    assert len(feedback_text) < 1200
 
 
 def test_system_prompt_has_no_decision_tool_call_json_protocol() -> None:
@@ -1198,3 +1582,23 @@ def test_system_prompt_mentions_human_pen_anchor_handle_workflow() -> None:
     assert "move_handle" in system_prompt
     assert "set_segment_handles" in system_prompt
     assert "exactly one provided function tool per round" in system_prompt.lower()
+
+
+def test_system_prompt_enforces_current_segment_refinement() -> None:
+    from services.free_pen_prompt import build_free_pen_tool_system_prompt
+
+    system_prompt = build_free_pen_tool_system_prompt()
+    assert "After each curve_to" in system_prompt
+    assert "Only continue to the next segment after the current segment is visually acceptable." in system_prompt
+    assert "prefer set_segment_handles or move_handle" in system_prompt.lower()
+    assert "exactly one provided function tool" in system_prompt.lower()
+    assert "convert_line_to_curve" in system_prompt
+
+
+def test_system_prompt_mentions_sequential_segment_rule() -> None:
+    from services.free_pen_prompt import build_free_pen_tool_system_prompt
+
+    system_prompt = build_free_pen_tool_system_prompt()
+    assert "Do not move on to the next segment" in system_prompt
+    assert "newest/current segment" in system_prompt
+    assert "Do not plan to come back later" in system_prompt

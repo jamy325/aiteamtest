@@ -554,7 +554,28 @@ class FreePenToolRunResult:
 
 
 def load_free_pen_tool_schema() -> dict[str, Any]:
-    return json.loads(TOOL_SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = json.loads(TOOL_SCHEMA_PATH.read_text(encoding="utf-8"))
+    tool_one_of = schema.setdefault("$defs", {}).setdefault("tool_call", {}).setdefault("oneOf", [])
+    if not any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("properties"), dict)
+        and entry["properties"].get("tool", {}).get("const") == "convert_line_to_curve"
+        for entry in tool_one_of
+    ):
+        tool_one_of.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["tool", "segment_id", "c1", "c2"],
+                "properties": {
+                    "tool": {"const": "convert_line_to_curve"},
+                    "segment_id": {"type": "string", "minLength": 1},
+                    "c1": {"$ref": "#/$defs/point2d"},
+                    "c2": {"$ref": "#/$defs/point2d"},
+                },
+            }
+        )
+    return schema
 
 
 def validate_free_pen_tool_response(response: dict[str, Any]) -> None:
@@ -602,6 +623,11 @@ def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         normalized["c1"] = _normalize_point(normalized.get("c1"), key="c1")
         normalized["c2"] = _normalize_point(normalized.get("c2"), key="c2")
         normalized["p"] = _normalize_point(normalized.get("p"), key="p")
+        return normalized
+    if tool == "convert_line_to_curve":
+        normalized["segment_id"] = str(normalized["segment_id"])
+        normalized["c1"] = _normalize_point(normalized.get("c1"), key="c1")
+        normalized["c2"] = _normalize_point(normalized.get("c2"), key="c2")
         return normalized
     if tool == "move_anchor":
         normalized["anchor_id"] = str(normalized["anchor_id"])
@@ -725,6 +751,10 @@ class FreePenToolRuntime:
 
     _SMOOTH_REASON_HINTS = ("curve", "curved", "oval", "ellipse", "circle", "arc", "smooth")
     _OVERLAY_CONFUSION_HINTS = ("orange line", "overlay", "previous line", "current drawing", "draft line")
+    _ADVANCING_TOOLS = {"curve_to", "line_to", "close_path"}
+    _SEGMENT_ACCEPTABLE_P90_PX = 4.0
+    _SEGMENT_ACCEPTABLE_MEAN_PX = 2.0
+    _SEGMENT_ACCEPTABLE_MAX_PX = 8.0
 
     def run(self, source_image_path: Path, output_dir: Path) -> FreePenToolRunResult:
         import os
@@ -735,6 +765,7 @@ class FreePenToolRuntime:
         if source_image is None:
             raise ValueError(f"failed to load source image: {source_image_path}")
         height, width = source_image.shape[:2]
+        source_distance_map = self._build_source_distance_map(source_image)
         canvas = FreePenCanvasState(width=int(width), height=int(height))
         response_files: list[Path] = []
         overlay_files: list[Path] = []
@@ -765,10 +796,16 @@ class FreePenToolRuntime:
                 canvas=canvas,
                 source_image=source_image,
             )
+            current_segment_context = self._build_current_segment_context(
+                canvas=canvas,
+                source_distance_map=source_distance_map,
+                focus_tool_call=None,
+            )
             session_state = self._build_session_state(
                 canvas=canvas,
                 history=history,
                 current_feedback=current_feedback,
+                current_segment_context=current_segment_context,
             )
 
             if step_index == 1:
@@ -905,6 +942,7 @@ class FreePenToolRuntime:
                         canvas=canvas,
                         successful_drawing_step_count=len(successful_drawing_tool_calls),
                         rollback_count=rollback_count,
+                        current_segment_context=current_segment_context,
                     )
                     warnings = list(preflight_result["warnings"])
                     if not preflight_result["success"]:
@@ -915,6 +953,11 @@ class FreePenToolRuntime:
                         quality = "bad"
                         quality_summary = str(preflight_result["quality_summary"])
                         current_feedback = self._feedback_from_rejected_action(warnings=warnings, quality_summary=quality_summary)
+                        current_segment_context = self._build_current_segment_context(
+                            canvas=canvas,
+                            source_distance_map=source_distance_map,
+                            focus_tool_call=tool_call,
+                        )
                         execution_result = {
                             "ok": False,
                             "accepted": False,
@@ -939,6 +982,11 @@ class FreePenToolRuntime:
                             history=history,
                         )
                         rollback_count += rollback_applied
+                        current_segment_context = self._build_current_segment_context(
+                            canvas=canvas,
+                            source_distance_map=source_distance_map,
+                            focus_tool_call=tool_call,
+                        )
                         round_status = "tool_applied"
                         execution_result = {
                             "ok": True,
@@ -948,11 +996,35 @@ class FreePenToolRuntime:
                             "warnings": warnings,
                         }
                 elif final_decision == "finish":
+                    finish_blocked_by_quality = bool(
+                        current_segment_context["status"].get("may_advance_to_next_segment") is False
+                    )
                     finish_warning = self._warning(
                         code="finish_with_open_path",
                         message="The current path is still open. Continue drawing, close_path when appropriate, or rollback.",
                     )
-                    if self.closed_contour_mode and canvas.path_open:
+                    if finish_blocked_by_quality:
+                        warnings = [
+                            self._warning(
+                                "current_segment_needs_refinement",
+                                "The newest segment is not acceptable yet. Refine it before drawing the next segment.",
+                            )
+                        ]
+                        rejected_step_count += 1
+                        round_status = "rejected_action"
+                        canvas.final_status = "invalid_finish"
+                        quality = "bad"
+                        quality_summary = warnings[0]["message"]
+                        runtime_description = "Rejected finish because the newest segment still needs refinement."
+                        current_feedback = self._feedback_from_rejected_action(warnings=warnings, quality_summary=quality_summary)
+                        execution_result = {
+                            "ok": False,
+                            "accepted": False,
+                            "runtime_description": runtime_description,
+                            "quality_summary": quality_summary,
+                            "warnings": warnings,
+                        }
+                    elif self.closed_contour_mode and canvas.path_open:
                         warnings = [finish_warning]
                         rejected_step_count += 1
                         round_status = "rejected_action"
@@ -1004,6 +1076,7 @@ class FreePenToolRuntime:
                             canvas=canvas,
                             history=history,
                             current_feedback=current_feedback,
+                            current_segment_context=current_segment_context,
                         )
                         tool_result_content = {
                             **execution_result,
@@ -1011,8 +1084,11 @@ class FreePenToolRuntime:
                             "runtime_description": runtime_description,
                             "quality_summary": quality_summary,
                             "warnings": warnings,
-                            "editable_geometry": canvas.editable_geometry(),
-                            "geometry_hint": "Blue points are anchors. Green points and lines are control handles. Use move_anchor, move_handle, or set_segment_handles to refine existing curves.",
+                            "editable_geometry": current_segment_context["editable_geometry"],
+                            "geometry_hint": "Blue points are anchors. Green points and lines are control handles. Use move_anchor, move_handle, or set_segment_handles to refine cubic segments. If a line segment needs handle editing, use convert_line_to_curve first.",
+                            "current_segment_focus": current_segment_context["focus"],
+                            "current_segment_status": current_segment_context["status"],
+                            "quality_metrics": current_segment_context["quality_metrics"],
                             "allowed_next_actions": session_state_after["allowed_next_actions"],
                             "forbidden_next_actions": session_state_after["forbidden_next_actions"],
                             "next_hint": self._next_hint(
@@ -1020,6 +1096,7 @@ class FreePenToolRuntime:
                                 round_status=round_status,
                                 warnings=warnings,
                                 session_state=session_state_after,
+                                current_segment_context=current_segment_context,
                             ),
                             "visual_feedback_hint": (
                                 "A visual feedback user message with overlay/composite images will follow this tool result. "
@@ -1128,6 +1205,9 @@ class FreePenToolRuntime:
                     "runtime_description": runtime_description,
                     "quality_summary": quality_summary,
                     "canvas_state_summary": canvas.state_summary(),
+                    "current_segment_focus": current_segment_context["focus"],
+                    "current_segment_status": current_segment_context["status"],
+                    "quality_metrics": current_segment_context["quality_metrics"],
                     "reason": final_reason,
                     "output_overlay_path": str(overlay_path),
                     "request_snapshot_path": str(request_snapshot_path),
@@ -1268,12 +1348,11 @@ class FreePenToolRuntime:
         canvas: FreePenCanvasState,
         successful_drawing_step_count: int,
         rollback_count: int,
+        current_segment_context: dict[str, Any],
     ) -> dict[str, Any]:
         tool = str(tool_call["tool"])
         warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
-        if tool in {"start_path", "line_to", "restart_path"}:
-            warnings.extend(self._coordinate_warnings(x=tool_call["x"], y=tool_call["y"], width=canvas.width, height=canvas.height))
-        elif tool == "move_anchor":
+        if tool in {"start_path", "line_to", "restart_path", "move_anchor"}:
             warnings.extend(self._coordinate_warnings(x=tool_call["x"], y=tool_call["y"], width=canvas.width, height=canvas.height))
         elif tool == "curve_to":
             for key in ("c1", "c2", "p"):
@@ -1299,8 +1378,19 @@ class FreePenToolRuntime:
                         point_name=key,
                     )
                 )
+        elif tool == "convert_line_to_curve":
+            for key in ("c1", "c2"):
+                warnings.extend(
+                    self._coordinate_warnings(
+                        x=tool_call[key][0],
+                        y=tool_call[key][1],
+                        width=canvas.width,
+                        height=canvas.height,
+                        point_name=key,
+                    )
+                )
         reject_codes = {warning["code"] for warning in warnings if warning["code"] in {"non_finite_coordinate", "out_of_bounds_coordinate"}}
-        if tool in {"line_to", "curve_to", "close_path", "move_anchor", "move_handle", "set_segment_handles"} and not canvas.path_open:
+        if tool in {"line_to", "curve_to", "close_path", "move_anchor", "move_handle", "set_segment_handles", "convert_line_to_curve"} and not canvas.path_open:
             reject_codes.add("path_not_open")
             warnings.append(self._warning("path_not_open", f"{tool} requires an open path started by start_path."))
         if tool == "start_path" and canvas.path_open:
@@ -1308,6 +1398,17 @@ class FreePenToolRuntime:
             warnings.append(self._warning("path_already_open", "A path is already open. Use restart_path, rollback_to_step, or close_path first."))
         if tool == "line_to" and any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
             reject_codes.add("line_to_used_on_smooth_curve_hint")
+        if (
+            current_segment_context["status"].get("may_advance_to_next_segment") is False
+            and tool in self._ADVANCING_TOOLS
+        ):
+            reject_codes.add("current_segment_needs_refinement")
+            warnings.append(
+                self._warning(
+                    "current_segment_needs_refinement",
+                    "The newest segment is not acceptable yet. Refine it before drawing the next segment.",
+                )
+            )
         if tool == "close_path" and canvas.path_open:
             if canvas.current_path_drawable_segment_count() < 2 or not canvas.current_path_has_cubic_segment():
                 reject_codes.add("close_path_used_too_early")
@@ -1349,8 +1450,9 @@ class FreePenToolRuntime:
             if str(tool_call["anchor_id"]) not in anchors:
                 reject_codes.add("unknown_anchor_id")
                 warnings.append(self._warning("unknown_anchor_id", f"Unknown anchor_id: {tool_call['anchor_id']}"))
-        if tool in {"move_handle", "set_segment_handles"} and canvas.path_open:
-            geometry = canvas.editable_geometry()
+        editable_geometry = current_segment_context["editable_geometry"]
+        if tool in {"move_handle", "set_segment_handles", "convert_line_to_curve"} and canvas.path_open:
+            geometry = editable_geometry
             segments = {
                 segment["id"]: segment["type"]
                 for path in geometry["paths"]
@@ -1360,9 +1462,12 @@ class FreePenToolRuntime:
             if segment_id not in segments:
                 reject_codes.add("unknown_segment_id")
                 warnings.append(self._warning("unknown_segment_id", f"Unknown segment_id: {segment_id}"))
-            elif segments[segment_id] != "cubic":
+            elif tool in {"move_handle", "set_segment_handles"} and segments[segment_id] != "cubic":
                 reject_codes.add("segment_not_cubic")
                 warnings.append(self._warning("segment_not_cubic", f"{segment_id} is not a cubic segment."))
+            elif tool == "convert_line_to_curve" and segments[segment_id] != "line":
+                reject_codes.add("segment_not_line")
+                warnings.append(self._warning("segment_not_line", f"{segment_id} is not a line segment."))
 
         if reject_codes:
             runtime_description = f"Rejected {tool} during preflight validation."
@@ -1370,6 +1475,9 @@ class FreePenToolRuntime:
             if tool == "line_to" and "line_to_used_on_smooth_curve_hint" in reject_codes:
                 runtime_description = "Rejected line_to because the model described a smooth curve but used a straight line tool."
                 quality_summary = "line_to draws a straight segment and is not appropriate for the described smooth curve."
+            elif "current_segment_needs_refinement" in reject_codes:
+                runtime_description = "Rejected the next drawing step because the newest segment still needs refinement."
+                quality_summary = "The newest segment is not acceptable yet. Refine it before drawing the next segment."
             return {
                 "success": False,
                 "rejected": True,
@@ -1418,7 +1526,7 @@ class FreePenToolRuntime:
             target_step = max(0, len(successful_drawing_tool_calls) - 1)
             removed_steps = len(successful_drawing_tool_calls) - target_step
             del successful_drawing_tool_calls[target_step:]
-            canvas.replay_tool_calls(successful_drawing_tool_calls)
+            self._replay_successful_tool_calls(canvas=canvas, tool_calls=successful_drawing_tool_calls)
             rollback_applied = 1
             runtime_description = f"Rolled back the canvas by undoing the most recent successful drawing step to step {target_step}."
             quality_summary = f"Undo removed {removed_steps} previously successful drawing step(s)."
@@ -1437,7 +1545,7 @@ class FreePenToolRuntime:
             target_step = int(tool_call["step"])
             removed_steps = len(successful_drawing_tool_calls) - target_step
             del successful_drawing_tool_calls[target_step:]
-            canvas.replay_tool_calls(successful_drawing_tool_calls)
+            self._replay_successful_tool_calls(canvas=canvas, tool_calls=successful_drawing_tool_calls)
             rollback_applied = 1
             runtime_description = f"Rolled back the canvas to successful drawing step {target_step}."
             quality_summary = f"Rollback removed {removed_steps} drawing step(s) after step {target_step}."
@@ -1457,7 +1565,7 @@ class FreePenToolRuntime:
 
         if tool == "restart_path":
             successful_drawing_tool_calls.clear()
-            canvas.replay_tool_calls(())
+            self._replay_successful_tool_calls(canvas=canvas, tool_calls=())
             restart_call = {"tool": "start_path", "x": tool_call["x"], "y": tool_call["y"]}
             executed = canvas.apply_tool_call(restart_call)
             successful_drawing_tool_calls.append(restart_call)
@@ -1475,8 +1583,13 @@ class FreePenToolRuntime:
                 current_feedback,
             )
 
-        if tool in {"move_anchor", "move_handle", "set_segment_handles"}:
-            executed = canvas.apply_tool_call(tool_call)
+        if tool in {"move_anchor", "move_handle", "set_segment_handles", "convert_line_to_curve"}:
+            if tool == "convert_line_to_curve":
+                executed = self._convert_line_to_curve(canvas=canvas, tool_call=tool_call)
+                canvas.successful_step_count += 1
+                canvas.step_count += 1
+            else:
+                executed = canvas.apply_tool_call(tool_call)
             successful_drawing_tool_calls.append(dict(tool_call))
             if tool == "move_anchor":
                 runtime_description = (
@@ -1489,6 +1602,12 @@ class FreePenToolRuntime:
                     f"Moved handle {tool_call['handle']} of {tool_call['segment_id']} from "
                     f"[{executed['old_point'][0]:.2f},{executed['old_point'][1]:.2f}] to "
                     f"[{executed['point'][0]:.2f},{executed['point'][1]:.2f}]."
+                )
+            elif tool == "convert_line_to_curve":
+                runtime_description = (
+                    f"Converted {tool_call['segment_id']} from a line segment into a cubic segment with "
+                    f"c1=[{executed['c1'][0]:.2f},{executed['c1'][1]:.2f}] and "
+                    f"c2=[{executed['c2'][0]:.2f},{executed['c2'][1]:.2f}]."
                 )
             else:
                 runtime_description = (
@@ -1581,6 +1700,8 @@ class FreePenToolRuntime:
             return f"Moved handle {tool_call['handle']} of {tool_call['segment_id']}."
         if tool == "set_segment_handles":
             return f"Set both handles of {tool_call['segment_id']}."
+        if tool == "convert_line_to_curve":
+            return f"Converted line segment {tool_call['segment_id']} into an editable cubic segment."
         if tool == "close_path":
             return "Closed the current path by drawing a straight chord from the current point back to the path start."
         return f"Executed {tool}."
@@ -1621,6 +1742,12 @@ class FreePenToolRuntime:
             feedback.append("You described a smooth curve but used line_to.")
             feedback.append("line_to draws a straight segment and is rejected for this smooth curve.")
             feedback.append("Use curve_to with c1, c2, and p.")
+        if any(warning["code"] == "current_segment_needs_refinement" for warning in warnings):
+            feedback.append("Do not draw the next segment yet.")
+            feedback.append("Refine the current segment first using set_segment_handles, move_handle, move_anchor, or convert_line_to_curve if it is a line segment.")
+        if any(warning["code"] == "out_of_bounds_coordinate" for warning in warnings):
+            feedback.append("The previous tool call was rejected because one or more coordinates were outside the canvas bounds.")
+            feedback.append("Do not continue to the next segment. Retry the same segment with in-bounds coordinates.")
         if not feedback and quality_summary:
             feedback.append(quality_summary)
         return feedback
@@ -1701,26 +1828,13 @@ class FreePenToolRuntime:
         content: list[dict[str, Any]] = []
 
         header = (
-            f"This visual feedback was generated immediately after your previous tool call at step {step_index}.\n"
-            "Use it to evaluate the result of that exact tool call before choosing the next tool.\n\n"
-            "Color meaning:\n"
-            "- BLACK / dark contour = source target contour.\n"
-            "- ORANGE / colored stroke = your current drawing produced by your previous tool calls.\n"
-            "- BLUE points = anchors.\n"
-            "- GREEN points and lines = control handles.\n"
-            "- The ORANGE stroke is not the target.\n"
-            "- Your goal is to make the ORANGE stroke overlap the BLACK contour.\n\n"
-            "Correction rule:\n"
-            "- If the ORANGE stroke is visibly far from the BLACK contour, do not continue forward.\n"
-            "- Use move_handle or set_segment_handles for local curve corrections.\n"
-            "- Use move_anchor only if the anchor itself is wrong.\n"
-            "- Use undo_last, rollback_to_step, or restart_path to correct the path.\n"
-            "- Do not call close_path or finish_trace unless the ORANGE stroke closely matches the BLACK contour.\n"
-            "- A closed path is not automatically correct; it must visually align with the BLACK contour.\n\n"
-            "Anchor rule:\n"
-            "- start_path points and curve_to endpoint p should lie on or very near the BLACK contour.\n"
-            "- Control points c1 and c2 may leave the contour, but endpoints should stay on the contour.\n"
-            "- Inspect the BLUE anchors and GREEN handles before choosing exactly one next tool."
+            "Visual feedback after your previous tool call.\n"
+            "BLACK = source target.\n"
+            "ORANGE = your drawing.\n"
+            "BLUE = anchors.\n"
+            "GREEN = control handles.\n"
+            "Inspect the newest segment before choosing exactly one next tool.\n"
+            "If the newest segment is misaligned, adjust handles or anchors before drawing the next segment."
         )
 
         content.append({"type": "text", "text": header})
@@ -1781,20 +1895,70 @@ class FreePenToolRuntime:
         if composite_image_path is not None:
             content.extend(
                 self._build_image_parts(
-                    semantic_text="""The next image is the current composite preview.
-Color meaning:
-- BLACK pixels / dark contour = the source target contour.
-- ORANGE stroke = your current drawing generated by your previous tool calls.
-- The ORANGE stroke is not the target.
-- Your goal is to make the ORANGE stroke overlap the BLACK contour.
-- If the ORANGE stroke is visibly far from the BLACK contour, do not continue forward.
-- Use undo_last, rollback_to_step, or restart_path to correct it.
-- Do not call close_path or finish_trace unless the ORANGE stroke closely matches the BLACK contour.""",
+                    semantic_text=(
+                        "Current composite preview. "
+                        "BLACK = source target. ORANGE = your drawing. BLUE = anchors. GREEN = control handles. "
+                        "Inspect the newest segment before choosing exactly one next tool. "
+                        "If the newest segment is misaligned, adjust handles or anchors before drawing the next segment."
+                    ),
                     image_path=composite_image_path,
                     resolver=resolver,
                 )
             )
         return content
+
+    def _build_editable_geometry(self, canvas: FreePenCanvasState) -> dict[str, Any]:
+        geometry = canvas.editable_geometry()
+        for path in geometry["paths"]:
+            for segment in path["segments"]:
+                if segment["type"] == "line":
+                    segment["editable_with_handles"] = False
+                    segment["conversion_tool"] = "convert_line_to_curve"
+                elif segment["type"] == "cubic":
+                    segment["editable_with_handles"] = True
+        return geometry
+
+    def _build_source_distance_map(self, source_image: np.ndarray) -> np.ndarray | None:
+        try:
+            if source_image.ndim == 2:
+                gray = source_image
+            elif source_image.shape[2] == 4:
+                gray = cv2.cvtColor(source_image, cv2.COLOR_BGRA2GRAY)
+            else:
+                gray = cv2.cvtColor(source_image, cv2.COLOR_BGR2GRAY)
+            source_mask = (gray < 128).astype(np.uint8)
+            if int(np.count_nonzero(source_mask)) == 0:
+                return None
+            distance_input = np.where(source_mask > 0, 0, 255).astype(np.uint8)
+            return cv2.distanceTransform(distance_input, cv2.DIST_L2, 3)
+        except Exception:
+            return None
+
+    def _build_current_segment_context(
+        self,
+        *,
+        canvas: FreePenCanvasState,
+        source_distance_map: np.ndarray | None,
+        focus_tool_call: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        editable_geometry = self._build_editable_geometry(canvas)
+        focus = self._determine_current_segment_focus(
+            editable_geometry=editable_geometry,
+            focus_tool_call=focus_tool_call,
+        )
+        quality_metrics = self._build_quality_metrics(
+            canvas=canvas,
+            editable_geometry=editable_geometry,
+            source_distance_map=source_distance_map,
+            focus=focus,
+        )
+        status = self._build_current_segment_status(focus=focus, metrics=quality_metrics)
+        return {
+            "editable_geometry": editable_geometry,
+            "focus": focus,
+            "status": status,
+            "quality_metrics": quality_metrics,
+        }
 
     def _build_image_parts(
         self,
@@ -1824,28 +1988,259 @@ Color meaning:
             return resolver.to_public_url(image_path)
         return encode_image_as_data_url(image_path, max_image_bytes=20 * 1024 * 1024)
 
+    def _determine_current_segment_focus(
+        self,
+        *,
+        editable_geometry: dict[str, Any],
+        focus_tool_call: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        all_segments = [segment for path in editable_geometry["paths"] for segment in path["segments"]]
+        if not all_segments:
+            return {
+                "segment_id": None,
+                "type": None,
+                "from_anchor": None,
+                "to_anchor": None,
+                "recommended_action": "draw_first_segment",
+                "hint": "No drawable segment exists yet. Start the first local segment on the black contour.",
+            }
+        segment_lookup = {segment["id"]: segment for segment in all_segments}
+        tool = str(focus_tool_call.get("tool")) if focus_tool_call else ""
+        target_segment = all_segments[-1]
+        if tool in {"move_handle", "set_segment_handles", "convert_line_to_curve"}:
+            target_segment = segment_lookup.get(str(focus_tool_call.get("segment_id")), target_segment)
+        elif tool == "move_anchor":
+            anchor_id = str(focus_tool_call.get("anchor_id"))
+            target_segment = next(
+                (segment for segment in all_segments if segment["from_anchor"] == anchor_id or segment["to_anchor"] == anchor_id),
+                target_segment,
+            )
+        if target_segment["type"] == "line":
+            hint = (
+                f"Inspect {target_segment['id']} first. If it needs local curvature or handle-based editing, use convert_line_to_curve before moving on."
+            )
+        else:
+            hint = (
+                f"Inspect {target_segment['id']} first. If it is misaligned, use set_segment_handles or move_handle before drawing the next segment."
+            )
+        return {
+            "segment_id": target_segment["id"],
+            "type": target_segment["type"],
+            "from_anchor": target_segment["from_anchor"],
+            "to_anchor": target_segment["to_anchor"],
+            "recommended_action": "inspect_or_refine",
+            "hint": hint,
+        }
+
+    def _build_quality_metrics(
+        self,
+        *,
+        canvas: FreePenCanvasState,
+        editable_geometry: dict[str, Any],
+        source_distance_map: np.ndarray | None,
+        focus: dict[str, Any],
+    ) -> dict[str, Any]:
+        segment_id = focus.get("segment_id")
+        if segment_id is None:
+            return {"current_segment": {"segment_id": None, "unavailable_reason": "no_current_segment"}}
+        if source_distance_map is None:
+            return {"current_segment": {"segment_id": segment_id, "unavailable_reason": "source_mask_unavailable"}}
+        segment_record = self._segment_record_from_canvas(
+            canvas=canvas,
+            editable_geometry=editable_geometry,
+            segment_id=str(segment_id),
+        )
+        if segment_record is None:
+            return {"current_segment": {"segment_id": segment_id, "unavailable_reason": "segment_not_found"}}
+        sampled_points = self._sample_segment_points(segment_record=segment_record)
+        if sampled_points.size == 0:
+            return {"current_segment": {"segment_id": segment_id, "unavailable_reason": "empty_segment_samples"}}
+        xs = np.clip(sampled_points[:, 0].round().astype(np.int32), 0, source_distance_map.shape[1] - 1)
+        ys = np.clip(sampled_points[:, 1].round().astype(np.int32), 0, source_distance_map.shape[0] - 1)
+        distances = source_distance_map[ys, xs].astype(np.float64)
+        return {
+            "current_segment": {
+                "segment_id": segment_id,
+                "path_to_source_mean_px": float(np.mean(distances)),
+                "path_to_source_max_px": float(np.max(distances)),
+                "path_to_source_p90_px": float(np.percentile(distances, 90)),
+                "sample_count": int(len(distances)),
+                "within_2px_ratio": float(np.mean(distances <= 2.0)),
+                "within_4px_ratio": float(np.mean(distances <= 4.0)),
+            }
+        }
+
+    def _build_current_segment_status(
+        self,
+        *,
+        focus: dict[str, Any],
+        metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        segment_id = focus.get("segment_id")
+        metric_payload = metrics.get("current_segment", {})
+        unavailable_reason = metric_payload.get("unavailable_reason")
+        if segment_id is None:
+            return {
+                "segment_id": None,
+                "status": "unknown",
+                "reason": "No current drawable segment exists yet.",
+                "recommended_next_tools": ["start_path", "curve_to"],
+                "may_advance_to_next_segment": True,
+            }
+        if unavailable_reason:
+            return {
+                "segment_id": segment_id,
+                "status": "unknown",
+                "reason": str(unavailable_reason),
+                "recommended_next_tools": ["inspect_history", "set_segment_handles", "move_handle", "move_anchor", "stalled"],
+                "may_advance_to_next_segment": False,
+            }
+        p90 = float(metric_payload["path_to_source_p90_px"])
+        mean = float(metric_payload["path_to_source_mean_px"])
+        max_dist = float(metric_payload["path_to_source_max_px"])
+        acceptable = p90 <= self._SEGMENT_ACCEPTABLE_P90_PX or (
+            mean <= self._SEGMENT_ACCEPTABLE_MEAN_PX and max_dist <= self._SEGMENT_ACCEPTABLE_MAX_PX
+        )
+        if acceptable:
+            return {
+                "segment_id": segment_id,
+                "status": "acceptable",
+                "reason": "The newest segment is locally acceptable against the black source contour.",
+                "recommended_next_tools": ["curve_to", "line_to", "close_path"],
+                "may_advance_to_next_segment": True,
+            }
+        recommended = ["set_segment_handles", "move_handle", "move_anchor", "undo_last", "rollback_to_step", "inspect_history", "stalled"]
+        if focus.get("type") == "line":
+            recommended.insert(0, "convert_line_to_curve")
+        return {
+            "segment_id": segment_id,
+            "status": "needs_refinement",
+            "reason": "The newest segment is not acceptable yet and should be refined before advancing.",
+            "recommended_next_tools": recommended,
+            "may_advance_to_next_segment": False,
+        }
+
+    def _segment_record_from_canvas(
+        self,
+        *,
+        canvas: FreePenCanvasState,
+        editable_geometry: dict[str, Any],
+        segment_id: str,
+    ) -> dict[str, Any] | None:
+        path = canvas.current_path() or (canvas.paths[-1] if canvas.paths else None)
+        if path is None or not editable_geometry["paths"]:
+            return None
+        geometry_path = editable_geometry["paths"][0]
+        anchors = {anchor["id"]: anchor["p"] for anchor in geometry_path["anchors"]}
+        drawable_segments = [segment for segment in path.segments if segment["type"] in {"line", "cubic"}]
+        for index, segment in enumerate(geometry_path["segments"]):
+            if segment["id"] != segment_id:
+                continue
+            raw_segment = drawable_segments[index]
+            return {
+                "id": segment_id,
+                "type": raw_segment["type"],
+                "from_point": anchors.get(segment["from_anchor"]),
+                "to_point": anchors.get(segment["to_anchor"]),
+                "raw": raw_segment,
+            }
+        return None
+
+    def _sample_segment_points(self, *, segment_record: dict[str, Any]) -> np.ndarray:
+        from_point = segment_record.get("from_point")
+        to_point = segment_record.get("to_point")
+        raw_segment = segment_record["raw"]
+        if not from_point or not to_point:
+            return np.asarray([], dtype=np.float64)
+        if raw_segment["type"] == "line":
+            sample_count = max(8, int(self.sample_count_per_segment))
+            p0 = np.array(from_point, dtype=np.float64)
+            p1 = np.array(to_point, dtype=np.float64)
+            samples = []
+            for index in range(sample_count):
+                t = index / float(sample_count - 1)
+                point = ((1.0 - t) * p0) + (t * p1)
+                samples.append(point.tolist())
+            return np.asarray(samples, dtype=np.float64)
+        return np.asarray(
+            FreePenCanvasState._sample_cubic_segment(
+                p0=(float(from_point[0]), float(from_point[1])),
+                c1=(float(raw_segment["c1"][0]), float(raw_segment["c1"][1])),
+                c2=(float(raw_segment["c2"][0]), float(raw_segment["c2"][1])),
+                p1=(float(to_point[0]), float(to_point[1])),
+                sample_count=max(8, int(self.sample_count_per_segment)),
+            ),
+            dtype=np.float64,
+        )
+
+    def _convert_line_to_curve(self, *, canvas: FreePenCanvasState, tool_call: dict[str, Any]) -> dict[str, Any]:
+        path = canvas.current_path()
+        if path is None:
+            raise FreePenCanvasError("convert_line_to_curve requires an open path")
+        editable_geometry = self._build_editable_geometry(canvas)
+        geometry_path = editable_geometry["paths"][0] if editable_geometry["paths"] else {"segments": []}
+        drawable_segments = [segment for segment in path.segments if segment["type"] in {"line", "cubic"}]
+        for index, segment in enumerate(geometry_path["segments"]):
+            if segment["id"] != str(tool_call["segment_id"]):
+                continue
+            raw_segment = drawable_segments[index]
+            if raw_segment["type"] != "line":
+                raise FreePenCanvasError(f"{tool_call['segment_id']} is not a line segment")
+            endpoint = [float(raw_segment["p"][0]), float(raw_segment["p"][1])]
+            raw_segment["type"] = "cubic"
+            raw_segment["c1"] = [float(tool_call["c1"][0]), float(tool_call["c1"][1])]
+            raw_segment["c2"] = [float(tool_call["c2"][0]), float(tool_call["c2"][1])]
+            return {
+                "tool": "convert_line_to_curve",
+                "path_id": path.path_id,
+                "segment_id": str(tool_call["segment_id"]),
+                "p": endpoint,
+                "c1": [float(tool_call["c1"][0]), float(tool_call["c1"][1])],
+                "c2": [float(tool_call["c2"][0]), float(tool_call["c2"][1])],
+            }
+        raise FreePenCanvasError(f"unknown segment_id: {tool_call['segment_id']}")
+
+    def _replay_successful_tool_calls(self, *, canvas: FreePenCanvasState, tool_calls: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> None:
+        canvas.clear()
+        canvas.step_count = 0
+        canvas.successful_step_count = 0
+        canvas.invalid_step_count = 0
+        for tool_call in tool_calls:
+            if str(tool_call.get("tool")) == "convert_line_to_curve":
+                self._convert_line_to_curve(canvas=canvas, tool_call=tool_call)
+                canvas.successful_step_count += 1
+            else:
+                canvas.apply_tool_call(tool_call, count_step=False)
+
     def _build_session_state(
         self,
         *,
         canvas: FreePenCanvasState,
         history: list[dict[str, Any]],
         current_feedback: list[str],
+        current_segment_context: dict[str, Any],
     ) -> dict[str, Any]:
         closed_path_count = sum(1 for path in canvas.paths if path.closed)
         last_action = str(history[-1]["runtime_description"]) if history else "none"
+        current_segment_focus = current_segment_context["focus"]
+        current_segment_status = current_segment_context["status"]
         if canvas.path_open:
             near_start = canvas.distance_to_start()
-            if (
+            if current_segment_status.get("may_advance_to_next_segment") is False and current_segment_focus.get("segment_id"):
+                current_goal = "Refine the newest segment before drawing the next segment."
+                allowed_next_actions = tuple(current_segment_status.get("recommended_next_tools") or ())
+                forbidden_next_actions = ("curve_to", "line_to", "close_path", "finish")
+            elif (
                 near_start is not None
                 and near_start <= max(8.0, canvas.current_path_bbox_diagonal() * 0.10)
                 and canvas.current_path_drawable_segment_count() >= 2
             ):
-                current_goal = "The current path has returned near the start point. If the orange curve matches the black contour, call close_path as the next single tool call."
-                allowed_next_actions = ("close_path", "undo_last", "rollback_to_step", "inspect_history", "stalled", "move_anchor", "move_handle", "set_segment_handles")
-                forbidden_next_actions = ("finish", "start_path", "line_to", "curve_to")
+                current_goal = "The path has returned to the start point. Inspect the final visual feedback. If the orange path matches the black contour, call close_path as the next single tool call."
+                allowed_next_actions = ("close_path", "set_segment_handles", "move_handle", "move_anchor", "convert_line_to_curve", "undo_last", "rollback_to_step", "inspect_history", "stalled")
+                forbidden_next_actions = ("finish", "start_path", "curve_to", "line_to")
             else:
-                current_goal = "Continue tracing the current open target contour. Use close_path only when the current point is near the start."
-                allowed_next_actions = ("line_to", "curve_to", "close_path", "undo_last", "rollback_to_step", "inspect_history", "restart_path", "move_anchor", "move_handle", "set_segment_handles")
+                current_goal = "Continue tracing the current open target contour. Prefer curve_to over line_to unless the source contour is clearly straight."
+                allowed_next_actions = ("curve_to", "line_to", "close_path", "undo_last", "rollback_to_step", "inspect_history", "restart_path", "move_anchor", "move_handle", "set_segment_handles", "convert_line_to_curve")
                 forbidden_next_actions = ("finish", "start_path")
         elif closed_path_count >= 1:
             current_goal = "Return finish if the closed path matches the source; otherwise use rollback_to_step or restart_path."
@@ -1870,6 +2265,8 @@ Color meaning:
             "allowed_next_actions": list(allowed_next_actions),
             "forbidden_next_actions": list(forbidden_next_actions),
             "current_feedback": list(current_feedback),
+            "current_segment_focus": current_segment_focus,
+            "current_segment_status": current_segment_status,
         }
 
     def _write_round_composite_context(
@@ -1970,22 +2367,29 @@ Color meaning:
                     image_urls.append(str(image_url["url"]))
         return image_urls
 
-    @staticmethod
     def _next_hint(
+        self,
         *,
         final_decision: str | None,
         round_status: str,
         warnings: list[dict[str, Any]],
         session_state: dict[str, Any],
+        current_segment_context: dict[str, Any],
     ) -> str:
         if round_status == "rejected_action" and any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
             return "Use curve_to with c1, c2, and p."
+        if round_status == "rejected_action" and any(warning["code"] == "current_segment_needs_refinement" for warning in warnings):
+            return "The newest segment is not acceptable yet. Do not draw the next segment. Refine the current segment first using set_segment_handles, move_handle, move_anchor, or convert_line_to_curve if it is a line segment."
+        if round_status == "rejected_action" and any(warning["code"] == "out_of_bounds_coordinate" for warning in warnings):
+            return "The previous tool call was rejected because a coordinate was outside the canvas bounds. Do not continue to the next segment. Retry the same segment with in-bounds coordinates, or refine the latest existing segment with set_segment_handles."
         if round_status == "rejected_action":
             return "Revise the action instead of repeating the rejected call."
         if final_decision == "finish":
             return "Tracing is complete."
         if final_decision == "stalled":
             return "Stop the tracing loop."
+        if current_segment_context["status"].get("may_advance_to_next_segment") is False and current_segment_context["focus"].get("segment_id"):
+            return "The newest segment is not acceptable yet. Do not draw the next segment. Refine the current segment first."
         allowed = session_state.get("allowed_next_actions") or []
         if allowed:
             return f"Choose one of the allowed next actions: {', '.join(str(item) for item in allowed)}."
