@@ -755,6 +755,9 @@ class FreePenToolRuntime:
     _SEGMENT_ACCEPTABLE_P90_PX = 4.0
     _SEGMENT_ACCEPTABLE_MEAN_PX = 2.0
     _SEGMENT_ACCEPTABLE_MAX_PX = 8.0
+    _MAX_REFINES_PER_SEGMENT = 3
+    _MAX_WORSE_STREAK = 2
+    _QUALITY_DELTA_EPSILON_PX = 0.5
 
     def run(self, source_image_path: Path, output_dir: Path) -> FreePenToolRunResult:
         import os
@@ -782,6 +785,7 @@ class FreePenToolRuntime:
         rejected_step_count = 0
         invalid_step_count = 0
         rollback_count = 0
+        segment_refinement: dict[str, dict[str, Any]] = {}
         resolver = self._build_public_image_resolver()
         conversation = FreePenConversationMemory(
             system_message={"role": "system", "content": build_free_pen_tool_system_prompt()},
@@ -800,6 +804,7 @@ class FreePenToolRuntime:
                 canvas=canvas,
                 source_distance_map=source_distance_map,
                 focus_tool_call=None,
+                segment_refinement=segment_refinement,
             )
             session_state = self._build_session_state(
                 canvas=canvas,
@@ -957,6 +962,7 @@ class FreePenToolRuntime:
                             canvas=canvas,
                             source_distance_map=source_distance_map,
                             focus_tool_call=tool_call,
+                            segment_refinement=segment_refinement,
                         )
                         execution_result = {
                             "ok": False,
@@ -982,10 +988,27 @@ class FreePenToolRuntime:
                             history=history,
                         )
                         rollback_count += rollback_applied
+                        if tool_call["tool"] in {"undo_last", "rollback_to_step", "restart_path"}:
+                            segment_refinement = self._prune_segment_refinement_state(
+                                segment_refinement=segment_refinement,
+                                canvas=canvas,
+                            )
                         current_segment_context = self._build_current_segment_context(
                             canvas=canvas,
                             source_distance_map=source_distance_map,
                             focus_tool_call=tool_call,
+                            segment_refinement=segment_refinement,
+                        )
+                        segment_refinement = self._update_segment_refinement_state(
+                            segment_refinement=segment_refinement,
+                            tool_call=tool_call,
+                            current_segment_context=current_segment_context,
+                        )
+                        current_segment_context = self._build_current_segment_context(
+                            canvas=canvas,
+                            source_distance_map=source_distance_map,
+                            focus_tool_call=tool_call,
+                            segment_refinement=segment_refinement,
                         )
                         round_status = "tool_applied"
                         execution_result = {
@@ -1089,6 +1112,8 @@ class FreePenToolRuntime:
                             "current_segment_focus": current_segment_context["focus"],
                             "current_segment_status": current_segment_context["status"],
                             "quality_metrics": current_segment_context["quality_metrics"],
+                            "quality_delta": current_segment_context["quality_delta"],
+                            "refinement_summary": current_segment_context["refinement_summary"],
                             "allowed_next_actions": session_state_after["allowed_next_actions"],
                             "forbidden_next_actions": session_state_after["forbidden_next_actions"],
                             "next_hint": self._next_hint(
@@ -1206,10 +1231,12 @@ class FreePenToolRuntime:
                     "quality_summary": quality_summary,
                     "canvas_state_summary": canvas.state_summary(),
                     "current_segment_focus": current_segment_context["focus"],
-                    "current_segment_status": current_segment_context["status"],
-                    "quality_metrics": current_segment_context["quality_metrics"],
-                    "reason": final_reason,
-                    "output_overlay_path": str(overlay_path),
+                "current_segment_status": current_segment_context["status"],
+                "quality_metrics": current_segment_context["quality_metrics"],
+                "quality_delta": current_segment_context["quality_delta"],
+                "refinement_summary": current_segment_context["refinement_summary"],
+                "reason": final_reason,
+                "output_overlay_path": str(overlay_path),
                     "request_snapshot_path": str(request_snapshot_path),
                     "image_urls": self._collect_image_urls_from_messages(request_messages),
                     "parsed_from": parsed_from,
@@ -1281,6 +1308,7 @@ class FreePenToolRuntime:
                     "conversation_history_path": str(conversation_history_path),
                     "request_snapshot_paths": request_snapshot_paths,
                     "image_transport": self.image_transport_config.mode,
+                    "segment_refinement": segment_refinement,
                     "history": history,
                     "rounds": trace_rounds,
                 },
@@ -1409,6 +1437,17 @@ class FreePenToolRuntime:
                     "The newest segment is not acceptable yet. Refine it before drawing the next segment.",
                 )
             )
+        if (
+            current_segment_context["status"].get("refinement_limit_reached")
+            and tool in {"set_segment_handles", "move_handle"}
+        ):
+            reject_codes.add("refinement_limit_reached")
+            warnings.append(
+                self._warning(
+                    "refinement_limit_reached",
+                    "The current segment did not become acceptable after repeated handle edits. Change strategy instead of continuing handle edits.",
+                )
+            )
         if tool == "close_path" and canvas.path_open:
             if canvas.current_path_drawable_segment_count() < 2 or not canvas.current_path_has_cubic_segment():
                 reject_codes.add("close_path_used_too_early")
@@ -1478,6 +1517,9 @@ class FreePenToolRuntime:
             elif "current_segment_needs_refinement" in reject_codes:
                 runtime_description = "Rejected the next drawing step because the newest segment still needs refinement."
                 quality_summary = "The newest segment is not acceptable yet. Refine it before drawing the next segment."
+            elif "refinement_limit_reached" in reject_codes:
+                runtime_description = "Rejected repeated handle refinement because the current segment did not improve after several attempts."
+                quality_summary = "The current segment did not become acceptable after repeated handle edits. Change strategy instead of continuing handle edits."
             return {
                 "success": False,
                 "rejected": True,
@@ -1745,6 +1787,9 @@ class FreePenToolRuntime:
         if any(warning["code"] == "current_segment_needs_refinement" for warning in warnings):
             feedback.append("Do not draw the next segment yet.")
             feedback.append("Refine the current segment first using set_segment_handles, move_handle, move_anchor, or convert_line_to_curve if it is a line segment.")
+        if any(warning["code"] == "refinement_limit_reached" for warning in warnings):
+            feedback.append("Do not keep adjusting the same handles.")
+            feedback.append("Use move_anchor if an anchor is wrong, or use undo_last, rollback_to_step, or restart_path if the current segment cannot be repaired.")
         if any(warning["code"] == "out_of_bounds_coordinate" for warning in warnings):
             feedback.append("The previous tool call was rejected because one or more coordinates were outside the canvas bounds.")
             feedback.append("Do not continue to the next segment. Retry the same segment with in-bounds coordinates.")
@@ -1940,6 +1985,7 @@ class FreePenToolRuntime:
         canvas: FreePenCanvasState,
         source_distance_map: np.ndarray | None,
         focus_tool_call: dict[str, Any] | None,
+        segment_refinement: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         editable_geometry = self._build_editable_geometry(canvas)
         focus = self._determine_current_segment_focus(
@@ -1952,12 +1998,32 @@ class FreePenToolRuntime:
             source_distance_map=source_distance_map,
             focus=focus,
         )
-        status = self._build_current_segment_status(focus=focus, metrics=quality_metrics)
+        refinement_state = self._segment_refinement_state_for_focus(
+            focus=focus,
+            segment_refinement=segment_refinement,
+        )
+        quality_delta = self._build_quality_delta(
+            focus=focus,
+            metrics=quality_metrics,
+            refinement_state=refinement_state,
+        )
+        status = self._build_current_segment_status(
+            focus=focus,
+            metrics=quality_metrics,
+            refinement_state=refinement_state,
+        )
+        refinement_summary = self._build_refinement_summary(
+            focus=focus,
+            refinement_state=refinement_state,
+            current_segment_status=status,
+        )
         return {
             "editable_geometry": editable_geometry,
             "focus": focus,
             "status": status,
             "quality_metrics": quality_metrics,
+            "quality_delta": quality_delta,
+            "refinement_summary": refinement_summary,
         }
 
     def _build_image_parts(
@@ -2075,10 +2141,17 @@ class FreePenToolRuntime:
         *,
         focus: dict[str, Any],
         metrics: dict[str, Any],
+        refinement_state: dict[str, Any] | None,
     ) -> dict[str, Any]:
         segment_id = focus.get("segment_id")
         metric_payload = metrics.get("current_segment", {})
         unavailable_reason = metric_payload.get("unavailable_reason")
+        refine_count = int((refinement_state or {}).get("refine_count", 0))
+        worse_streak = int((refinement_state or {}).get("worse_streak", 0))
+        refinement_limit_reached = (
+            refine_count >= self._MAX_REFINES_PER_SEGMENT
+            or worse_streak >= self._MAX_WORSE_STREAK
+        )
         if segment_id is None:
             return {
                 "segment_id": None,
@@ -2086,14 +2159,18 @@ class FreePenToolRuntime:
                 "reason": "No current drawable segment exists yet.",
                 "recommended_next_tools": ["start_path", "curve_to"],
                 "may_advance_to_next_segment": True,
+                "refinement_limit_reached": False,
+                "may_continue_handle_refinement": False,
             }
         if unavailable_reason:
             return {
                 "segment_id": segment_id,
                 "status": "unknown",
                 "reason": str(unavailable_reason),
-                "recommended_next_tools": ["inspect_history", "set_segment_handles", "move_handle", "move_anchor", "stalled"],
+                "recommended_next_tools": ["inspect_history", "set_segment_handles", "move_handle", "move_anchor", "restart_path", "stalled"],
                 "may_advance_to_next_segment": False,
+                "refinement_limit_reached": False,
+                "may_continue_handle_refinement": True,
             }
         p90 = float(metric_payload["path_to_source_p90_px"])
         mean = float(metric_payload["path_to_source_mean_px"])
@@ -2108,8 +2185,23 @@ class FreePenToolRuntime:
                 "reason": "The newest segment is locally acceptable against the black source contour.",
                 "recommended_next_tools": ["curve_to", "line_to", "close_path"],
                 "may_advance_to_next_segment": True,
+                "refinement_limit_reached": False,
+                "may_continue_handle_refinement": True,
             }
-        recommended = ["set_segment_handles", "move_handle", "move_anchor", "undo_last", "rollback_to_step", "inspect_history", "stalled"]
+        if refinement_limit_reached:
+            recommended = ["move_anchor", "undo_last", "rollback_to_step", "restart_path", "inspect_history", "stalled"]
+            if focus.get("type") == "line":
+                recommended.insert(0, "convert_line_to_curve")
+            return {
+                "segment_id": segment_id,
+                "status": "needs_refinement",
+                "reason": "The current segment did not become acceptable after repeated handle edits.",
+                "recommended_next_tools": recommended,
+                "may_advance_to_next_segment": False,
+                "refinement_limit_reached": True,
+                "may_continue_handle_refinement": False,
+            }
+        recommended = ["set_segment_handles", "move_handle", "move_anchor", "undo_last", "rollback_to_step", "inspect_history", "restart_path", "stalled"]
         if focus.get("type") == "line":
             recommended.insert(0, "convert_line_to_curve")
         return {
@@ -2118,6 +2210,106 @@ class FreePenToolRuntime:
             "reason": "The newest segment is not acceptable yet and should be refined before advancing.",
             "recommended_next_tools": recommended,
             "may_advance_to_next_segment": False,
+            "refinement_limit_reached": False,
+            "may_continue_handle_refinement": True,
+        }
+
+    @staticmethod
+    def _segment_refinement_state_for_focus(
+        *,
+        focus: dict[str, Any],
+        segment_refinement: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        segment_id = focus.get("segment_id")
+        if segment_id is None:
+            return None
+        return segment_refinement.get(str(segment_id))
+
+    def _build_quality_delta(
+        self,
+        *,
+        focus: dict[str, Any],
+        metrics: dict[str, Any],
+        refinement_state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        segment_id = focus.get("segment_id")
+        metric_payload = metrics.get("current_segment", {})
+        unavailable_reason = metric_payload.get("unavailable_reason")
+        if segment_id is None:
+            return {"segment_id": None, "status": "unavailable", "message": "No current segment exists yet."}
+        if unavailable_reason:
+            return {
+                "segment_id": segment_id,
+                "status": "unavailable",
+                "unavailable_reason": str(unavailable_reason),
+                "message": "Current segment quality delta is unavailable.",
+            }
+        previous_quality = (refinement_state or {}).get("previous_quality")
+        best_quality = (refinement_state or {}).get("best_quality")
+        previous_p90 = None if not previous_quality else previous_quality.get("path_to_source_p90_px")
+        current_p90 = float(metric_payload["path_to_source_p90_px"])
+        best_p90 = None if not best_quality else best_quality.get("path_to_source_p90_px")
+        improved_vs_previous = (
+            previous_p90 is not None and current_p90 < float(previous_p90) - self._QUALITY_DELTA_EPSILON_PX
+        )
+        improved_vs_best = (
+            best_p90 is not None and current_p90 < float(best_p90) - self._QUALITY_DELTA_EPSILON_PX
+        )
+        worse_streak = int((refinement_state or {}).get("worse_streak", 0))
+        message = "No previous local quality is available yet for this segment."
+        if previous_p90 is not None and current_p90 > float(previous_p90) + self._QUALITY_DELTA_EPSILON_PX:
+            message = "This edit made the current segment worse. Do not keep moving handles in the same direction."
+        elif improved_vs_previous:
+            message = "This edit improved the current segment compared with the previous attempt."
+        elif previous_p90 is not None:
+            message = "This edit did not meaningfully improve the current segment. Change strategy if repeated handle edits keep failing."
+        return {
+            "segment_id": segment_id,
+            "previous_p90_px": previous_p90,
+            "current_p90_px": current_p90,
+            "best_p90_px": best_p90,
+            "improved_vs_previous": bool(improved_vs_previous),
+            "improved_vs_best": bool(improved_vs_best),
+            "worse_streak": worse_streak,
+            "message": message,
+        }
+
+    def _build_refinement_summary(
+        self,
+        *,
+        focus: dict[str, Any],
+        refinement_state: dict[str, Any] | None,
+        current_segment_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        segment_id = focus.get("segment_id")
+        if segment_id is None:
+            return {
+                "segment_id": None,
+                "refine_count": 0,
+                "max_refines": self._MAX_REFINES_PER_SEGMENT,
+                "worse_streak": 0,
+                "refinement_limit_reached": False,
+                "recommended_strategy": "draw_first_segment",
+            }
+        best_quality = (refinement_state or {}).get("best_quality") or {}
+        recommended_strategy = "continue_local_refinement"
+        if current_segment_status.get("refinement_limit_reached"):
+            recommended_strategy = "stop_handle_refinement_and_move_anchor_or_rollback"
+        elif current_segment_status.get("may_advance_to_next_segment"):
+            recommended_strategy = "advance_to_next_segment_when_ready"
+        return {
+            "segment_id": segment_id,
+            "refine_count": int((refinement_state or {}).get("refine_count", 0)),
+            "max_refines": self._MAX_REFINES_PER_SEGMENT,
+            "worse_streak": int((refinement_state or {}).get("worse_streak", 0)),
+            "refinement_limit_reached": bool(current_segment_status.get("refinement_limit_reached")),
+            "best_quality": {
+                "path_to_source_p90_px": best_quality.get("path_to_source_p90_px"),
+            }
+            if best_quality
+            else {},
+            "best_tool_call": (refinement_state or {}).get("best_tool_call"),
+            "recommended_strategy": recommended_strategy,
         }
 
     def _segment_record_from_canvas(
@@ -2200,6 +2392,104 @@ class FreePenToolRuntime:
             }
         raise FreePenCanvasError(f"unknown segment_id: {tool_call['segment_id']}")
 
+    def _update_segment_refinement_state(
+        self,
+        *,
+        segment_refinement: dict[str, dict[str, Any]],
+        tool_call: dict[str, Any],
+        current_segment_context: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        updated = {
+            segment_id: dict(payload)
+            for segment_id, payload in segment_refinement.items()
+        }
+        focus = current_segment_context["focus"]
+        metrics = current_segment_context["quality_metrics"].get("current_segment", {})
+        segment_id = focus.get("segment_id")
+        if segment_id is None:
+            return updated
+        tool = str(tool_call.get("tool"))
+        relevant_tools = {
+            "curve_to",
+            "line_to",
+            "convert_line_to_curve",
+            "set_segment_handles",
+            "move_handle",
+            "move_anchor",
+        }
+        if tool not in relevant_tools:
+            return updated
+        current_quality = None if metrics.get("unavailable_reason") else {
+            "path_to_source_mean_px": float(metrics["path_to_source_mean_px"]),
+            "path_to_source_max_px": float(metrics["path_to_source_max_px"]),
+            "path_to_source_p90_px": float(metrics["path_to_source_p90_px"]),
+        }
+        existing = dict(updated.get(str(segment_id), {}))
+        previous_quality = existing.get("last_quality")
+        best_quality = existing.get("best_quality")
+        best_tool_call = existing.get("best_tool_call")
+        refine_count = int(existing.get("refine_count", 0))
+        worse_streak = int(existing.get("worse_streak", 0))
+
+        if tool in {"curve_to", "line_to"}:
+            refine_count = 0
+            worse_streak = 0
+        elif tool == "convert_line_to_curve":
+            refine_count = 0
+            worse_streak = 0
+        elif tool == "move_anchor":
+            refine_count = 1
+            worse_streak = 0
+        else:
+            refine_count += 1
+            if current_quality is not None and previous_quality is not None:
+                current_p90 = float(current_quality["path_to_source_p90_px"])
+                previous_p90 = float(previous_quality["path_to_source_p90_px"])
+                if current_p90 > previous_p90 + self._QUALITY_DELTA_EPSILON_PX:
+                    worse_streak += 1
+                elif current_p90 < previous_p90 - self._QUALITY_DELTA_EPSILON_PX:
+                    worse_streak = 0
+
+        if current_quality is not None:
+            if best_quality is None or (
+                current_quality["path_to_source_p90_px"]
+                < float(best_quality["path_to_source_p90_px"]) - self._QUALITY_DELTA_EPSILON_PX
+            ):
+                best_quality = dict(current_quality)
+                best_tool_call = dict(tool_call)
+            elif best_quality is None:
+                best_quality = dict(current_quality)
+                best_tool_call = dict(tool_call)
+
+        updated[str(segment_id)] = {
+            "refine_count": refine_count,
+            "previous_quality": previous_quality,
+            "last_quality": current_quality,
+            "best_quality": best_quality,
+            "best_tool_call": best_tool_call,
+            "last_tool_call": dict(tool_call),
+            "worse_streak": worse_streak,
+        }
+        return updated
+
+    def _prune_segment_refinement_state(
+        self,
+        *,
+        segment_refinement: dict[str, dict[str, Any]],
+        canvas: FreePenCanvasState,
+    ) -> dict[str, dict[str, Any]]:
+        editable_geometry = self._build_editable_geometry(canvas)
+        valid_segment_ids = {
+            str(segment["id"])
+            for path in editable_geometry["paths"]
+            for segment in path["segments"]
+        }
+        return {
+            segment_id: payload
+            for segment_id, payload in segment_refinement.items()
+            if segment_id in valid_segment_ids
+        }
+
     def _replay_successful_tool_calls(self, *, canvas: FreePenCanvasState, tool_calls: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> None:
         canvas.clear()
         canvas.step_count = 0
@@ -2227,7 +2517,10 @@ class FreePenToolRuntime:
         if canvas.path_open:
             near_start = canvas.distance_to_start()
             if current_segment_status.get("may_advance_to_next_segment") is False and current_segment_focus.get("segment_id"):
-                current_goal = "Refine the newest segment before drawing the next segment."
+                if current_segment_status.get("refinement_limit_reached"):
+                    current_goal = "The newest segment still cannot be repaired with repeated handle edits. Change strategy before continuing."
+                else:
+                    current_goal = "Refine the newest segment before drawing the next segment."
                 allowed_next_actions = tuple(current_segment_status.get("recommended_next_tools") or ())
                 forbidden_next_actions = ("curve_to", "line_to", "close_path", "finish")
             elif (
@@ -2378,6 +2671,16 @@ class FreePenToolRuntime:
     ) -> str:
         if round_status == "rejected_action" and any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
             return "Use curve_to with c1, c2, and p."
+        if round_status == "rejected_action" and any(warning["code"] == "refinement_limit_reached" for warning in warnings):
+            best_p90 = current_segment_context.get("refinement_summary", {}).get("best_quality", {}).get("path_to_source_p90_px")
+            if best_p90 is not None:
+                return (
+                    "The current segment is still not acceptable after repeated handle edits. "
+                    "Do not keep adjusting the same handles. "
+                    f"The best previous candidate for this segment had p90={best_p90:.1f}. "
+                    "Use move_anchor if an anchor is wrong, or use undo_last, rollback_to_step, or restart_path if this segment cannot be repaired."
+                )
+            return "The current segment is still not acceptable after repeated handle edits. Do not keep adjusting the same handles. Use move_anchor if an anchor is wrong, or use undo_last, rollback_to_step, or restart_path if this segment cannot be repaired."
         if round_status == "rejected_action" and any(warning["code"] == "current_segment_needs_refinement" for warning in warnings):
             return "The newest segment is not acceptable yet. Do not draw the next segment. Refine the current segment first using set_segment_handles, move_handle, move_anchor, or convert_line_to_curve if it is a line segment."
         if round_status == "rejected_action" and any(warning["code"] == "out_of_bounds_coordinate" for warning in warnings):
@@ -2389,6 +2692,22 @@ class FreePenToolRuntime:
         if final_decision == "stalled":
             return "Stop the tracing loop."
         if current_segment_context["status"].get("may_advance_to_next_segment") is False and current_segment_context["focus"].get("segment_id"):
+            if current_segment_context["status"].get("refinement_limit_reached"):
+                best_p90 = current_segment_context.get("refinement_summary", {}).get("best_quality", {}).get("path_to_source_p90_px")
+                if best_p90 is not None:
+                    return (
+                        "The current segment is still not acceptable after repeated handle edits. "
+                        "Do not keep adjusting the same handles. "
+                        f"The best previous candidate for this segment had p90={best_p90:.1f}. "
+                        "Use move_anchor if an anchor is wrong, or use undo_last, rollback_to_step, or restart_path if this segment cannot be repaired."
+                    )
+                return "The current segment is still not acceptable after repeated handle edits. Do not keep adjusting the same handles. Use move_anchor if an anchor is wrong, or use undo_last, rollback_to_step, or restart_path if this segment cannot be repaired."
+            delta = current_segment_context.get("quality_delta", {})
+            if delta.get("message") and delta.get("improved_vs_previous") is False and delta.get("previous_p90_px") is not None:
+                return (
+                    f"The newest segment is not acceptable yet. Do not draw the next segment. "
+                    f"{delta['message']} Refine the current segment first."
+                )
             return "The newest segment is not acceptable yet. Do not draw the next segment. Refine the current segment first."
         allowed = session_state.get("allowed_next_actions") or []
         if allowed:

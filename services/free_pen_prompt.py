@@ -174,6 +174,20 @@ Sequential segment rule:
 - A later segment must not be used to compensate for an earlier bad segment.
 - Finish each local segment properly before advancing.
 
+Local refinement failure rule:
+- Do not adjust the same segment forever.
+- If repeated handle edits do not improve the newest segment, change strategy.
+- If quality gets worse, do not keep moving handles in the same direction.
+- Use move_anchor if the endpoint anchor is wrong.
+- If the segment cannot be repaired locally, use undo_last, rollback_to_step, or restart_path.
+- Do not waste all steps repeatedly tuning the same handles.
+
+Escape rule:
+- If you selected the wrong contour or the path is fundamentally wrong, use restart_path instead of repeatedly editing handles.
+- If handle edits do not improve the current segment after several attempts, stop trying the same edit strategy.
+- Use move_anchor if the endpoint is wrong.
+- Use rollback_to_step or restart_path if the current local path cannot be repaired.
+
 Single tool rule:
 - Call exactly one function tool per response.
 - Never call multiple function tools in the same response.

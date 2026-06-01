@@ -738,8 +738,14 @@ def test_current_segment_status_blocks_advancing_when_quality_bad(tmp_path: Path
 
     original = FreePenToolRuntime._build_current_segment_context
 
-    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
-        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call, segment_refinement):
+        context = original(
+            self,
+            canvas=canvas,
+            source_distance_map=source_distance_map,
+            focus_tool_call=focus_tool_call,
+            segment_refinement=segment_refinement,
+        )
         if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
             context["focus"] = {
                 "segment_id": "S1",
@@ -796,8 +802,14 @@ def test_current_segment_status_allows_handle_edit_when_quality_bad(tmp_path: Pa
 
     original = FreePenToolRuntime._build_current_segment_context
 
-    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
-        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call, segment_refinement):
+        context = original(
+            self,
+            canvas=canvas,
+            source_distance_map=source_distance_map,
+            focus_tool_call=focus_tool_call,
+            segment_refinement=segment_refinement,
+        )
         if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
             context["focus"] = {
                 "segment_id": "S1",
@@ -847,8 +859,14 @@ def test_current_segment_status_allows_advancing_when_quality_acceptable(tmp_pat
 
     original = FreePenToolRuntime._build_current_segment_context
 
-    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
-        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call, segment_refinement):
+        context = original(
+            self,
+            canvas=canvas,
+            source_distance_map=source_distance_map,
+            focus_tool_call=focus_tool_call,
+            segment_refinement=segment_refinement,
+        )
         if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
             context["focus"] = {
                 "segment_id": "S1",
@@ -874,6 +892,211 @@ def test_current_segment_status_allows_advancing_when_quality_acceptable(tmp_pat
     trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
     allowed_round = trace_payload["rounds"][1]
     assert allowed_round["executed_tool_call"]["tool"] == "curve_to"
+
+
+def test_quality_delta_reports_improvement(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    quality_delta = runtime._build_quality_delta(
+        focus={"segment_id": "S2"},
+        metrics={"current_segment": {"segment_id": "S2", "path_to_source_p90_px": 6.0, "path_to_source_mean_px": 2.0, "path_to_source_max_px": 7.0}},
+        refinement_state={
+            "previous_quality": {"path_to_source_p90_px": 10.0},
+            "last_quality": {"path_to_source_p90_px": 10.0},
+            "best_quality": {"path_to_source_p90_px": 10.0},
+            "worse_streak": 0,
+        },
+    )
+    assert quality_delta["improved_vs_previous"] is True
+    assert quality_delta["improved_vs_best"] is True
+
+
+def test_quality_delta_reports_worse_edit(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    quality_delta = runtime._build_quality_delta(
+        focus={"segment_id": "S2"},
+        metrics={"current_segment": {"segment_id": "S2", "path_to_source_p90_px": 16.0, "path_to_source_mean_px": 8.0, "path_to_source_max_px": 20.0}},
+        refinement_state={
+            "previous_quality": {"path_to_source_p90_px": 10.0},
+            "last_quality": {"path_to_source_p90_px": 10.0},
+            "best_quality": {"path_to_source_p90_px": 8.0},
+            "worse_streak": 2,
+        },
+    )
+    assert quality_delta["improved_vs_previous"] is False
+    assert quality_delta["worse_streak"] == 2
+    assert "worse" in quality_delta["message"].lower()
+
+
+def test_segment_refine_count_increments_on_set_segment_handles(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    context = {
+        "focus": {"segment_id": "S2"},
+        "quality_metrics": {
+            "current_segment": {
+                "segment_id": "S2",
+                "path_to_source_mean_px": 4.0,
+                "path_to_source_max_px": 8.0,
+                "path_to_source_p90_px": 7.0,
+            }
+        },
+    }
+    state = runtime._update_segment_refinement_state(
+        segment_refinement={},
+        tool_call={"tool": "set_segment_handles", "segment_id": "S2", "c1": [10, 10], "c2": [20, 20]},
+        current_segment_context=context,
+    )
+    state = runtime._update_segment_refinement_state(
+        segment_refinement=state,
+        tool_call={"tool": "set_segment_handles", "segment_id": "S2", "c1": [11, 10], "c2": [21, 20]},
+        current_segment_context=context,
+    )
+    assert state["S2"]["refine_count"] == 2
+
+
+def test_best_quality_updates_only_when_improved(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    state: dict[str, dict[str, object]] = {}
+    for p90 in (12.0, 8.0, 20.0):
+        state = runtime._update_segment_refinement_state(
+            segment_refinement=state,
+            tool_call={"tool": "set_segment_handles", "segment_id": "S2", "c1": [10, 10], "c2": [20, 20]},
+            current_segment_context={
+                "focus": {"segment_id": "S2"},
+                "quality_metrics": {
+                    "current_segment": {
+                        "segment_id": "S2",
+                        "path_to_source_mean_px": p90 / 4.0,
+                        "path_to_source_max_px": p90 + 2.0,
+                        "path_to_source_p90_px": p90,
+                    }
+                },
+            },
+        )
+    assert state["S2"]["best_quality"]["path_to_source_p90_px"] == 8.0
+
+
+def test_refinement_limit_blocks_more_handle_edits(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "set_segment_handles", "segment_id": "S1", "c1": [22, 42], "c2": [58, 24]},
+        ai_reason="keep tuning handles",
+        canvas=canvas,
+        successful_drawing_step_count=2,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": "S1", "type": "cubic"},
+            "status": {
+                "segment_id": "S1",
+                "status": "needs_refinement",
+                "reason": "bad",
+                "recommended_next_tools": ["move_anchor", "rollback_to_step", "restart_path"],
+                "may_advance_to_next_segment": False,
+                "refinement_limit_reached": True,
+                "may_continue_handle_refinement": False,
+            },
+            "quality_metrics": {"current_segment": {"segment_id": "S1", "path_to_source_p90_px": 12.0}},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+    assert preflight["success"] is False
+    assert "refinement_limit_reached" in warning_codes
+
+
+def test_refinement_limit_allows_move_anchor(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "move_anchor", "anchor_id": "A2", "x": 82, "y": 20},
+        ai_reason="anchor wrong",
+        canvas=canvas,
+        successful_drawing_step_count=2,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": "S1", "type": "cubic"},
+            "status": {
+                "segment_id": "S1",
+                "status": "needs_refinement",
+                "reason": "bad",
+                "recommended_next_tools": ["move_anchor", "rollback_to_step", "restart_path"],
+                "may_advance_to_next_segment": False,
+                "refinement_limit_reached": True,
+                "may_continue_handle_refinement": False,
+            },
+            "quality_metrics": {"current_segment": {"segment_id": "S1", "path_to_source_p90_px": 12.0}},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+    )
+    assert preflight["success"] is True
+
+
+def test_refinement_limit_allows_restart_path(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "restart_path", "x": 10, "y": 50},
+        ai_reason="wrong contour",
+        canvas=canvas,
+        successful_drawing_step_count=1,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": "S1", "type": "cubic"},
+            "status": {
+                "segment_id": "S1",
+                "status": "needs_refinement",
+                "reason": "bad",
+                "recommended_next_tools": ["move_anchor", "rollback_to_step", "restart_path"],
+                "may_advance_to_next_segment": False,
+                "refinement_limit_reached": True,
+                "may_continue_handle_refinement": False,
+            },
+            "quality_metrics": {"current_segment": {"segment_id": "S1", "path_to_source_p90_px": 12.0}},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+    )
+    assert preflight["success"] is True
+
+
+def test_current_segment_needs_refinement_allows_restart_path(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "restart_path", "x": 10, "y": 50},
+        ai_reason="wrong path",
+        canvas=canvas,
+        successful_drawing_step_count=1,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": "S1", "type": "cubic"},
+            "status": {
+                "segment_id": "S1",
+                "status": "needs_refinement",
+                "reason": "bad",
+                "recommended_next_tools": ["set_segment_handles", "move_handle", "move_anchor", "restart_path"],
+                "may_advance_to_next_segment": False,
+                "refinement_limit_reached": False,
+                "may_continue_handle_refinement": True,
+            },
+            "quality_metrics": {"current_segment": {"segment_id": "S1", "path_to_source_p90_px": 12.0}},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+    )
+    assert preflight["success"] is True
 
 
 def test_reject_next_hint_mentions_retry_same_segment(tmp_path: Path) -> None:
@@ -930,8 +1153,14 @@ def test_next_hint_says_do_not_continue_when_segment_bad(tmp_path: Path, monkeyp
 
     original = FreePenToolRuntime._build_current_segment_context
 
-    def fake_context(self, *, canvas, source_distance_map, focus_tool_call):
-        context = original(self, canvas=canvas, source_distance_map=source_distance_map, focus_tool_call=focus_tool_call)
+    def fake_context(self, *, canvas, source_distance_map, focus_tool_call, segment_refinement):
+        context = original(
+            self,
+            canvas=canvas,
+            source_distance_map=source_distance_map,
+            focus_tool_call=focus_tool_call,
+            segment_refinement=segment_refinement,
+        )
         if canvas.path_open and canvas.current_path_drawable_segment_count() >= 1:
             context["focus"] = {
                 "segment_id": "S1",
@@ -1510,6 +1739,76 @@ def test_tool_result_contains_quality_metrics_for_current_segment(tmp_path: Path
     assert "path_to_source_mean_px" in current_segment or "unavailable_reason" in current_segment
 
 
+def test_tool_result_contains_refinement_summary(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "refinement_summary_out"
+    response_path = tmp_path / "refinement_summary_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "set_segment_handles",
+                    {"segment_id": "S1", "c1": [22, 42], "c2": [58, 24], "reason": "refine"},
+                    call_id="call_003",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_004"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=4)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[2]["content"])
+    assert "refinement_summary" in parsed_tool_content
+    assert parsed_tool_content["refinement_summary"]["segment_id"] == "S1"
+
+
+def test_next_hint_changes_strategy_after_repeated_bad_edits(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    next_hint = runtime._next_hint(
+        final_decision="tool_call",
+        round_status="tool_applied",
+        warnings=[],
+        session_state={"allowed_next_actions": ["move_anchor", "restart_path"]},
+        current_segment_context={
+            "focus": {"segment_id": "S2"},
+            "status": {
+                "segment_id": "S2",
+                "status": "needs_refinement",
+                "reason": "bad",
+                "may_advance_to_next_segment": False,
+                "refinement_limit_reached": True,
+            },
+            "quality_delta": {
+                "segment_id": "S2",
+                "previous_p90_px": 15.0,
+                "current_p90_px": 20.0,
+                "best_p90_px": 12.7,
+                "improved_vs_previous": False,
+                "message": "This edit made the current segment worse. Do not keep moving handles in the same direction.",
+            },
+            "refinement_summary": {
+                "segment_id": "S2",
+                "best_quality": {"path_to_source_p90_px": 12.7},
+            },
+        },
+    ).lower()
+    assert "do not keep adjusting the same handles" in next_hint
+    assert "move_anchor" in next_hint
+    assert "restart_path" in next_hint
+
+
 def test_visual_feedback_contains_handle_composite_or_handle_annotations(tmp_path: Path) -> None:
     input_path = tmp_path / "samples" / "source.png"
     _write_source_image(input_path)
@@ -1602,3 +1901,13 @@ def test_system_prompt_mentions_sequential_segment_rule() -> None:
     assert "Do not move on to the next segment" in system_prompt
     assert "newest/current segment" in system_prompt
     assert "Do not plan to come back later" in system_prompt
+
+
+def test_system_prompt_mentions_local_refinement_failure_rule() -> None:
+    from services.free_pen_prompt import build_free_pen_tool_system_prompt
+
+    system_prompt = build_free_pen_tool_system_prompt()
+    assert "Do not adjust the same segment forever" in system_prompt
+    assert "change strategy" in system_prompt.lower()
+    assert "rollback_to_step" in system_prompt
+    assert "restart_path" in system_prompt
