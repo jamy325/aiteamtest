@@ -754,13 +754,17 @@ class FreePenToolRuntime:
                 history=history,
                 current_feedback=current_feedback,
             )
-            image_message_content = self._build_round_image_message_content(
-                source_image_path=source_image_path,
-                overlay_image_path=previous_overlay_path,
-                composite_image_path=current_composite_path,
-                resolver=resolver,
-                include_source_image=step_index == 1,
-            )
+
+            if step_index == 1:
+                image_message_content = self._build_round_image_message_content(
+                    source_image_path=source_image_path,
+                    overlay_image_path=None,
+                    composite_image_path=None,
+                    resolver=resolver,
+                    include_source_image=True,
+                )
+                conversation.append_user_message(image_message_content)
+
             current_tools = tuple(build_free_pen_native_tools_schema())
             current_tool_choice = os.environ.get("AI_FREE_PEN_TOOL_CHOICE", "none")
 
@@ -798,7 +802,6 @@ class FreePenToolRuntime:
                 tool_choice=current_tool_choice,
             )
             state_text = build_free_pen_tool_state_text(review_input.prompt_input())
-            conversation.append_user_message(image_message_content)
             conversation.append_user_message(state_text)
             request_messages = conversation.build_messages_for_request()
             request_snapshot_path = output_dir / f"round_{step_index:03d}_request.json"
@@ -1000,6 +1003,10 @@ class FreePenToolRuntime:
                                 warnings=warnings,
                                 session_state=session_state_after,
                             ),
+                            "visual_feedback_hint": (
+                                "A visual feedback user message with overlay/composite images will follow this tool result. "
+                                "Inspect it before choosing the next tool. BLACK is target; ORANGE is your drawing."
+                            ),
                         }
                         conversation.append_tool_result(tool_call_id, tool_result_content)
                         tool_result_message = {
@@ -1041,6 +1048,26 @@ class FreePenToolRuntime:
             cv2.imwrite(str(overlay_path), overlay)
             overlay_files.append(overlay_path)
             previous_overlay_path = overlay_path
+
+            post_tool_composite_path = self._write_post_tool_composite_feedback(
+                output_dir=output_dir,
+                step_index=step_index,
+                canvas=canvas,
+                source_image=source_image,
+            )
+
+            if validation_error is None and final_decision not in {"finish", "stalled"}:
+                visual_feedback_content = self._build_post_tool_visual_feedback_message_content(
+                    overlay_image_path=overlay_path,
+                    composite_image_path=post_tool_composite_path,
+                    resolver=resolver,
+                    step_index=step_index,
+                )
+                conversation.append_user_message(visual_feedback_content)
+                conversation.save(
+                    conversation_history_path,
+                    message_sanitizer=self._sanitize_messages_for_snapshot,
+                )
 
             response_files.append(
                 FreePenRuntime._write_round_response(
@@ -1195,7 +1222,25 @@ class FreePenToolRuntime:
             response_files=tuple(response_files),
             overlay_files=tuple(overlay_files),
         )
-
+    
+    def _write_post_tool_composite_feedback(
+        self,
+        *,
+        output_dir: Path,
+        step_index: int,
+        canvas: FreePenCanvasState,
+        source_image: np.ndarray,
+    ) -> Path:
+        composite = canvas.render_composite(
+            source_image,
+            stroke_width=max(1, int(self.stroke_width)),
+            stroke_rgba=self.stroke_rgba,
+            sample_count_per_segment=max(8, int(self.sample_count_per_segment)),
+        )
+        composite_path = output_dir / f"round_{step_index:03d}_post_tool_composite.png"
+        cv2.imwrite(str(composite_path), composite)
+        return composite_path
+    
     def _preflight_tool_call(
         self,
         *,
@@ -1556,6 +1601,63 @@ class FreePenToolRuntime:
             project_root=self.image_transport_config.public_image_root,
             base_url=self.image_transport_config.public_image_base_url,
         )
+    
+    def _build_post_tool_visual_feedback_message_content(
+        self,
+        *,
+        overlay_image_path: Path | None,
+        composite_image_path: Path | None,
+        resolver: PublicImageResolver | None,
+        step_index: int,
+    ) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = []
+
+        header = (
+            f"This visual feedback was generated immediately after your previous tool call at step {step_index}.\n"
+            "Use it to evaluate the result of that exact tool call before choosing the next tool.\n\n"
+            "Color meaning:\n"
+            "- BLACK / dark contour = source target contour.\n"
+            "- ORANGE / colored stroke = your current drawing produced by your previous tool calls.\n"
+            "- The ORANGE stroke is not the target.\n"
+            "- Your goal is to make the ORANGE stroke overlap the BLACK contour.\n\n"
+            "Correction rule:\n"
+            "- If the ORANGE stroke is visibly far from the BLACK contour, do not continue forward.\n"
+            "- Use undo_last, rollback_to_step, or restart_path to correct the path.\n"
+            "- Do not call close_path or finish_trace unless the ORANGE stroke closely matches the BLACK contour.\n"
+            "- A closed path is not automatically correct; it must visually align with the BLACK contour.\n\n"
+            "Anchor rule:\n"
+            "- start_path points and curve_to endpoint p should lie on or very near the BLACK contour.\n"
+            "- Control points c1 and c2 may leave the contour, but endpoints should stay on the contour."
+        )
+
+        content.append({"type": "text", "text": header})
+
+        if overlay_image_path is not None:
+            content.extend(
+                self._build_image_parts(
+                    semantic_text=(
+                        "Overlay image after the previous tool call. "
+                        "It shows your current drawing only; it is not the target."
+                    ),
+                    image_path=overlay_image_path,
+                    resolver=resolver,
+                )
+            )
+
+        if composite_image_path is not None:
+            content.extend(
+                self._build_image_parts(
+                    semantic_text=(
+                        "Composite image after the previous tool call. "
+                        "BLACK is the source target contour. ORANGE is your current drawing. "
+                        "Compare them carefully before deciding the next tool call."
+                    ),
+                    image_path=composite_image_path,
+                    resolver=resolver,
+                )
+            )
+
+        return content
 
     def _build_round_image_message_content(
         self,
@@ -1586,7 +1688,15 @@ class FreePenToolRuntime:
         if composite_image_path is not None:
             content.extend(
                 self._build_image_parts(
-                    semantic_text="This is the current composite preview. Use it only as auxiliary context while the source image remains the ground truth target.",
+                    semantic_text="""The next image is the current composite preview.
+Color meaning:
+- BLACK pixels / dark contour = the source target contour.
+- ORANGE stroke = your current drawing generated by your previous tool calls.
+- The ORANGE stroke is not the target.
+- Your goal is to make the ORANGE stroke overlap the BLACK contour.
+- If the ORANGE stroke is visibly far from the BLACK contour, do not continue forward.
+- Use undo_last, rollback_to_step, or restart_path to correct it.
+- Do not call close_path or finish_trace unless the ORANGE stroke closely matches the BLACK contour.""",
                     image_path=composite_image_path,
                     resolver=resolver,
                 )

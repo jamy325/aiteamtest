@@ -22,10 +22,10 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
-class SiliconFlowVisionAdapter(VisionReviewAdapter):
-    model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+class GeminiOpenAICompatibleVisionAdapter(VisionReviewAdapter):
+    model: str = "gemini-3-flash-preview"
     api_key: str | None = None
-    base_url: str = "https://api.siliconflow.cn/v1"
+    base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     client: Any | None = None
     image_detail: str = "auto"
     max_image_bytes: int = MAX_REVIEW_IMAGE_BYTES
@@ -33,10 +33,8 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
     response_schema: dict[str, Any] | None = None
     response_schema_path: Path | None = None
 
-  #  print(f"Initialized SiliconFlowVisionAdapter with model={model}, base_url={base_url}, image_detail={image_detail}")
-
     def review(self, prompt: str, review_input: AIReviewInput) -> dict[str, Any]:
-        print(f"Initialized SiliconFlowVisionAdapter with model={self.model}, base_url={self.base_url}, image_detail={self.image_detail}")
+        print(f"review GeminiOpenAICompatibleVisionAdapter with model={self.model}, base_url={self.base_url}, image_detail={self.image_detail}")
 
         client = self._resolve_client()
         review_messages = get_review_messages(review_input)
@@ -63,13 +61,6 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
             "model": self.model,
             "messages": request_messages,
             "timeout": self.timeout_seconds,
-            "temperature":1,
-            "top_p":0.95,
-            "stream": False,
-            "extra_body": {
-                  "enable_thinking": False,
-                "thinking_budget": 1024
-            }
         }
 
         if tools:
@@ -89,14 +80,15 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                 }
 
         response = client.chat.completions.create(**kwargs_create)
+
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
-            raise ValueError("siliconflow provider response does not contain choices")
+            raise ValueError("gemini provider response does not contain choices")
 
         first_choice = choices[0]
         message = getattr(first_choice, "message", None)
         if message is None:
-            raise ValueError("siliconflow provider response does not contain a message")
+            raise ValueError("gemini provider response does not contain a message")
 
         tool_calls = getattr(message, "tool_calls", None)
         if tools:
@@ -138,8 +130,8 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
         # Fallback for non-tool-use cases (e.g., AI Review)
         content = getattr(message, "content", None)
         if isinstance(content, str) and content.strip():
-            return parse_json_response_text(content, provider_name="siliconflow")
-        raise ValueError("siliconflow provider response does not contain content or tool_calls")
+            return parse_json_response_text(content, provider_name="gemini")
+        raise ValueError("gemini provider response does not contain content or tool_calls")
 
     def _convert_message(self, message: dict[str, Any]) -> dict[str, Any]:
         role = str(message.get("role", "user")).strip().lower() or "user"
@@ -157,16 +149,16 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                 "tool_call_id": str(message["tool_call_id"]),
                 "content": str(message.get("content", "")),
             }
-        
+    
         content = message.get("content")
         if isinstance(content, str):
             return {"role": role, "content": [{"type": "text", "text": content}]}
         if not isinstance(content, list):
-            raise ValueError("SiliconFlow review_input.messages content must be a string or list")
+            raise ValueError("Gemini review_input.messages content must be a string or list")
         converted_parts: list[dict[str, Any]] = []
         for part in content:
             if not isinstance(part, dict):
-                raise ValueError("SiliconFlow review_input.messages parts must be dicts")
+                raise ValueError("Gemini review_input.messages parts must be dicts")
             part_type = str(part.get("type", "")).strip().lower()
             if part_type == "text":
                 converted_parts.append({"type": "text", "text": str(part.get("text", ""))})
@@ -174,7 +166,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
             if part_type == "image_url":
                 image_url = part.get("image_url")
                 if not isinstance(image_url, dict) or not isinstance(image_url.get("url"), str):
-                    raise ValueError("SiliconFlow image_url parts must contain image_url.url")
+                    raise ValueError("Gemini image_url parts must contain image_url.url")
                 converted_parts.append(
                     {
                         "type": "image_url",
@@ -185,17 +177,17 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
                     }
                 )
                 continue
-            raise ValueError(f"unsupported SiliconFlow message part type: {part_type}")
+            raise ValueError(f"unsupported Gemini message part type: {part_type}")
         return {"role": role, "content": converted_parts}
 
     def _resolve_client(self) -> Any:
         if self.client is not None:
             return self.client
 
-        api_key = self.api_key or resolve_api_key("SILICONFLOW_API_KEY")
+        api_key = self.api_key or resolve_api_key("GEMINI_API_KEY")
         if not api_key:
             raise ProviderConfigurationError(
-                "SiliconFlow provider requires SILICONFLOW_API_KEY or an explicit api_key"
+                "Gemini provider requires GEMINI_API_KEY or an explicit api_key"
             )
 
         try:
@@ -203,7 +195,7 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
             client_class = getattr(module, "OpenAI")
         except (ImportError, AttributeError) as exc:
             raise ProviderConfigurationError(
-                "SiliconFlow provider requires the optional `openai` package"
+                "Gemini provider requires the optional `openai` package"
             ) from exc
 
         return client_class(api_key=api_key, base_url=self.base_url)
@@ -212,18 +204,18 @@ class SiliconFlowVisionAdapter(VisionReviewAdapter):
     def _extract_message_content(response: Any) -> str:
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
-            raise ValueError("siliconflow provider response does not contain choices")
+            raise ValueError("gemini provider response does not contain choices")
 
         first_choice = choices[0]
         message = getattr(first_choice, "message", None)
         if message is None:
-            raise ValueError("siliconflow provider response does not contain a message")
+            raise ValueError("gemini provider response does not contain a message")
 
         content = getattr(message, "content", None)
         if isinstance(content, str) and content.strip():
             return content
 
-        raise ValueError("siliconflow provider response does not contain text content")
+        raise ValueError("gemini provider response does not contain text content")
 
 
-__all__ = ["SiliconFlowVisionAdapter"]
+__all__ = ["GeminiOpenAICompatibleVisionAdapter"]

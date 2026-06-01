@@ -564,7 +564,7 @@ def _build_free_pen_tool_adapter(*, ai_review_timeout_seconds: float | None = No
 
     if provider == "openai" and openai_key:
         adapter_kwargs["api_key"] = openai_key
-    elif provider == "gemini":
+    elif provider in {"gemini", "gemini_openai", "gemini-openai"}:
         resolved_gemini_key = gemini_key or google_key
         if resolved_gemini_key:
             adapter_kwargs["api_key"] = resolved_gemini_key
@@ -646,7 +646,7 @@ def _validate_provider_configuration(
         return
     if provider == "openai" and not openai_key:
         raise AIProviderConfigurationError("OpenAI provider requires OPENAI_API_KEY")
-    if provider == "gemini" and not (gemini_key or google_key):
+    if provider in {"gemini", "gemini_openai", "gemini-openai"}and not (gemini_key or google_key):
         raise AIProviderConfigurationError("Gemini provider requires GEMINI_API_KEY or GOOGLE_API_KEY")
     if provider == "siliconflow" and not siliconflow_key:
         raise AIProviderConfigurationError("SiliconFlow provider requires SILICONFLOW_API_KEY")
