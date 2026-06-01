@@ -171,6 +171,43 @@ def test_ai_free_pen_tool_schema_accepts_valid_tools_and_terminal_decisions() ->
             "reason": "restart",
         }
     )
+    validate_free_pen_tool_response(
+        {
+            "decision": "tool_call",
+            "tool_call": {
+                "tool": "move_anchor",
+                "anchor_id": "A2",
+                "x": 20,
+                "y": 30,
+            },
+            "reason": "move anchor",
+        }
+    )
+    validate_free_pen_tool_response(
+        {
+            "decision": "tool_call",
+            "tool_call": {
+                "tool": "move_handle",
+                "segment_id": "S1",
+                "handle": "c1",
+                "x": 24,
+                "y": 18,
+            },
+            "reason": "move handle",
+        }
+    )
+    validate_free_pen_tool_response(
+        {
+            "decision": "tool_call",
+            "tool_call": {
+                "tool": "set_segment_handles",
+                "segment_id": "S1",
+                "c1": [24, 10],
+                "c2": [36, 10],
+            },
+            "reason": "set handles",
+        }
+    )
     validate_free_pen_tool_response({"decision": "finish", "reason": "done"})
     validate_free_pen_tool_response({"decision": "stalled", "reason": "ambiguous"})
 

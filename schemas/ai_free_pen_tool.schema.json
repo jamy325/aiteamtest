@@ -116,6 +116,40 @@
             "x": { "type": "number" },
             "y": { "type": "number" }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "anchor_id", "x", "y"],
+          "properties": {
+            "tool": { "const": "move_anchor" },
+            "anchor_id": { "type": "string", "minLength": 1 },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "segment_id", "handle", "x", "y"],
+          "properties": {
+            "tool": { "const": "move_handle" },
+            "segment_id": { "type": "string", "minLength": 1 },
+            "handle": { "type": "string", "enum": ["c1", "c2"] },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "segment_id", "c1", "c2"],
+          "properties": {
+            "tool": { "const": "set_segment_handles" },
+            "segment_id": { "type": "string", "minLength": 1 },
+            "c1": { "$ref": "#/$defs/point2d" },
+            "c2": { "$ref": "#/$defs/point2d" }
+          }
         }
       ]
     }
