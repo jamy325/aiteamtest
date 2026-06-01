@@ -108,6 +108,7 @@ class FreePenToolPromptInput:
     last_action: str = ""
     allowed_next_actions: tuple[str, ...] = ()
     forbidden_next_actions: tuple[str, ...] = ()
+    source_contour_summary: dict[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         return asdict(self)
@@ -187,6 +188,14 @@ Escape rule:
 - If handle edits do not improve the current segment after several attempts, stop trying the same edit strategy.
 - Use move_anchor if the endpoint is wrong.
 - Use rollback_to_step or restart_path if the current local path cannot be repaired.
+
+Anchor validation rule:
+- start_path and restart_path must place the first anchor on or very near the BLACK source contour.
+- curve_to endpoint p must be on or very near the BLACK source contour.
+- line_to endpoint must be on or very near the BLACK source contour.
+- move_anchor must move the anchor onto the BLACK source contour.
+- Control handles c1/c2 may leave the contour, but anchor endpoints must stay on the contour.
+- If an anchor is far from the BLACK contour, do not adjust handles. Move the anchor or restart the path.
 
 Single tool rule:
 - Call exactly one function tool per response.

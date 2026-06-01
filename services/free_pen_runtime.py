@@ -483,6 +483,7 @@ class FreePenToolReviewInput:
     last_action: str = ""
     allowed_next_actions: tuple[str, ...] = ()
     forbidden_next_actions: tuple[str, ...] = ()
+    source_contour_summary: dict[str, Any] | None = None
     messages: tuple[dict[str, Any], ...] = ()
     session_state: dict[str, Any] | None = None
     image_transport: str = "base64"
@@ -512,6 +513,7 @@ class FreePenToolReviewInput:
             last_action=self.last_action,
             allowed_next_actions=self.allowed_next_actions,
             forbidden_next_actions=self.forbidden_next_actions,
+            source_contour_summary=self.source_contour_summary,
         )
 
 
@@ -755,6 +757,9 @@ class FreePenToolRuntime:
     _SEGMENT_ACCEPTABLE_P90_PX = 4.0
     _SEGMENT_ACCEPTABLE_MEAN_PX = 2.0
     _SEGMENT_ACCEPTABLE_MAX_PX = 8.0
+    _START_ANCHOR_TOLERANCE_PX = 10.0
+    _ENDPOINT_TOLERANCE_PX = 12.0
+    _MOVE_ANCHOR_TOLERANCE_PX = 10.0
     _MAX_REFINES_PER_SEGMENT = 3
     _MAX_WORSE_STREAK = 2
     _QUALITY_DELTA_EPSILON_PX = 0.5
@@ -768,7 +773,13 @@ class FreePenToolRuntime:
         if source_image is None:
             raise ValueError(f"failed to load source image: {source_image_path}")
         height, width = source_image.shape[:2]
-        source_distance_map = self._build_source_distance_map(source_image)
+        source_mask = self._build_source_mask(source_image)
+        source_distance_map = self._build_source_distance_map(source_mask)
+        source_contour_summary = self._build_source_contour_summary(
+            source_mask=source_mask,
+            width=width,
+            height=height,
+        )
         canvas = FreePenCanvasState(width=int(width), height=int(height))
         response_files: list[Path] = []
         overlay_files: list[Path] = []
@@ -811,6 +822,7 @@ class FreePenToolRuntime:
                 history=history,
                 current_feedback=current_feedback,
                 current_segment_context=current_segment_context,
+                source_contour_summary=source_contour_summary,
             )
 
             if step_index == 1:
@@ -852,6 +864,7 @@ class FreePenToolRuntime:
                 last_action=str(session_state["last_action"]),
                 allowed_next_actions=tuple(session_state["allowed_next_actions"]),
                 forbidden_next_actions=tuple(session_state["forbidden_next_actions"]),
+                source_contour_summary=session_state.get("source_contour_summary"),
                 session_state=session_state,
                 image_transport=self.image_transport_config.mode,
                 public_image_base_url=self.image_transport_config.public_image_base_url,
@@ -948,6 +961,7 @@ class FreePenToolRuntime:
                         successful_drawing_step_count=len(successful_drawing_tool_calls),
                         rollback_count=rollback_count,
                         current_segment_context=current_segment_context,
+                        source_distance_map=source_distance_map,
                     )
                     warnings = list(preflight_result["warnings"])
                     if not preflight_result["success"]:
@@ -1100,6 +1114,7 @@ class FreePenToolRuntime:
                             history=history,
                             current_feedback=current_feedback,
                             current_segment_context=current_segment_context,
+                            source_contour_summary=source_contour_summary,
                         )
                         tool_result_content = {
                             **execution_result,
@@ -1112,6 +1127,7 @@ class FreePenToolRuntime:
                             "current_segment_focus": current_segment_context["focus"],
                             "current_segment_status": current_segment_context["status"],
                             "quality_metrics": current_segment_context["quality_metrics"],
+                            "anchor_quality": current_segment_context["anchor_quality"],
                             "quality_delta": current_segment_context["quality_delta"],
                             "refinement_summary": current_segment_context["refinement_summary"],
                             "allowed_next_actions": session_state_after["allowed_next_actions"],
@@ -1233,6 +1249,7 @@ class FreePenToolRuntime:
                     "current_segment_focus": current_segment_context["focus"],
                 "current_segment_status": current_segment_context["status"],
                 "quality_metrics": current_segment_context["quality_metrics"],
+                "anchor_quality": current_segment_context["anchor_quality"],
                 "quality_delta": current_segment_context["quality_delta"],
                 "refinement_summary": current_segment_context["refinement_summary"],
                 "reason": final_reason,
@@ -1377,6 +1394,7 @@ class FreePenToolRuntime:
         successful_drawing_step_count: int,
         rollback_count: int,
         current_segment_context: dict[str, Any],
+        source_distance_map: np.ndarray | None,
     ) -> dict[str, Any]:
         tool = str(tool_call["tool"])
         warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
@@ -1426,6 +1444,87 @@ class FreePenToolRuntime:
             warnings.append(self._warning("path_already_open", "A path is already open. Use restart_path, rollback_to_step, or close_path first."))
         if tool == "line_to" and any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
             reject_codes.add("line_to_used_on_smooth_curve_hint")
+        contour_distance_checks: list[tuple[str, float, float, float]] = []
+        if tool in {"start_path", "restart_path"}:
+            distance = self._distance_to_source_contour(
+                source_distance_map=source_distance_map,
+                x=tool_call["x"],
+                y=tool_call["y"],
+                width=canvas.width,
+                height=canvas.height,
+            )
+            if distance is None:
+                warnings.append(self._warning("source_contour_validation_unavailable", "Source contour distance validation is unavailable for the proposed start anchor."))
+            else:
+                contour_distance_checks.append(("anchor_start", float(tool_call["x"]), float(tool_call["y"]), distance))
+                if distance > self._START_ANCHOR_TOLERANCE_PX:
+                    reject_codes.add("anchor_not_on_source_contour")
+                    warnings.append(
+                        self._warning(
+                            "anchor_not_on_source_contour",
+                            f"{tool} point [{float(tool_call['x']):.2f},{float(tool_call['y']):.2f}] is {distance:.2f}px away from the black source contour. Choose a point on the black contour.",
+                        )
+                    )
+        elif tool == "curve_to":
+            distance = self._distance_to_source_contour(
+                source_distance_map=source_distance_map,
+                x=tool_call["p"][0],
+                y=tool_call["p"][1],
+                width=canvas.width,
+                height=canvas.height,
+            )
+            if distance is None:
+                warnings.append(self._warning("source_contour_validation_unavailable", "Source contour distance validation is unavailable for the proposed endpoint anchor."))
+            else:
+                contour_distance_checks.append(("endpoint", float(tool_call["p"][0]), float(tool_call["p"][1]), distance))
+                if distance > self._ENDPOINT_TOLERANCE_PX:
+                    reject_codes.add("endpoint_not_on_source_contour")
+                    warnings.append(
+                        self._warning(
+                            "endpoint_not_on_source_contour",
+                            f"curve_to endpoint p=[{float(tool_call['p'][0]):.2f},{float(tool_call['p'][1]):.2f}] is {distance:.2f}px away from the black source contour. The endpoint anchor must lie on or near the contour.",
+                        )
+                    )
+        elif tool == "line_to":
+            distance = self._distance_to_source_contour(
+                source_distance_map=source_distance_map,
+                x=tool_call["x"],
+                y=tool_call["y"],
+                width=canvas.width,
+                height=canvas.height,
+            )
+            if distance is None:
+                warnings.append(self._warning("source_contour_validation_unavailable", "Source contour distance validation is unavailable for the proposed endpoint anchor."))
+            else:
+                contour_distance_checks.append(("endpoint", float(tool_call["x"]), float(tool_call["y"]), distance))
+                if distance > self._ENDPOINT_TOLERANCE_PX:
+                    reject_codes.add("endpoint_not_on_source_contour")
+                    warnings.append(
+                        self._warning(
+                            "endpoint_not_on_source_contour",
+                            f"line_to endpoint [{float(tool_call['x']):.2f},{float(tool_call['y']):.2f}] is {distance:.2f}px away from the black source contour. The endpoint anchor must lie on or near the contour.",
+                        )
+                    )
+        elif tool == "move_anchor":
+            distance = self._distance_to_source_contour(
+                source_distance_map=source_distance_map,
+                x=tool_call["x"],
+                y=tool_call["y"],
+                width=canvas.width,
+                height=canvas.height,
+            )
+            if distance is None:
+                warnings.append(self._warning("source_contour_validation_unavailable", "Source contour distance validation is unavailable for the proposed anchor move."))
+            else:
+                contour_distance_checks.append(("anchor_move", float(tool_call["x"]), float(tool_call["y"]), distance))
+                if distance > self._MOVE_ANCHOR_TOLERANCE_PX:
+                    reject_codes.add("anchor_not_on_source_contour")
+                    warnings.append(
+                        self._warning(
+                            "anchor_not_on_source_contour",
+                            f"move_anchor target [{float(tool_call['x']):.2f},{float(tool_call['y']):.2f}] is {distance:.2f}px away from the black source contour. Move the anchor onto the black contour.",
+                        )
+                    )
         if (
             current_segment_context["status"].get("may_advance_to_next_segment") is False
             and tool in self._ADVANCING_TOOLS
@@ -1446,6 +1545,17 @@ class FreePenToolRuntime:
                 self._warning(
                     "refinement_limit_reached",
                     "The current segment did not become acceptable after repeated handle edits. Change strategy instead of continuing handle edits.",
+                )
+            )
+        if (
+            current_segment_context["status"].get("status") == "needs_anchor_correction"
+            and tool in {"set_segment_handles", "move_handle"}
+        ):
+            reject_codes.add("anchor_needs_correction")
+            warnings.append(
+                self._warning(
+                    "anchor_needs_correction",
+                    "One or more anchors are far from the black source contour. Do not adjust handles until the anchor is corrected.",
                 )
             )
         if tool == "close_path" and canvas.path_open:
@@ -1520,12 +1630,22 @@ class FreePenToolRuntime:
             elif "refinement_limit_reached" in reject_codes:
                 runtime_description = "Rejected repeated handle refinement because the current segment did not improve after several attempts."
                 quality_summary = "The current segment did not become acceptable after repeated handle edits. Change strategy instead of continuing handle edits."
+            elif "anchor_needs_correction" in reject_codes:
+                runtime_description = "Rejected handle editing because one or more anchors are too far from the black source contour."
+                quality_summary = "An anchor is far from the black source contour. Move the anchor or restart the path before adjusting handles."
+            elif "anchor_not_on_source_contour" in reject_codes:
+                runtime_description = f"Rejected {tool} because the proposed anchor is too far from the measured black source contour."
+                quality_summary = "Anchor points must lie on or very near the black source contour."
+            elif "endpoint_not_on_source_contour" in reject_codes:
+                runtime_description = f"Rejected {tool} because the proposed endpoint anchor is too far from the measured black source contour."
+                quality_summary = "Endpoint anchors must lie on or very near the black source contour."
             return {
                 "success": False,
                 "rejected": True,
                 "warnings": warnings,
                 "runtime_description": runtime_description,
                 "quality_summary": quality_summary,
+                "contour_distance_checks": contour_distance_checks,
             }
         return {
             "success": True,
@@ -1533,6 +1653,7 @@ class FreePenToolRuntime:
             "warnings": warnings,
             "runtime_description": f"Accepted {tool} for execution.",
             "quality_summary": "",
+            "contour_distance_checks": contour_distance_checks,
         }
 
     def _execute_tool_call(
@@ -1790,6 +1911,15 @@ class FreePenToolRuntime:
         if any(warning["code"] == "refinement_limit_reached" for warning in warnings):
             feedback.append("Do not keep adjusting the same handles.")
             feedback.append("Use move_anchor if an anchor is wrong, or use undo_last, rollback_to_step, or restart_path if the current segment cannot be repaired.")
+        if any(warning["code"] == "anchor_not_on_source_contour" for warning in warnings):
+            feedback.append("The proposed anchor is not on the black contour.")
+            feedback.append("Do not use empty background coordinates. Choose a start_path or move_anchor point on the measured black source contour.")
+        if any(warning["code"] == "endpoint_not_on_source_contour" for warning in warnings):
+            feedback.append("The proposed endpoint is not on the black contour.")
+            feedback.append("Control handles may leave the contour, but endpoints must stay on it.")
+        if any(warning["code"] == "anchor_needs_correction" for warning in warnings):
+            feedback.append("An anchor is far from the black contour.")
+            feedback.append("Do not adjust handles. Use move_anchor, undo_last, rollback_to_step, or restart_path.")
         if any(warning["code"] == "out_of_bounds_coordinate" for warning in warnings):
             feedback.append("The previous tool call was rejected because one or more coordinates were outside the canvas bounds.")
             feedback.append("Do not continue to the next segment. Retry the same segment with in-bounds coordinates.")
@@ -1963,7 +2093,7 @@ class FreePenToolRuntime:
                     segment["editable_with_handles"] = True
         return geometry
 
-    def _build_source_distance_map(self, source_image: np.ndarray) -> np.ndarray | None:
+    def _build_source_mask(self, source_image: np.ndarray) -> np.ndarray | None:
         try:
             if source_image.ndim == 2:
                 gray = source_image
@@ -1971,13 +2101,78 @@ class FreePenToolRuntime:
                 gray = cv2.cvtColor(source_image, cv2.COLOR_BGRA2GRAY)
             else:
                 gray = cv2.cvtColor(source_image, cv2.COLOR_BGR2GRAY)
-            source_mask = (gray < 128).astype(np.uint8)
+            source_mask = (gray < 128)
             if int(np.count_nonzero(source_mask)) == 0:
+                return None
+            return source_mask.astype(np.uint8)
+        except Exception:
+            return None
+
+    def _build_source_distance_map(self, source_mask: np.ndarray | None) -> np.ndarray | None:
+        try:
+            if source_mask is None or int(np.count_nonzero(source_mask)) == 0:
                 return None
             distance_input = np.where(source_mask > 0, 0, 255).astype(np.uint8)
             return cv2.distanceTransform(distance_input, cv2.DIST_L2, 3)
         except Exception:
             return None
+
+    def _build_source_contour_summary(
+        self,
+        *,
+        source_mask: np.ndarray | None,
+        width: int,
+        height: int,
+    ) -> dict[str, Any]:
+        if source_mask is None or int(np.count_nonzero(source_mask)) == 0:
+            return {
+                "canvas_width": int(width),
+                "canvas_height": int(height),
+                "unavailable_reason": "source_mask_unavailable",
+            }
+        ys, xs = np.nonzero(source_mask)
+        left_index = int(np.argmin(xs))
+        right_index = int(np.argmax(xs))
+        top_index = int(np.argmin(ys))
+        bottom_index = int(np.argmax(ys))
+        return {
+            "canvas_width": int(width),
+            "canvas_height": int(height),
+            "bbox": {
+                "x_min": int(np.min(xs)),
+                "y_min": int(np.min(ys)),
+                "x_max": int(np.max(xs)),
+                "y_max": int(np.max(ys)),
+            },
+            "anchors": {
+                "leftmost": [int(xs[left_index]), int(ys[left_index])],
+                "topmost": [int(xs[top_index]), int(ys[top_index])],
+                "rightmost": [int(xs[right_index]), int(ys[right_index])],
+                "bottommost": [int(xs[bottom_index]), int(ys[bottom_index])],
+            },
+            "note": "These coordinates are measured from black source pixels in original image_px coordinates. Prefer these anchors over visual guessing.",
+        }
+
+    def _distance_to_source_contour(
+        self,
+        *,
+        source_distance_map: np.ndarray | None,
+        x: Any,
+        y: Any,
+        width: int,
+        height: int,
+    ) -> float | None:
+        if source_distance_map is None:
+            return None
+        numeric_x = self._finite_number_or_none(x)
+        numeric_y = self._finite_number_or_none(y)
+        if numeric_x is None or numeric_y is None:
+            return None
+        if numeric_x < 0.0 or numeric_x >= float(width) or numeric_y < 0.0 or numeric_y >= float(height):
+            return None
+        sample_x = int(np.clip(round(numeric_x), 0, width - 1))
+        sample_y = int(np.clip(round(numeric_y), 0, height - 1))
+        return float(source_distance_map[sample_y, sample_x])
 
     def _build_current_segment_context(
         self,
@@ -1998,6 +2193,13 @@ class FreePenToolRuntime:
             source_distance_map=source_distance_map,
             focus=focus,
         )
+        anchor_quality = self._build_anchor_quality(
+            editable_geometry=editable_geometry,
+            source_distance_map=source_distance_map,
+            focus=focus,
+            width=canvas.width,
+            height=canvas.height,
+        )
         refinement_state = self._segment_refinement_state_for_focus(
             focus=focus,
             segment_refinement=segment_refinement,
@@ -2011,6 +2213,7 @@ class FreePenToolRuntime:
             focus=focus,
             metrics=quality_metrics,
             refinement_state=refinement_state,
+            anchor_quality=anchor_quality,
         )
         refinement_summary = self._build_refinement_summary(
             focus=focus,
@@ -2022,6 +2225,7 @@ class FreePenToolRuntime:
             "focus": focus,
             "status": status,
             "quality_metrics": quality_metrics,
+            "anchor_quality": anchor_quality,
             "quality_delta": quality_delta,
             "refinement_summary": refinement_summary,
         }
@@ -2136,18 +2340,103 @@ class FreePenToolRuntime:
             }
         }
 
+    def _build_anchor_quality(
+        self,
+        *,
+        editable_geometry: dict[str, Any],
+        source_distance_map: np.ndarray | None,
+        focus: dict[str, Any],
+        width: int,
+        height: int,
+    ) -> dict[str, Any]:
+        segment_id = focus.get("segment_id")
+        if segment_id is None:
+            return {"current_segment": {"segment_id": None, "unavailable_reason": "no_current_segment"}}
+        segments = {
+            str(segment["id"]): segment
+            for path in editable_geometry["paths"]
+            for segment in path["segments"]
+        }
+        anchors = {
+            str(anchor["id"]): anchor
+            for path in editable_geometry["paths"]
+            for anchor in path["anchors"]
+        }
+        segment = segments.get(str(segment_id))
+        if segment is None:
+            return {"current_segment": {"segment_id": segment_id, "unavailable_reason": "segment_not_found"}}
+        from_anchor = anchors.get(str(segment["from_anchor"]))
+        to_anchor = anchors.get(str(segment["to_anchor"]))
+        if from_anchor is None or to_anchor is None:
+            return {"current_segment": {"segment_id": segment_id, "unavailable_reason": "anchor_not_found"}}
+        return {
+            "current_segment": {
+                "segment_id": segment_id,
+                "from_anchor": self._anchor_quality_payload(
+                    anchor=from_anchor,
+                    source_distance_map=source_distance_map,
+                    width=width,
+                    height=height,
+                ),
+                "to_anchor": self._anchor_quality_payload(
+                    anchor=to_anchor,
+                    source_distance_map=source_distance_map,
+                    width=width,
+                    height=height,
+                ),
+            }
+        }
+
+    def _anchor_quality_payload(
+        self,
+        *,
+        anchor: dict[str, Any],
+        source_distance_map: np.ndarray | None,
+        width: int,
+        height: int,
+    ) -> dict[str, Any]:
+        distance = self._distance_to_source_contour(
+            source_distance_map=source_distance_map,
+            x=anchor["p"][0],
+            y=anchor["p"][1],
+            width=width,
+            height=height,
+        )
+        if distance is None:
+            status = "unknown"
+        elif distance <= 10.0:
+            status = "ok"
+        elif distance <= 20.0:
+            status = "warning"
+        else:
+            status = "bad"
+        payload = {
+            "id": str(anchor["id"]),
+            "p": list(anchor["p"]),
+            "status": status,
+        }
+        if distance is None:
+            payload["unavailable_reason"] = "source_contour_validation_unavailable"
+        else:
+            payload["distance_to_source_px"] = float(distance)
+        return payload
+
     def _build_current_segment_status(
         self,
         *,
         focus: dict[str, Any],
         metrics: dict[str, Any],
         refinement_state: dict[str, Any] | None,
+        anchor_quality: dict[str, Any],
     ) -> dict[str, Any]:
         segment_id = focus.get("segment_id")
         metric_payload = metrics.get("current_segment", {})
         unavailable_reason = metric_payload.get("unavailable_reason")
         refine_count = int((refinement_state or {}).get("refine_count", 0))
         worse_streak = int((refinement_state or {}).get("worse_streak", 0))
+        anchor_payload = anchor_quality.get("current_segment", {})
+        from_anchor_status = (anchor_payload.get("from_anchor") or {}).get("status")
+        to_anchor_status = (anchor_payload.get("to_anchor") or {}).get("status")
         refinement_limit_reached = (
             refine_count >= self._MAX_REFINES_PER_SEGMENT
             or worse_streak >= self._MAX_WORSE_STREAK
@@ -2159,6 +2448,16 @@ class FreePenToolRuntime:
                 "reason": "No current drawable segment exists yet.",
                 "recommended_next_tools": ["start_path", "curve_to"],
                 "may_advance_to_next_segment": True,
+                "refinement_limit_reached": False,
+                "may_continue_handle_refinement": False,
+            }
+        if from_anchor_status == "bad" or to_anchor_status == "bad":
+            return {
+                "segment_id": segment_id,
+                "status": "needs_anchor_correction",
+                "reason": "One or more anchors are far from the black source contour. This segment cannot be fixed reliably by handle edits.",
+                "recommended_next_tools": ["move_anchor", "undo_last", "rollback_to_step", "restart_path", "inspect_history", "stalled"],
+                "may_advance_to_next_segment": False,
                 "refinement_limit_reached": False,
                 "may_continue_handle_refinement": False,
             }
@@ -2509,6 +2808,7 @@ class FreePenToolRuntime:
         history: list[dict[str, Any]],
         current_feedback: list[str],
         current_segment_context: dict[str, Any],
+        source_contour_summary: dict[str, Any],
     ) -> dict[str, Any]:
         closed_path_count = sum(1 for path in canvas.paths if path.closed)
         last_action = str(history[-1]["runtime_description"]) if history else "none"
@@ -2519,6 +2819,8 @@ class FreePenToolRuntime:
             if current_segment_status.get("may_advance_to_next_segment") is False and current_segment_focus.get("segment_id"):
                 if current_segment_status.get("refinement_limit_reached"):
                     current_goal = "The newest segment still cannot be repaired with repeated handle edits. Change strategy before continuing."
+                elif current_segment_status.get("status") == "needs_anchor_correction":
+                    current_goal = "The newest segment has an anchor far from the source contour. Correct the anchor before continuing."
                 else:
                     current_goal = "Refine the newest segment before drawing the next segment."
                 allowed_next_actions = tuple(current_segment_status.get("recommended_next_tools") or ())
@@ -2560,6 +2862,7 @@ class FreePenToolRuntime:
             "current_feedback": list(current_feedback),
             "current_segment_focus": current_segment_focus,
             "current_segment_status": current_segment_status,
+            "source_contour_summary": source_contour_summary,
         }
 
     def _write_round_composite_context(
@@ -2671,6 +2974,12 @@ class FreePenToolRuntime:
     ) -> str:
         if round_status == "rejected_action" and any(warning["code"] == "line_to_used_on_smooth_curve_hint" for warning in warnings):
             return "Use curve_to with c1, c2, and p."
+        if round_status == "rejected_action" and any(warning["code"] == "anchor_not_on_source_contour" for warning in warnings):
+            return "The proposed start point is not on the black contour. Choose a new start_path or restart_path point on the measured black source contour. Do not use empty background coordinates."
+        if round_status == "rejected_action" and any(warning["code"] == "endpoint_not_on_source_contour" for warning in warnings):
+            return "The proposed endpoint is not on the black contour. Pick an endpoint anchor on the black source contour. Control handles may leave the contour, but endpoints must stay on it."
+        if round_status == "rejected_action" and any(warning["code"] == "anchor_needs_correction" for warning in warnings):
+            return "The current segment has an anchor far from the black contour. Do not adjust handles. Use move_anchor to place the bad anchor on the black contour, or use undo_last, rollback_to_step, or restart_path if the path started wrong."
         if round_status == "rejected_action" and any(warning["code"] == "refinement_limit_reached" for warning in warnings):
             best_p90 = current_segment_context.get("refinement_summary", {}).get("best_quality", {}).get("path_to_source_p90_px")
             if best_p90 is not None:
@@ -2691,6 +3000,8 @@ class FreePenToolRuntime:
             return "Tracing is complete."
         if final_decision == "stalled":
             return "Stop the tracing loop."
+        if current_segment_context["status"].get("status") == "needs_anchor_correction":
+            return "The current segment has an anchor far from the black contour. Do not adjust handles. Use move_anchor to place the bad anchor on the black contour, or use undo_last, rollback_to_step, or restart_path if the path started wrong."
         if current_segment_context["status"].get("may_advance_to_next_segment") is False and current_segment_context["focus"].get("segment_id"):
             if current_segment_context["status"].get("refinement_limit_reached"):
                 best_p90 = current_segment_context.get("refinement_summary", {}).get("best_quality", {}).get("path_to_source_p90_px")

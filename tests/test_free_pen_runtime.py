@@ -1002,6 +1002,7 @@ def test_refinement_limit_blocks_more_handle_edits(tmp_path: Path) -> None:
             "quality_delta": {},
             "refinement_summary": {},
         },
+        source_distance_map=None,
     )
     warning_codes = {warning["code"] for warning in preflight["warnings"]}
     assert preflight["success"] is False
@@ -1035,6 +1036,7 @@ def test_refinement_limit_allows_move_anchor(tmp_path: Path) -> None:
             "quality_delta": {},
             "refinement_summary": {},
         },
+        source_distance_map=None,
     )
     assert preflight["success"] is True
 
@@ -1065,6 +1067,7 @@ def test_refinement_limit_allows_restart_path(tmp_path: Path) -> None:
             "quality_delta": {},
             "refinement_summary": {},
         },
+        source_distance_map=None,
     )
     assert preflight["success"] is True
 
@@ -1095,8 +1098,158 @@ def test_current_segment_needs_refinement_allows_restart_path(tmp_path: Path) ->
             "quality_delta": {},
             "refinement_summary": {},
         },
+        source_distance_map=None,
     )
     assert preflight["success"] is True
+
+
+def test_start_path_rejects_point_far_from_source_contour(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    source_image = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    source_distance_map = runtime._build_source_distance_map(runtime._build_source_mask(source_image))
+    canvas = FreePenCanvasState(width=96, height=72)
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "start_path", "x": 90, "y": 70},
+        ai_reason="start",
+        canvas=canvas,
+        successful_drawing_step_count=0,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": {"paths": []},
+            "focus": {"segment_id": None},
+            "status": {"status": "unknown", "may_advance_to_next_segment": True},
+            "quality_metrics": {},
+            "anchor_quality": {},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+        source_distance_map=source_distance_map,
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+    assert preflight["success"] is False
+    assert "anchor_not_on_source_contour" in warning_codes
+
+
+def test_restart_path_rejects_point_far_from_source_contour(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    source_image = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    source_distance_map = runtime._build_source_distance_map(runtime._build_source_mask(source_image))
+    canvas = FreePenCanvasState(width=96, height=72)
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "restart_path", "x": 90, "y": 70},
+        ai_reason="restart",
+        canvas=canvas,
+        successful_drawing_step_count=0,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": {"paths": []},
+            "focus": {"segment_id": None},
+            "status": {"status": "unknown", "may_advance_to_next_segment": True},
+            "quality_metrics": {},
+            "anchor_quality": {},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+        source_distance_map=source_distance_map,
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+    assert preflight["success"] is False
+    assert "anchor_not_on_source_contour" in warning_codes
+
+
+def test_curve_to_rejects_endpoint_far_from_source_contour(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    source_image = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    source_distance_map = runtime._build_source_distance_map(runtime._build_source_mask(source_image))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "curve_to", "c1": [40, 10], "c2": [60, 10], "p": [90, 70]},
+        ai_reason="curve",
+        canvas=canvas,
+        successful_drawing_step_count=1,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": None},
+            "status": {"status": "unknown", "may_advance_to_next_segment": True},
+            "quality_metrics": {},
+            "anchor_quality": {},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+        source_distance_map=source_distance_map,
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+    assert preflight["success"] is False
+    assert "endpoint_not_on_source_contour" in warning_codes
+
+
+def test_curve_to_allows_control_points_far_from_contour(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    source_image = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    source_distance_map = runtime._build_source_distance_map(runtime._build_source_mask(source_image))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "curve_to", "c1": [0, 0], "c2": [95, 0], "p": [84, 18]},
+        ai_reason="curve",
+        canvas=canvas,
+        successful_drawing_step_count=1,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": None},
+            "status": {"status": "unknown", "may_advance_to_next_segment": True},
+            "quality_metrics": {},
+            "anchor_quality": {},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+        source_distance_map=source_distance_map,
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+    assert preflight["success"] is True
+    assert "endpoint_not_on_source_contour" not in warning_codes
+
+
+def test_move_anchor_rejects_target_far_from_source_contour(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    source_image = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    source_distance_map = runtime._build_source_distance_map(runtime._build_source_mask(source_image))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "move_anchor", "anchor_id": "A2", "x": 90, "y": 70},
+        ai_reason="anchor move",
+        canvas=canvas,
+        successful_drawing_step_count=2,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": "S1", "type": "cubic"},
+            "status": {"status": "acceptable", "may_advance_to_next_segment": True},
+            "quality_metrics": {},
+            "anchor_quality": {},
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+        source_distance_map=source_distance_map,
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+    assert preflight["success"] is False
+    assert "anchor_not_on_source_contour" in warning_codes
 
 
 def test_reject_next_hint_mentions_retry_same_segment(tmp_path: Path) -> None:
@@ -1430,6 +1583,15 @@ def test_session_state_sent_each_round(tmp_path: Path) -> None:
     assert "allowed_next_actions" in session_state
     assert "forbidden_next_actions" in session_state
     assert "current_goal" in session_state
+    contour_summary = session_state["source_contour_summary"]
+    assert contour_summary["canvas_width"] == 96
+    assert contour_summary["canvas_height"] == 72
+    assert "bbox" in contour_summary
+    assert "anchors" in contour_summary
+    assert "leftmost" in contour_summary["anchors"]
+    assert "topmost" in contour_summary["anchors"]
+    assert "rightmost" in contour_summary["anchors"]
+    assert "bottommost" in contour_summary["anchors"]
 
 
 def test_base64_transport_still_available(tmp_path: Path) -> None:
@@ -1739,6 +1901,38 @@ def test_tool_result_contains_quality_metrics_for_current_segment(tmp_path: Path
     assert "path_to_source_mean_px" in current_segment or "unavailable_reason" in current_segment
 
 
+def test_tool_result_contains_anchor_quality(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "anchor_quality_out"
+    response_path = tmp_path / "anchor_quality_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[1]["content"])
+    anchor_quality = parsed_tool_content["anchor_quality"]["current_segment"]
+    assert anchor_quality["segment_id"] == "S1"
+    assert "from_anchor" in anchor_quality
+    assert "to_anchor" in anchor_quality
+
+
 def test_tool_result_contains_refinement_summary(tmp_path: Path) -> None:
     input_path = tmp_path / "source.png"
     _write_source_image(input_path)
@@ -1859,6 +2053,59 @@ def test_visual_feedback_contains_handle_composite_or_handle_annotations(tmp_pat
     assert len(feedback_text) < 1200
 
 
+def test_bad_anchor_status_disables_handle_editing(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    status = runtime._build_current_segment_status(
+        focus={"segment_id": "S1", "type": "cubic"},
+        metrics={"current_segment": {"segment_id": "S1", "path_to_source_mean_px": 1.0, "path_to_source_max_px": 2.0, "path_to_source_p90_px": 2.0}},
+        refinement_state=None,
+        anchor_quality={
+            "current_segment": {
+                "segment_id": "S1",
+                "from_anchor": {"id": "A1", "p": [24, 436], "distance_to_source_px": 125.13, "status": "bad"},
+                "to_anchor": {"id": "A2", "p": [45, 203], "distance_to_source_px": 2.2, "status": "ok"},
+            }
+        },
+    )
+    assert status["status"] == "needs_anchor_correction"
+    assert "set_segment_handles" not in status["recommended_next_tools"]
+    assert "move_handle" not in status["recommended_next_tools"]
+    assert "move_anchor" in status["recommended_next_tools"]
+    assert "restart_path" in status["recommended_next_tools"]
+
+
+def test_next_hint_mentions_move_anchor_when_anchor_bad(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    next_hint = runtime._next_hint(
+        final_decision="tool_call",
+        round_status="tool_applied",
+        warnings=[],
+        session_state={"allowed_next_actions": ["move_anchor", "restart_path"]},
+        current_segment_context={
+            "focus": {"segment_id": "S1"},
+            "status": {
+                "segment_id": "S1",
+                "status": "needs_anchor_correction",
+                "may_advance_to_next_segment": False,
+                "refinement_limit_reached": False,
+            },
+            "anchor_quality": {
+                "current_segment": {
+                    "segment_id": "S1",
+                    "from_anchor": {"status": "bad"},
+                    "to_anchor": {"status": "ok"},
+                }
+            },
+            "quality_delta": {},
+            "refinement_summary": {},
+        },
+    ).lower()
+    assert "anchor far from the black contour" in next_hint
+    assert "do not adjust handles" in next_hint
+    assert "move_anchor" in next_hint
+    assert "restart_path" in next_hint
+
+
 def test_system_prompt_has_no_decision_tool_call_json_protocol() -> None:
     from services.free_pen_prompt import build_free_pen_tool_system_prompt
 
@@ -1911,3 +2158,13 @@ def test_system_prompt_mentions_local_refinement_failure_rule() -> None:
     assert "change strategy" in system_prompt.lower()
     assert "rollback_to_step" in system_prompt
     assert "restart_path" in system_prompt
+
+
+def test_system_prompt_mentions_anchor_validation_rule() -> None:
+    from services.free_pen_prompt import build_free_pen_tool_system_prompt
+
+    system_prompt = build_free_pen_tool_system_prompt()
+    assert "start_path and restart_path" in system_prompt
+    assert "curve_to endpoint p" in system_prompt
+    assert "Control handles c1/c2 may leave the contour" in system_prompt
+    assert "If an anchor is far from the BLACK contour, do not adjust handles" in system_prompt
