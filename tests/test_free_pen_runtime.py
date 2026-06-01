@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from services.ai_adapters import create_vision_adapter
+from services.free_pen_canvas import FreePenCanvasState
 from services.free_pen_prompt import build_free_pen_prompt
 from services.free_pen_runtime import (
     FileSequenceFreePenAdapter,
@@ -299,6 +300,73 @@ def test_free_pen_tool_runtime_sequence_generates_overlay_paths_and_trace(tmp_pa
     assert paths_payload["paths"][0]["segments"][1]["type"] == "cubic"
 
 
+def test_editable_geometry_exports_anchor_and_segment_ids() -> None:
+    canvas = FreePenCanvasState(width=220, height=220)
+    canvas.apply_tool_call({"tool": "start_path", "x": 33, "y": 91})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [33, 73], "c2": [55, 58], "p": [85, 58]})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [145, 58], "c2": [187, 90], "p": [187, 129]})
+
+    geometry = canvas.editable_geometry()
+
+    assert geometry["paths"][0]["anchors"] == [
+        {"id": "A1", "p": [33.0, 91.0]},
+        {"id": "A2", "p": [85.0, 58.0]},
+        {"id": "A3", "p": [187.0, 129.0]},
+    ]
+    assert geometry["paths"][0]["segments"] == [
+        {
+            "id": "S1",
+            "type": "cubic",
+            "from_anchor": "A1",
+            "to_anchor": "A2",
+            "c1": [33.0, 73.0],
+            "c2": [55.0, 58.0],
+        },
+        {
+            "id": "S2",
+            "type": "cubic",
+            "from_anchor": "A2",
+            "to_anchor": "A3",
+            "c1": [145.0, 58.0],
+            "c2": [187.0, 90.0],
+        },
+    ]
+
+
+def test_execute_move_anchor_updates_path_endpoint() -> None:
+    canvas = FreePenCanvasState(width=220, height=220)
+    canvas.apply_tool_call({"tool": "start_path", "x": 33, "y": 91})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [33, 73], "c2": [55, 58], "p": [85, 58]})
+
+    canvas.apply_tool_call({"tool": "move_anchor", "anchor_id": "A2", "x": 88, "y": 60})
+
+    assert canvas.paths[0].segments[1]["p"] == [88.0, 60.0]
+    assert canvas.current_point == (88.0, 60.0)
+
+
+def test_execute_move_handle_updates_cubic_control_point() -> None:
+    canvas = FreePenCanvasState(width=220, height=220)
+    canvas.apply_tool_call({"tool": "start_path", "x": 33, "y": 91})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [33, 73], "c2": [55, 58], "p": [85, 58]})
+
+    canvas.apply_tool_call({"tool": "move_handle", "segment_id": "S1", "handle": "c1", "x": 40, "y": 70})
+
+    assert canvas.paths[0].segments[1]["c1"] == [40.0, 70.0]
+
+
+def test_execute_set_segment_handles_updates_both_handles() -> None:
+    canvas = FreePenCanvasState(width=220, height=220)
+    canvas.apply_tool_call({"tool": "start_path", "x": 33, "y": 91})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [33, 73], "c2": [55, 58], "p": [85, 58]})
+
+    canvas.apply_tool_call(
+        {"tool": "set_segment_handles", "segment_id": "S1", "c1": [44, 72], "c2": [66, 60]}
+    )
+
+    assert canvas.paths[0].segments[1]["c1"] == [44.0, 72.0]
+    assert canvas.paths[0].segments[1]["c2"] == [66.0, 60.0]
+
+
 def test_free_pen_tool_runtime_records_invalid_tool_call_without_crashing(tmp_path: Path) -> None:
     input_path = tmp_path / "source.png"
     _write_source_image(input_path)
@@ -328,9 +396,9 @@ def test_free_pen_tool_runtime_records_invalid_tool_call_without_crashing(tmp_pa
 
 
 def test_free_pen_tool_cli_uses_file_sequence_provider_and_writes_outputs(tmp_path: Path, monkeypatch) -> None:
-    input_path = tmp_path / "source.png"
+    input_path = tmp_path / "samples" / "source.png"
     _write_source_image(input_path)
-    output_dir = tmp_path / "tool_cli"
+    output_dir = tmp_path / "out" / "tool_cli"
     response_path = tmp_path / "tool_cli_response.json"
     response_path.write_text(
         json.dumps(
@@ -349,6 +417,8 @@ def test_free_pen_tool_cli_uses_file_sequence_provider_and_writes_outputs(tmp_pa
 
     monkeypatch.setenv("AI_PROVIDER", "file")
     monkeypatch.setenv("AI_FILE_RESPONSE_PATH", str(response_path))
+    monkeypatch.setenv("AI_IMAGE_TRANSPORT", "base64")
+    monkeypatch.delenv("AI_PUBLIC_IMAGE_BASE_URL", raising=False)
     exit_code = main(
         [
             "free-pen-tool",
@@ -1027,6 +1097,85 @@ def test_conversation_appends_tool_result_after_assistant_tool_call(tmp_path: Pa
     assert "allowed_next_actions" in parsed_tool_content
 
 
+def test_tool_result_contains_editable_geometry(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "editable_geometry_out"
+    response_path = tmp_path / "editable_geometry_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=3)
+    runtime.run(input_path, output_dir)
+
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [message for message in payload["messages"] if message["role"] == "tool"]
+    parsed_tool_content = json.loads(tool_messages[1]["content"])
+    assert "editable_geometry" in parsed_tool_content
+    assert parsed_tool_content["geometry_hint"].startswith("Blue points are anchors.")
+    assert parsed_tool_content["editable_geometry"]["paths"][0]["anchors"][0]["id"] == "A1"
+    assert parsed_tool_content["editable_geometry"]["paths"][0]["segments"][0]["id"] == "S1"
+
+
+def test_visual_feedback_contains_handle_composite_or_handle_annotations(tmp_path: Path) -> None:
+    input_path = tmp_path / "samples" / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "out" / "handles_feedback_out"
+    response_path = tmp_path / "handles_feedback_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_003"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = FreePenToolRuntime(
+        adapter=NativeToolCallSequenceAdapter(response_path=response_path),
+        max_steps=3,
+        image_transport_config=FreePenImageTransportConfig(
+            mode="url",
+            public_image_base_url="https://img.jinyao.qzz.io/",
+            public_image_root=tmp_path,
+        ),
+    )
+    runtime.run(input_path, output_dir)
+
+    assert (output_dir / "round_002_post_tool_composite.png").exists()
+    request_payload = json.loads((output_dir / "round_003_request.json").read_text(encoding="utf-8"))
+    visual_feedback_content = request_payload["messages"][-2]["content"]
+    assert any(
+        part.get("type") == "image_url"
+        and "round_002_post_tool_composite.png" in part["image_url"]["url"]
+        for part in visual_feedback_content
+    )
+    assert any(
+        part.get("type") == "text"
+        and "BLUE points = anchors." in part["text"]
+        and "GREEN points and lines = control handles." in part["text"]
+        for part in visual_feedback_content
+    )
+
+
 def test_system_prompt_has_no_decision_tool_call_json_protocol() -> None:
     from services.free_pen_prompt import build_free_pen_tool_system_prompt
 
@@ -1038,3 +1187,14 @@ def test_system_prompt_has_no_decision_tool_call_json_protocol() -> None:
     assert "Use function tool calls only" in system_prompt
     assert "Do not write JSON manually" in system_prompt
     assert "reason" in system_prompt
+
+
+def test_system_prompt_mentions_human_pen_anchor_handle_workflow() -> None:
+    from services.free_pen_prompt import build_free_pen_tool_system_prompt
+
+    system_prompt = build_free_pen_tool_system_prompt()
+    assert "anchor" in system_prompt.lower()
+    assert "handle" in system_prompt.lower()
+    assert "move_handle" in system_prompt
+    assert "set_segment_handles" in system_prompt
+    assert "exactly one provided function tool per round" in system_prompt.lower()

@@ -12,6 +12,9 @@ _ALLOWED_TOOL_NAMES = (
     "start_path",
     "line_to",
     "curve_to",
+    "move_anchor",
+    "move_handle",
+    "set_segment_handles",
     "close_path",
     "undo_last",
     "rollback_to_step",
@@ -72,6 +75,61 @@ def build_free_pen_native_tools_schema() -> list[dict[str, Any]]:
                         "reason": {"type": "string"},
                     },
                     "required": ["c1", "c2", "p", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "move_anchor",
+                "description": "Move an existing anchor point. Use when an anchor is not on the black source contour.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "anchor_id": {"type": "string"},
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["anchor_id", "x", "y", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "move_handle",
+                "description": "Move one control handle of an existing cubic segment.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "segment_id": {"type": "string"},
+                        "handle": {"type": "string", "enum": ["c1", "c2"]},
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["segment_id", "handle", "x", "y", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_segment_handles",
+                "description": "Set both control handles of an existing cubic segment.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "segment_id": {"type": "string"},
+                        "c1": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                        "c2": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["segment_id", "c1", "c2", "reason"],
                     "additionalProperties": False,
                 },
             },
@@ -199,6 +257,37 @@ def parse_native_tool_call(name: str, arguments: str | dict[str, Any]) -> dict[s
                 "c1": _require_key(parsed_args, "c1"),
                 "c2": _require_key(parsed_args, "c2"),
                 "p": _require_key(parsed_args, "p"),
+            },
+            reason,
+        )
+    if normalized_name == "move_anchor":
+        return _tool_call_response(
+            "move_anchor",
+            {
+                "anchor_id": _require_key(parsed_args, "anchor_id"),
+                "x": _require_key(parsed_args, "x"),
+                "y": _require_key(parsed_args, "y"),
+            },
+            reason,
+        )
+    if normalized_name == "move_handle":
+        return _tool_call_response(
+            "move_handle",
+            {
+                "segment_id": _require_key(parsed_args, "segment_id"),
+                "handle": _require_key(parsed_args, "handle"),
+                "x": _require_key(parsed_args, "x"),
+                "y": _require_key(parsed_args, "y"),
+            },
+            reason,
+        )
+    if normalized_name == "set_segment_handles":
+        return _tool_call_response(
+            "set_segment_handles",
+            {
+                "segment_id": _require_key(parsed_args, "segment_id"),
+                "c1": _require_key(parsed_args, "c1"),
+                "c2": _require_key(parsed_args, "c2"),
             },
             reason,
         )

@@ -603,6 +603,22 @@ def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         normalized["c2"] = _normalize_point(normalized.get("c2"), key="c2")
         normalized["p"] = _normalize_point(normalized.get("p"), key="p")
         return normalized
+    if tool == "move_anchor":
+        normalized["anchor_id"] = str(normalized["anchor_id"])
+        normalized["x"] = float(normalized["x"])
+        normalized["y"] = float(normalized["y"])
+        return normalized
+    if tool == "move_handle":
+        normalized["segment_id"] = str(normalized["segment_id"])
+        normalized["handle"] = str(normalized["handle"]).strip().lower()
+        normalized["x"] = float(normalized["x"])
+        normalized["y"] = float(normalized["y"])
+        return normalized
+    if tool == "set_segment_handles":
+        normalized["segment_id"] = str(normalized["segment_id"])
+        normalized["c1"] = _normalize_point(normalized.get("c1"), key="c1")
+        normalized["c2"] = _normalize_point(normalized.get("c2"), key="c2")
+        return normalized
     if tool == "close_path":
         return {"tool": "close_path"}
     if tool == "undo_last":
@@ -995,6 +1011,8 @@ class FreePenToolRuntime:
                             "runtime_description": runtime_description,
                             "quality_summary": quality_summary,
                             "warnings": warnings,
+                            "editable_geometry": canvas.editable_geometry(),
+                            "geometry_hint": "Blue points are anchors. Green points and lines are control handles. Use move_anchor, move_handle, or set_segment_handles to refine existing curves.",
                             "allowed_next_actions": session_state_after["allowed_next_actions"],
                             "forbidden_next_actions": session_state_after["forbidden_next_actions"],
                             "next_hint": self._next_hint(
@@ -1005,7 +1023,7 @@ class FreePenToolRuntime:
                             ),
                             "visual_feedback_hint": (
                                 "A visual feedback user message with overlay/composite images will follow this tool result. "
-                                "Inspect it before choosing the next tool. BLACK is target; ORANGE is your drawing."
+                                "Inspect it before choosing the next tool. BLACK is target; ORANGE is your drawing; BLUE are anchors; GREEN are control handles."
                             ),
                         }
                         conversation.append_tool_result(tool_call_id, tool_result_content)
@@ -1236,6 +1254,7 @@ class FreePenToolRuntime:
             stroke_width=max(1, int(self.stroke_width)),
             stroke_rgba=self.stroke_rgba,
             sample_count_per_segment=max(8, int(self.sample_count_per_segment)),
+            show_handles=True,
         )
         composite_path = output_dir / f"round_{step_index:03d}_post_tool_composite.png"
         cv2.imwrite(str(composite_path), composite)
@@ -1254,6 +1273,8 @@ class FreePenToolRuntime:
         warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
         if tool in {"start_path", "line_to", "restart_path"}:
             warnings.extend(self._coordinate_warnings(x=tool_call["x"], y=tool_call["y"], width=canvas.width, height=canvas.height))
+        elif tool == "move_anchor":
+            warnings.extend(self._coordinate_warnings(x=tool_call["x"], y=tool_call["y"], width=canvas.width, height=canvas.height))
         elif tool == "curve_to":
             for key in ("c1", "c2", "p"):
                 warnings.extend(
@@ -1265,8 +1286,21 @@ class FreePenToolRuntime:
                         point_name=key,
                     )
                 )
+        elif tool == "move_handle":
+            warnings.extend(self._coordinate_warnings(x=tool_call["x"], y=tool_call["y"], width=canvas.width, height=canvas.height, point_name=tool_call["handle"]))
+        elif tool == "set_segment_handles":
+            for key in ("c1", "c2"):
+                warnings.extend(
+                    self._coordinate_warnings(
+                        x=tool_call[key][0],
+                        y=tool_call[key][1],
+                        width=canvas.width,
+                        height=canvas.height,
+                        point_name=key,
+                    )
+                )
         reject_codes = {warning["code"] for warning in warnings if warning["code"] in {"non_finite_coordinate", "out_of_bounds_coordinate"}}
-        if tool in {"line_to", "curve_to", "close_path"} and not canvas.path_open:
+        if tool in {"line_to", "curve_to", "close_path", "move_anchor", "move_handle", "set_segment_handles"} and not canvas.path_open:
             reject_codes.add("path_not_open")
             warnings.append(self._warning("path_not_open", f"{tool} requires an open path started by start_path."))
         if tool == "start_path" and canvas.path_open:
@@ -1309,6 +1343,26 @@ class FreePenToolRuntime:
                 )
         if tool == "inspect_history" and rollback_count > self.max_rollbacks:
             warnings.append(self._warning("rollback_budget_exceeded", "Rollback budget has already been exceeded. Prefer a direct correction."))
+        if tool == "move_anchor" and canvas.path_open:
+            geometry = canvas.editable_geometry()
+            anchors = {anchor["id"] for path in geometry["paths"] for anchor in path["anchors"]}
+            if str(tool_call["anchor_id"]) not in anchors:
+                reject_codes.add("unknown_anchor_id")
+                warnings.append(self._warning("unknown_anchor_id", f"Unknown anchor_id: {tool_call['anchor_id']}"))
+        if tool in {"move_handle", "set_segment_handles"} and canvas.path_open:
+            geometry = canvas.editable_geometry()
+            segments = {
+                segment["id"]: segment["type"]
+                for path in geometry["paths"]
+                for segment in path["segments"]
+            }
+            segment_id = str(tool_call["segment_id"])
+            if segment_id not in segments:
+                reject_codes.add("unknown_segment_id")
+                warnings.append(self._warning("unknown_segment_id", f"Unknown segment_id: {segment_id}"))
+            elif segments[segment_id] != "cubic":
+                reject_codes.add("segment_not_cubic")
+                warnings.append(self._warning("segment_not_cubic", f"{segment_id} is not a cubic segment."))
 
         if reject_codes:
             runtime_description = f"Rejected {tool} during preflight validation."
@@ -1421,6 +1475,34 @@ class FreePenToolRuntime:
                 current_feedback,
             )
 
+        if tool in {"move_anchor", "move_handle", "set_segment_handles"}:
+            executed = canvas.apply_tool_call(tool_call)
+            successful_drawing_tool_calls.append(dict(tool_call))
+            if tool == "move_anchor":
+                runtime_description = (
+                    f"Moved anchor {tool_call['anchor_id']} from "
+                    f"[{executed['old_point'][0]:.2f},{executed['old_point'][1]:.2f}] to "
+                    f"[{executed['point'][0]:.2f},{executed['point'][1]:.2f}]."
+                )
+            elif tool == "move_handle":
+                runtime_description = (
+                    f"Moved handle {tool_call['handle']} of {tool_call['segment_id']} from "
+                    f"[{executed['old_point'][0]:.2f},{executed['old_point'][1]:.2f}] to "
+                    f"[{executed['point'][0]:.2f},{executed['point'][1]:.2f}]."
+                )
+            else:
+                runtime_description = (
+                    f"Set handles of {tool_call['segment_id']} to "
+                    f"c1=[{executed['c1'][0]:.2f},{executed['c1'][1]:.2f}] and "
+                    f"c2=[{executed['c2'][0]:.2f},{executed['c2'][1]:.2f}]."
+                )
+            quality_summary = "Updated the editable Bezier geometry."
+            current_feedback = [
+                "Inspect the BLUE anchors and GREEN handles before continuing.",
+                "If the current segment is still misaligned, adjust handles or anchors before adding new geometry.",
+            ]
+            return (executed, runtime_description, "good", quality_summary, warnings, rollback_applied, current_feedback)
+
         before_current_point = canvas.current_point
         executed = canvas.apply_tool_call(tool_call)
         successful_drawing_tool_calls.append(dict(tool_call))
@@ -1493,6 +1575,12 @@ class FreePenToolRuntime:
                 f"Drew a cubic curve from [{start[0]:.2f},{start[1]:.2f}] to [{tool_call['p'][0]:.2f},{tool_call['p'][1]:.2f}] "
                 f"using c1=[{tool_call['c1'][0]:.2f},{tool_call['c1'][1]:.2f}] and c2=[{tool_call['c2'][0]:.2f},{tool_call['c2'][1]:.2f}]."
             )
+        if tool == "move_anchor":
+            return f"Moved anchor {tool_call['anchor_id']}."
+        if tool == "move_handle":
+            return f"Moved handle {tool_call['handle']} of {tool_call['segment_id']}."
+        if tool == "set_segment_handles":
+            return f"Set both handles of {tool_call['segment_id']}."
         if tool == "close_path":
             return "Closed the current path by drawing a straight chord from the current point back to the path start."
         return f"Executed {tool}."
@@ -1618,16 +1706,21 @@ class FreePenToolRuntime:
             "Color meaning:\n"
             "- BLACK / dark contour = source target contour.\n"
             "- ORANGE / colored stroke = your current drawing produced by your previous tool calls.\n"
+            "- BLUE points = anchors.\n"
+            "- GREEN points and lines = control handles.\n"
             "- The ORANGE stroke is not the target.\n"
             "- Your goal is to make the ORANGE stroke overlap the BLACK contour.\n\n"
             "Correction rule:\n"
             "- If the ORANGE stroke is visibly far from the BLACK contour, do not continue forward.\n"
+            "- Use move_handle or set_segment_handles for local curve corrections.\n"
+            "- Use move_anchor only if the anchor itself is wrong.\n"
             "- Use undo_last, rollback_to_step, or restart_path to correct the path.\n"
             "- Do not call close_path or finish_trace unless the ORANGE stroke closely matches the BLACK contour.\n"
             "- A closed path is not automatically correct; it must visually align with the BLACK contour.\n\n"
             "Anchor rule:\n"
             "- start_path points and curve_to endpoint p should lie on or very near the BLACK contour.\n"
-            "- Control points c1 and c2 may leave the contour, but endpoints should stay on the contour."
+            "- Control points c1 and c2 may leave the contour, but endpoints should stay on the contour.\n"
+            "- Inspect the BLUE anchors and GREEN handles before choosing exactly one next tool."
         )
 
         content.append({"type": "text", "text": header})
@@ -1741,9 +1834,19 @@ Color meaning:
         closed_path_count = sum(1 for path in canvas.paths if path.closed)
         last_action = str(history[-1]["runtime_description"]) if history else "none"
         if canvas.path_open:
-            current_goal = "Continue tracing the current open target contour. Use close_path only when the current point is near the start."
-            allowed_next_actions = ("line_to", "curve_to", "close_path", "undo_last", "rollback_to_step", "inspect_history", "restart_path")
-            forbidden_next_actions = ("finish", "start_path")
+            near_start = canvas.distance_to_start()
+            if (
+                near_start is not None
+                and near_start <= max(8.0, canvas.current_path_bbox_diagonal() * 0.10)
+                and canvas.current_path_drawable_segment_count() >= 2
+            ):
+                current_goal = "The current path has returned near the start point. If the orange curve matches the black contour, call close_path as the next single tool call."
+                allowed_next_actions = ("close_path", "undo_last", "rollback_to_step", "inspect_history", "stalled", "move_anchor", "move_handle", "set_segment_handles")
+                forbidden_next_actions = ("finish", "start_path", "line_to", "curve_to")
+            else:
+                current_goal = "Continue tracing the current open target contour. Use close_path only when the current point is near the start."
+                allowed_next_actions = ("line_to", "curve_to", "close_path", "undo_last", "rollback_to_step", "inspect_history", "restart_path", "move_anchor", "move_handle", "set_segment_handles")
+                forbidden_next_actions = ("finish", "start_path")
         elif closed_path_count >= 1:
             current_goal = "Return finish if the closed path matches the source; otherwise use rollback_to_step or restart_path."
             allowed_next_actions = ("finish", "rollback_to_step", "restart_path", "inspect_history", "undo_last")

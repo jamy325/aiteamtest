@@ -5,7 +5,11 @@ import json
 import pytest
 
 from services.ai_adapters import SiliconFlowVisionAdapter
-from services.free_pen_native_tools import ToolArgumentsParseError, parse_native_tool_call
+from services.free_pen_native_tools import (
+    ToolArgumentsParseError,
+    build_free_pen_native_tools_schema,
+    parse_native_tool_call,
+)
 
 
 class DummyObj:
@@ -94,4 +98,54 @@ def test_parse_native_tool_call_accepts_json_string_arguments() -> None:
         "decision": "tool_call",
         "tool_call": {"tool": "start_path", "x": 12, "y": 52},
         "reason": "start at contour",
+    }
+
+
+def test_native_tools_schema_contains_handle_edit_tools() -> None:
+    tool_names = {
+        entry["function"]["name"]
+        for entry in build_free_pen_native_tools_schema()
+        if entry.get("type") == "function"
+    }
+    assert {"move_anchor", "move_handle", "set_segment_handles"} <= tool_names
+
+
+def test_parse_native_move_anchor() -> None:
+    result = parse_native_tool_call(
+        "move_anchor",
+        {"anchor_id": "A2", "x": 88, "y": 60, "reason": "move anchor onto contour"},
+    )
+    assert result == {
+        "decision": "tool_call",
+        "tool_call": {"tool": "move_anchor", "anchor_id": "A2", "x": 88.0, "y": 60.0},
+        "reason": "move anchor onto contour",
+    }
+
+
+def test_parse_native_move_handle() -> None:
+    result = parse_native_tool_call(
+        "move_handle",
+        {"segment_id": "S1", "handle": "c1", "x": 70, "y": 44, "reason": "adjust tangent"},
+    )
+    assert result == {
+        "decision": "tool_call",
+        "tool_call": {"tool": "move_handle", "segment_id": "S1", "handle": "c1", "x": 70.0, "y": 44.0},
+        "reason": "adjust tangent",
+    }
+
+
+def test_parse_native_set_segment_handles() -> None:
+    result = parse_native_tool_call(
+        "set_segment_handles",
+        {"segment_id": "S2", "c1": [120, 44], "c2": [155, 66], "reason": "refine both handles"},
+    )
+    assert result == {
+        "decision": "tool_call",
+        "tool_call": {
+            "tool": "set_segment_handles",
+            "segment_id": "S2",
+            "c1": [120.0, 44.0],
+            "c2": [155.0, 66.0],
+        },
+        "reason": "refine both handles",
     }
