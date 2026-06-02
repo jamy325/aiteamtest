@@ -1792,17 +1792,42 @@ class FreePenToolRuntime:
         for y in range(0, scaled_height, minor_step):
             color = light_gray if y % major_step != 0 else dark_gray
             cv2.line(zoomed, (0, y), (scaled_width - 1, y), color, 1, cv2.LINE_AA)
-        info_bar_height = 54
-        footer_height = 28
-        framed = cv2.copyMakeBorder(zoomed, info_bar_height, footer_height, 0, 0, cv2.BORDER_CONSTANT, value=white)
-        cv2.rectangle(framed, (0, 0), (scaled_width - 1, info_bar_height - 1), white, -1)
-        cv2.putText(framed, title, (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, black, 1, cv2.LINE_AA)
+        title_bar_height = 34
+        x_axis_bar_height = 30
+        left_axis_width = 44
+        footer_height = 30
+        top_padding = title_bar_height + x_axis_bar_height
+        framed = cv2.copyMakeBorder(
+            zoomed,
+            top_padding,
+            footer_height,
+            left_axis_width,
+            0,
+            cv2.BORDER_CONSTANT,
+            value=white,
+        )
+        cv2.rectangle(framed, (0, 0), (framed.shape[1] - 1, title_bar_height - 1), white, -1)
+        cv2.rectangle(
+            framed,
+            (0, title_bar_height),
+            (framed.shape[1] - 1, top_padding - 1),
+            white,
+            -1,
+        )
+        cv2.rectangle(
+            framed,
+            (0, top_padding),
+            (left_axis_width - 1, top_padding + scaled_height - 1),
+            white,
+            -1,
+        )
+        cv2.putText(framed, title, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.72, black, 2, cv2.LINE_AA)
         cv2.putText(
             framed,
             f"origin=({x0},{y0}) size=({width},{height}) zoom={zoom_scale:.1f}x",
-            (10, 39),
+            (10, title_bar_height - 8),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            0.58,
             black,
             1,
             cv2.LINE_AA,
@@ -1810,19 +1835,40 @@ class FreePenToolRuntime:
         cv2.putText(
             framed,
             "Tool coordinates remain original image_px.",
-            (10, scaled_height + info_bar_height + 18),
+            (10, top_padding + scaled_height + 20),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.54,
             black,
             1,
             cv2.LINE_AA,
         )
         for original_x in range(((x0 + 49) // 50) * 50, x0 + width, 50):
-            label_x = int(round((original_x - x0) * zoom_scale))
-            cv2.putText(framed, str(original_x), (max(0, min(label_x + 2, scaled_width - 40)), 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, label_gray, 1, cv2.LINE_AA)
+            label_x = left_axis_width + int(round((original_x - x0) * zoom_scale))
+            label = str(original_x)
+            (text_width, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+            text_x = max(left_axis_width, min(label_x - text_width // 2, framed.shape[1] - text_width - 4))
+            cv2.putText(
+                framed,
+                label,
+                (text_x, title_bar_height + 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                label_gray,
+                1,
+                cv2.LINE_AA,
+            )
         for original_y in range(((y0 + 49) // 50) * 50, y0 + height, 50):
-            label_y = int(round((original_y - y0) * zoom_scale)) + info_bar_height
-            cv2.putText(framed, str(original_y), (4, max(info_bar_height + 14, min(label_y - 2, scaled_height + info_bar_height - 4))), cv2.FONT_HERSHEY_SIMPLEX, 0.4, label_gray, 1, cv2.LINE_AA)
+            label_y = int(round((original_y - y0) * zoom_scale)) + top_padding
+            cv2.putText(
+                framed,
+                str(original_y),
+                (3, max(top_padding + 18, min(label_y + 6, top_padding + scaled_height - 4))),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                label_gray,
+                1,
+                cv2.LINE_AA,
+            )
         cv2.imwrite(str(output_path), framed)
     
     def _preflight_tool_call(

@@ -1313,6 +1313,30 @@ def test_request_segment_zoom_does_not_modify_canvas(tmp_path: Path) -> None:
     assert any("original image_px" in line for line in current_feedback)
 
 
+def test_write_zoom_image_renders_dedicated_x_and_y_axis_labels(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    composite = np.full((72, 96, 3), 255, dtype=np.uint8)
+    cv2.line(composite, (12, 52), (84, 18), (0, 0, 0), thickness=3)
+    output_path = tmp_path / "zoom.png"
+
+    runtime._write_zoom_image(
+        composite_image=composite,
+        crop_origin=(0, 0),
+        crop_size=(96, 72),
+        zoom_scale=4.0,
+        output_path=output_path,
+        title="Requested zoom S1",
+    )
+
+    image = cv2.imread(str(output_path), cv2.IMREAD_COLOR)
+    assert image is not None
+    assert image.shape[:2] == (72 * 4 + 34 + 30 + 30, 96 * 4 + 44)
+    x_axis_band = image[34:64, 44:]
+    y_axis_band = image[64 : 64 + 72 * 4, :44]
+    assert np.any(np.any(x_axis_band < 245, axis=2))
+    assert np.any(np.any(y_axis_band < 245, axis=2))
+
+
 def test_request_zoom_window_does_not_modify_canvas(tmp_path: Path) -> None:
     runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
     canvas = FreePenCanvasState(width=96, height=72)
