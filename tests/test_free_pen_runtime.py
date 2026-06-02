@@ -2572,6 +2572,10 @@ def test_request_segment_zoom_creates_image_file_and_metadata(tmp_path: Path) ->
     assert requested["ruler"]["top"] is True
     assert requested["ruler"]["left"] is True
     assert requested["ruler"]["labels_are_original_coordinates"] is True
+    assert requested["anchors_visible"] is True
+    assert requested["curve_visible"] is True
+    assert requested["sampling"]["mode"] == "dynamic_zoom_polyline"
+    assert requested["sampling"]["sample_count"] >= runtime._BASE_ZOOM_SAMPLE_COUNT
 
 
 def test_request_zoom_window_creates_image_file(tmp_path: Path) -> None:
@@ -2621,22 +2625,22 @@ def test_request_zoom_window_outside_canvas_clips(tmp_path: Path) -> None:
     assert requested["clipped"] is True
 
 
-def test_segment_zoom_crop_clamped_to_max_size(tmp_path: Path) -> None:
+def test_requested_segment_zoom_keeps_both_anchors_visible(tmp_path: Path) -> None:
     runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
-    output_dir = tmp_path / "request_segment_zoom_clamped_out"
+    output_dir = tmp_path / "request_segment_zoom_anchor_out"
     output_dir.mkdir(parents=True, exist_ok=True)
-    source_image = np.full((720, 1280, 3), 255, dtype=np.uint8)
-    canvas = FreePenCanvasState(width=1280, height=720)
-    canvas.apply_tool_call({"tool": "start_path", "x": 240, "y": 420})
-    canvas.apply_tool_call({"tool": "curve_to", "c1": [360, 280], "c2": [680, 190], "p": [920, 160]})
+    source_image = np.full((540, 1280, 3), 255, dtype=np.uint8)
+    canvas = FreePenCanvasState(width=1280, height=540)
+    canvas.apply_tool_call({"tool": "start_path", "x": 478, "y": 135})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [580, 120], "c2": [710, 210], "p": [844, 242]})
     current_segment_context = runtime._build_current_segment_context(
         canvas=canvas,
         source_distance_map=runtime._build_source_distance_map(runtime._build_source_mask(source_image)),
-        focus_tool_call={"tool": "curve_to", "c1": [360, 280], "c2": [680, 190], "p": [920, 160]},
+        focus_tool_call={"tool": "curve_to", "c1": [580, 120], "c2": [710, 210], "p": [844, 242]},
         segment_refinement={},
     )
     requested = runtime._build_requested_segment_zoom_metadata(
-        tool_call={"tool": "request_segment_zoom", "segment_id": "S1", "zoom_scale": 4, "padding_px": 500},
+        tool_call={"tool": "request_segment_zoom", "segment_id": "S1", "zoom_scale": 4, "padding_px": 100},
         canvas=canvas,
         current_segment_context=current_segment_context,
         source_image=source_image,
@@ -2644,9 +2648,198 @@ def test_segment_zoom_crop_clamped_to_max_size(tmp_path: Path) -> None:
         step_index=3,
     )
     assert requested is not None
-    assert requested["clamped"] is True
-    assert requested["crop_size"][0] <= runtime._MAX_SEGMENT_ZOOM_WIDTH_PX
-    assert requested["crop_size"][1] <= runtime._MAX_SEGMENT_ZOOM_HEIGHT_PX
+    assert requested["anchors_visible"] is True
+    crop_x0, crop_y0 = requested["crop_origin"]
+    crop_w, crop_h = requested["crop_size"]
+    crop_x1 = crop_x0 + crop_w
+    crop_y1 = crop_y0 + crop_h
+    assert crop_x0 <= 478 <= crop_x1
+    assert crop_x0 <= 844 <= crop_x1
+    assert crop_y0 <= 135 <= crop_y1
+    assert crop_y0 <= 242 <= crop_y1
+
+
+def test_requested_segment_zoom_keeps_curve_visible(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    output_dir = tmp_path / "request_segment_zoom_curve_out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_image = np.full((540, 1280, 3), 255, dtype=np.uint8)
+    canvas = FreePenCanvasState(width=1280, height=540)
+    canvas.apply_tool_call({"tool": "start_path", "x": 478, "y": 135})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [640, 70], "c2": [760, 280], "p": [844, 242]})
+    current_segment_context = runtime._build_current_segment_context(
+        canvas=canvas,
+        source_distance_map=runtime._build_source_distance_map(runtime._build_source_mask(source_image)),
+        focus_tool_call={"tool": "curve_to", "c1": [640, 70], "c2": [760, 280], "p": [844, 242]},
+        segment_refinement={},
+    )
+    requested = runtime._build_requested_segment_zoom_metadata(
+        tool_call={"tool": "request_segment_zoom", "segment_id": "S1", "zoom_scale": 4, "padding_px": 80},
+        canvas=canvas,
+        current_segment_context=current_segment_context,
+        source_image=source_image,
+        output_dir=output_dir,
+        step_index=3,
+    )
+    assert requested is not None
+    assert requested["curve_visible"] is True
+    required_bbox = requested["required_bbox"]
+    crop_x0, crop_y0 = requested["crop_origin"]
+    crop_w, crop_h = requested["crop_size"]
+    assert crop_x0 <= required_bbox["x_min"] <= required_bbox["x_max"] <= crop_x0 + crop_w
+    assert crop_y0 <= required_bbox["y_min"] <= required_bbox["y_max"] <= crop_y0 + crop_h
+
+
+def test_requested_segment_zoom_does_not_hard_clamp_required_bbox(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    output_dir = tmp_path / "request_segment_zoom_soft_max_out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_image = np.full((720, 1600, 3), 255, dtype=np.uint8)
+    canvas = FreePenCanvasState(width=1600, height=720)
+    canvas.apply_tool_call({"tool": "start_path", "x": 240, "y": 420})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [520, 260], "c2": [980, 220], "p": [1240, 160]})
+    current_segment_context = runtime._build_current_segment_context(
+        canvas=canvas,
+        source_distance_map=runtime._build_source_distance_map(runtime._build_source_mask(source_image)),
+        focus_tool_call={"tool": "curve_to", "c1": [520, 260], "c2": [980, 220], "p": [1240, 160]},
+        segment_refinement={},
+    )
+    requested = runtime._build_requested_segment_zoom_metadata(
+        tool_call={"tool": "request_segment_zoom", "segment_id": "S1", "zoom_scale": 4, "padding_px": 100},
+        canvas=canvas,
+        current_segment_context=current_segment_context,
+        source_image=source_image,
+        output_dir=output_dir,
+        step_index=3,
+    )
+    assert requested is not None
+    assert requested["anchors_visible"] is True
+    assert requested["crop_size"][0] > runtime._MAX_SEGMENT_ZOOM_WIDTH_PX
+
+
+def test_requested_segment_zoom_reduces_padding_before_cutting_required_geometry(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    output_dir = tmp_path / "request_segment_zoom_padding_out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_image = np.full((540, 1280, 3), 255, dtype=np.uint8)
+    canvas = FreePenCanvasState(width=1280, height=540)
+    canvas.apply_tool_call({"tool": "start_path", "x": 478, "y": 135})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [580, 120], "c2": [710, 210], "p": [844, 242]})
+    current_segment_context = runtime._build_current_segment_context(
+        canvas=canvas,
+        source_distance_map=runtime._build_source_distance_map(runtime._build_source_mask(source_image)),
+        focus_tool_call={"tool": "curve_to", "c1": [580, 120], "c2": [710, 210], "p": [844, 242]},
+        segment_refinement={},
+    )
+    requested = runtime._build_requested_segment_zoom_metadata(
+        tool_call={"tool": "request_segment_zoom", "segment_id": "S1", "zoom_scale": 4, "padding_px": 100},
+        canvas=canvas,
+        current_segment_context=current_segment_context,
+        source_image=source_image,
+        output_dir=output_dir,
+        step_index=3,
+    )
+    assert requested is not None
+    assert requested["anchors_visible"] is True
+    required_bbox = requested["required_bbox"]
+    effective_padding_left = required_bbox["x_min"] - requested["crop_origin"][0]
+    assert effective_padding_left < 100
+
+
+def test_zoom_editor_sampling_density_increases_with_zoom_scale(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    segment_record = {
+        "id": "S1",
+        "type": "cubic",
+        "from_point": [100.0, 200.0],
+        "to_point": [520.0, 160.0],
+        "raw": {
+            "type": "cubic",
+            "c1": [180.0, 80.0],
+            "c2": [420.0, 320.0],
+            "p": [520.0, 160.0],
+        },
+    }
+    _, sampling_2x = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=2.0)
+    _, sampling_4x = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=4.0)
+    assert sampling_4x["sample_count"] > sampling_2x["sample_count"]
+
+
+def test_zoom_editor_sampling_density_has_minimum(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    segment_record = {
+        "id": "S1",
+        "type": "line",
+        "from_point": [10.0, 10.0],
+        "to_point": [20.0, 12.0],
+        "raw": {"type": "line", "p": [20.0, 12.0]},
+    }
+    _, sampling = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=2.0)
+    assert sampling["sample_count"] >= runtime._BASE_ZOOM_SAMPLE_COUNT
+
+
+def test_zoom_editor_sampling_points_remain_float_until_display_conversion(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    segment_record = {
+        "id": "S1",
+        "type": "cubic",
+        "from_point": [100.0, 200.0],
+        "to_point": [520.0, 160.0],
+        "raw": {
+            "type": "cubic",
+            "c1": [180.0, 80.0],
+            "c2": [420.0, 320.0],
+            "p": [520.0, 160.0],
+        },
+    }
+    sampled_points, _sampling = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=4.0)
+    assert np.issubdtype(sampled_points.dtype, np.floating)
+    mapped = np.asarray(
+        [
+            runtime._map_original_point_to_zoom(
+                point=(float(point[0]), float(point[1])),
+                crop_origin=(90, 70),
+                zoom_scale=4.0,
+                image_origin=(runtime._ZOOM_EDITOR_LEFT_RULER_WIDTH, runtime._ZOOM_EDITOR_TOP_RULER_HEIGHT),
+            )
+            for point in sampled_points
+        ],
+        dtype=np.int32,
+    )
+    assert np.issubdtype(mapped.dtype, np.integer)
+
+
+def test_requested_segment_zoom_metadata_contains_sampling_info(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "request_segment_zoom_sampling_out"
+    response_path = tmp_path / "request_segment_zoom_sampling_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "request_segment_zoom",
+                    {"segment_id": "S1", "zoom_scale": 4, "padding_px": 100, "reason": "zoom S1"},
+                    call_id="call_003",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_004"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=4)
+    runtime.run(input_path, output_dir)
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [json.loads(message["content"]) for message in payload["messages"] if message["role"] == "tool"]
+    requested = tool_messages[2]["visual_feedback_metadata"]["requested_zoom_windows"][0]
+    assert requested["sampling"]["sample_count"] >= runtime._BASE_ZOOM_SAMPLE_COUNT
+    assert requested["sampling"]["mode"] == "dynamic_zoom_polyline"
 
 
 def test_visual_feedback_message_mentions_not_zoomed_coordinates(tmp_path: Path) -> None:

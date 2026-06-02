@@ -847,6 +847,10 @@ class FreePenToolRuntime:
     _MIN_SEGMENT_ZOOM_HEIGHT_PX = 140.0
     _MAX_SEGMENT_ZOOM_WIDTH_PX = 360.0
     _MAX_SEGMENT_ZOOM_HEIGHT_PX = 240.0
+    _MIN_SEGMENT_ZOOM_PADDING_PX = 16.0
+    _BASE_ZOOM_SAMPLE_COUNT = 128
+    _MAX_ZOOM_SAMPLE_COUNT = 1024
+    _ZOOM_SAMPLE_SPACING_PX = 2.0
     _MAX_REQUESTED_ZOOMS_PER_SEGMENT = 2
     _MAX_REQUESTED_ZOOMS_TOTAL = 8
     _ZOOM_EDITOR_LEFT_RULER_WIDTH = 56
@@ -1605,38 +1609,22 @@ class FreePenToolRuntime:
         )
         if segment_record is None:
             return None
-        sampled_points = self._sample_segment_points(segment_record=segment_record)
-        points: list[list[float]] = []
-        if segment_record.get("from_point") is not None:
-            points.append([float(segment_record["from_point"][0]), float(segment_record["from_point"][1])])
-        if segment_record.get("to_point") is not None:
-            points.append([float(segment_record["to_point"][0]), float(segment_record["to_point"][1])])
-        raw_segment = segment_record["raw"]
-        if raw_segment["type"] == "cubic":
-            points.append([float(raw_segment["c1"][0]), float(raw_segment["c1"][1])])
-            points.append([float(raw_segment["c2"][0]), float(raw_segment["c2"][1])])
-        if sampled_points.size:
-            points.extend(sampled_points.tolist())
-        if not points:
-            return None
-        point_array = np.asarray(points, dtype=np.float64)
-        padding_px = int(round(float(tool_call["padding_px"])))
-        x_min = float(np.min(point_array[:, 0])) - float(padding_px)
-        y_min = float(np.min(point_array[:, 1])) - float(padding_px)
-        x_max = float(np.max(point_array[:, 0])) + float(padding_px)
-        y_max = float(np.max(point_array[:, 1])) + float(padding_px)
-        crop_origin, crop_size, clipped, clamped = self._normalize_zoom_crop_window(
-            x=x_min,
-            y=y_min,
-            width=max(1.0, x_max - x_min),
-            height=max(1.0, y_max - y_min),
+        zoom_scale = float(tool_call["zoom_scale"])
+        sampled_points, sampling_info = self._build_zoom_segment_samples(
+            segment_record=segment_record,
+            zoom_scale=zoom_scale,
+        )
+        zoom_window = self._build_requested_segment_zoom_window(
+            segment_record=segment_record,
+            sampled_points=sampled_points,
+            padding_px=float(tool_call["padding_px"]),
             canvas_width=canvas.width,
             canvas_height=canvas.height,
-            min_width=self._MIN_SEGMENT_ZOOM_WIDTH_PX,
-            min_height=self._MIN_SEGMENT_ZOOM_HEIGHT_PX,
-            max_width=self._MAX_SEGMENT_ZOOM_WIDTH_PX,
-            max_height=self._MAX_SEGMENT_ZOOM_HEIGHT_PX,
         )
+        if zoom_window is None:
+            return None
+        crop_origin = zoom_window["crop_origin"]
+        crop_size = zoom_window["crop_size"]
         output_path = output_dir / f"round_{step_index:03d}_requested_segment_zoom_{segment_id}.png"
         self._write_zoom_editor_view(
             source_image=source_image,
@@ -1644,9 +1632,10 @@ class FreePenToolRuntime:
             editable_geometry=editable_geometry,
             crop_origin=crop_origin,
             crop_size=crop_size,
-            zoom_scale=float(tool_call["zoom_scale"]),
+            zoom_scale=zoom_scale,
             output_path=output_path,
             highlighted_segment_id=segment_id,
+            segment_sampling_overrides={segment_id: sampled_points},
         )
         return {
             "type": "requested_segment_zoom",
@@ -1654,12 +1643,18 @@ class FreePenToolRuntime:
             "path": str(output_path),
             "crop_origin": [int(crop_origin[0]), int(crop_origin[1])],
             "crop_size": [int(crop_size[0]), int(crop_size[1])],
-            "zoom_scale": float(tool_call["zoom_scale"]),
+            "zoom_scale": zoom_scale,
+            "requested_zoom_scale": zoom_scale,
+            "effective_zoom_scale": zoom_scale,
             "coordinate_space": "original_image_px",
             "render_mode": "zoom_editor_view",
             "highlighted_segment_id": segment_id,
-            "clipped": bool(clipped),
-            "clamped": bool(clamped),
+            "required_bbox": zoom_window["required_bbox"],
+            "anchors_visible": bool(zoom_window["anchors_visible"]),
+            "curve_visible": bool(zoom_window["curve_visible"]),
+            "handles_visible": bool(zoom_window["handles_visible"]),
+            "clipped": bool(zoom_window["clipped"]),
+            "clamped": bool(zoom_window["clamped"]),
             "ruler": {
                 "top": True,
                 "left": True,
@@ -1672,6 +1667,7 @@ class FreePenToolRuntime:
                 "major_step_px": 50,
                 "labels_are_original_coordinates": True,
             },
+            "sampling": sampling_info,
         }
 
     def _build_requested_window_zoom_metadata(
@@ -1802,6 +1798,7 @@ class FreePenToolRuntime:
         zoom_scale: float,
         output_path: Path,
         highlighted_segment_id: str | None,
+        segment_sampling_overrides: dict[str, np.ndarray] | None = None,
     ) -> None:
         x0, y0 = crop_origin
         width, height = crop_size
@@ -1831,6 +1828,7 @@ class FreePenToolRuntime:
             zoom_scale=zoom_scale,
             image_origin=(image_origin_x, image_origin_y),
             highlighted_segment_id=highlighted_segment_id,
+            segment_sampling_overrides=segment_sampling_overrides,
         )
         self._draw_zoom_editor_rulers(
             editor=editor,
@@ -1974,6 +1972,7 @@ class FreePenToolRuntime:
         zoom_scale: float,
         image_origin: tuple[int, int],
         highlighted_segment_id: str | None,
+        segment_sampling_overrides: dict[str, np.ndarray] | None = None,
     ) -> None:
         if not editable_geometry["paths"]:
             return
@@ -1998,6 +1997,7 @@ class FreePenToolRuntime:
                 zoom_scale=zoom_scale,
                 image_origin=image_origin,
                 highlighted=str(segment["id"]) == str(highlighted_segment_id),
+                sampled_override=(segment_sampling_overrides or {}).get(str(segment["id"])),
             )
         for anchor in geometry_path["anchors"]:
             self._draw_zoom_editor_anchor(
@@ -2018,10 +2018,11 @@ class FreePenToolRuntime:
         zoom_scale: float,
         image_origin: tuple[int, int],
         highlighted: bool,
+        sampled_override: np.ndarray | None = None,
     ) -> None:
         stroke_color = (0, 170, 255) if not highlighted else (0, 110, 255)
         stroke_width = 2 if not highlighted else 4
-        sampled = self._sample_segment_points(segment_record=segment_record)
+        sampled = sampled_override if sampled_override is not None else self._sample_segment_points(segment_record=segment_record)
         if sampled.size == 0:
             return
         display_points = np.asarray(
@@ -3768,18 +3769,26 @@ class FreePenToolRuntime:
         return None
 
     def _sample_segment_points(self, *, segment_record: dict[str, Any]) -> np.ndarray:
+        return self._sample_segment_points_with_count(segment_record=segment_record, sample_count=None)
+
+    def _sample_segment_points_with_count(
+        self,
+        *,
+        segment_record: dict[str, Any],
+        sample_count: int | None,
+    ) -> np.ndarray:
         from_point = segment_record.get("from_point")
         to_point = segment_record.get("to_point")
         raw_segment = segment_record["raw"]
         if not from_point or not to_point:
             return np.asarray([], dtype=np.float64)
+        effective_sample_count = max(8, int(self.sample_count_per_segment if sample_count is None else sample_count))
         if raw_segment["type"] == "line":
-            sample_count = max(8, int(self.sample_count_per_segment))
             p0 = np.array(from_point, dtype=np.float64)
             p1 = np.array(to_point, dtype=np.float64)
             samples = []
-            for index in range(sample_count):
-                t = index / float(sample_count - 1)
+            for index in range(effective_sample_count):
+                t = index / float(effective_sample_count - 1)
                 point = ((1.0 - t) * p0) + (t * p1)
                 samples.append(point.tolist())
             return np.asarray(samples, dtype=np.float64)
@@ -3789,9 +3798,178 @@ class FreePenToolRuntime:
                 c1=(float(raw_segment["c1"][0]), float(raw_segment["c1"][1])),
                 c2=(float(raw_segment["c2"][0]), float(raw_segment["c2"][1])),
                 p1=(float(to_point[0]), float(to_point[1])),
-                sample_count=max(8, int(self.sample_count_per_segment)),
+                sample_count=effective_sample_count,
             ),
             dtype=np.float64,
+        )
+
+    def _build_zoom_segment_samples(
+        self,
+        *,
+        segment_record: dict[str, Any],
+        zoom_scale: float,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        estimated_length = self._estimate_segment_length(segment_record=segment_record)
+        display_length_px = max(0.0, estimated_length * float(zoom_scale))
+        sample_count = max(
+            int(self._BASE_ZOOM_SAMPLE_COUNT),
+            int(math.ceil(display_length_px / self._ZOOM_SAMPLE_SPACING_PX)) + 1,
+        )
+        sample_count = min(int(self._MAX_ZOOM_SAMPLE_COUNT), sample_count)
+        samples = self._sample_segment_points_with_count(
+            segment_record=segment_record,
+            sample_count=sample_count,
+        )
+        return (
+            samples,
+            {
+                "mode": "dynamic_zoom_polyline",
+                "sample_count": int(sample_count),
+                "base_zoom_sample_count": int(self._BASE_ZOOM_SAMPLE_COUNT),
+                "sample_spacing_px": float(self._ZOOM_SAMPLE_SPACING_PX),
+            },
+        )
+
+    def _estimate_segment_length(self, *, segment_record: dict[str, Any]) -> float:
+        raw_segment = segment_record["raw"]
+        from_point = segment_record.get("from_point")
+        to_point = segment_record.get("to_point")
+        if not from_point or not to_point:
+            return 0.0
+        if raw_segment["type"] == "line":
+            return float(math.hypot(float(to_point[0]) - float(from_point[0]), float(to_point[1]) - float(from_point[1])))
+        coarse_samples = self._sample_segment_points_with_count(segment_record=segment_record, sample_count=64)
+        if coarse_samples.shape[0] < 2:
+            return 0.0
+        deltas = np.diff(coarse_samples, axis=0)
+        return float(np.sum(np.hypot(deltas[:, 0], deltas[:, 1])))
+
+    def _build_requested_segment_zoom_window(
+        self,
+        *,
+        segment_record: dict[str, Any],
+        sampled_points: np.ndarray,
+        padding_px: float,
+        canvas_width: int,
+        canvas_height: int,
+    ) -> dict[str, Any] | None:
+        required_points: list[list[float]] = []
+        from_point = segment_record.get("from_point")
+        to_point = segment_record.get("to_point")
+        if from_point is not None:
+            required_points.append([float(from_point[0]), float(from_point[1])])
+        if to_point is not None:
+            required_points.append([float(to_point[0]), float(to_point[1])])
+        if sampled_points.size:
+            required_points.extend(sampled_points.tolist())
+        if not required_points:
+            return None
+        required_array = np.asarray(required_points, dtype=np.float64)
+        required_bbox = self._bbox_from_points(required_array)
+        requested_padding = max(float(self._MIN_SEGMENT_ZOOM_PADDING_PX), float(padding_px))
+        min_padding = float(self._MIN_SEGMENT_ZOOM_PADDING_PX)
+        required_width = float(required_bbox["x_max"] - required_bbox["x_min"])
+        required_height = float(required_bbox["y_max"] - required_bbox["y_min"])
+
+        def _effective_padding(required_span: float, soft_limit: float) -> float:
+            if required_span + (2.0 * requested_padding) <= soft_limit:
+                return requested_padding
+            if required_span + (2.0 * min_padding) <= soft_limit:
+                return max(min_padding, (soft_limit - required_span) * 0.5)
+            return min_padding
+
+        pad_x = _effective_padding(required_width, float(self._MAX_SEGMENT_ZOOM_WIDTH_PX))
+        pad_y = _effective_padding(required_height, float(self._MAX_SEGMENT_ZOOM_HEIGHT_PX))
+        target_width = max(float(self._MIN_SEGMENT_ZOOM_WIDTH_PX), required_width + (2.0 * pad_x))
+        target_height = max(float(self._MIN_SEGMENT_ZOOM_HEIGHT_PX), required_height + (2.0 * pad_y))
+        requested_crop_x0 = float(required_bbox["x_min"]) - requested_padding
+        requested_crop_y0 = float(required_bbox["y_min"]) - requested_padding
+        requested_crop_x1 = float(required_bbox["x_max"]) + requested_padding
+        requested_crop_y1 = float(required_bbox["y_max"]) + requested_padding
+        crop_x0 = max(0.0, min(float(required_bbox["x_min"] - pad_x), float(canvas_width) - target_width))
+        crop_y0 = max(0.0, min(float(required_bbox["y_min"] - pad_y), float(canvas_height) - target_height))
+        crop_x1 = min(float(canvas_width), crop_x0 + target_width)
+        crop_y1 = min(float(canvas_height), crop_y0 + target_height)
+        crop_origin = (int(math.floor(crop_x0)), int(math.floor(crop_y0)))
+        crop_size = (
+            max(1, int(math.ceil(crop_x1 - crop_x0))),
+            max(1, int(math.ceil(crop_y1 - crop_y0))),
+        )
+        crop_bounds = (
+            float(crop_origin[0]),
+            float(crop_origin[1]),
+            float(crop_origin[0] + crop_size[0]),
+            float(crop_origin[1] + crop_size[1]),
+        )
+        anchors_visible = all(
+            self._point_in_crop(point=(float(point[0]), float(point[1])), crop_bounds=crop_bounds)
+            for point in (from_point, to_point)
+            if point is not None
+        )
+        curve_visible = self._points_within_crop(points=required_array, crop_bounds=crop_bounds)
+        raw_segment = segment_record["raw"]
+        handle_points = []
+        if raw_segment["type"] == "cubic":
+            handle_points = [
+                (float(raw_segment["c1"][0]), float(raw_segment["c1"][1])),
+                (float(raw_segment["c2"][0]), float(raw_segment["c2"][1])),
+            ]
+        handles_visible = all(self._point_in_crop(point=point, crop_bounds=crop_bounds) for point in handle_points)
+        clamped = bool(
+            target_width > float(self._MAX_SEGMENT_ZOOM_WIDTH_PX)
+            or target_height > float(self._MAX_SEGMENT_ZOOM_HEIGHT_PX)
+            or pad_x < requested_padding - 0.5
+            or pad_y < requested_padding - 0.5
+        )
+        clipped = bool(
+            requested_crop_x0 < 0.0
+            or requested_crop_y0 < 0.0
+            or requested_crop_x1 > float(canvas_width)
+            or requested_crop_y1 > float(canvas_height)
+        )
+        return {
+            "crop_origin": crop_origin,
+            "crop_size": crop_size,
+            "required_bbox": required_bbox,
+            "anchors_visible": bool(anchors_visible),
+            "curve_visible": bool(curve_visible),
+            "handles_visible": bool(handles_visible),
+            "clipped": clipped,
+            "clamped": clamped,
+        }
+
+    @staticmethod
+    def _bbox_from_points(points: np.ndarray) -> dict[str, int]:
+        return {
+            "x_min": int(math.floor(float(np.min(points[:, 0])))),
+            "y_min": int(math.floor(float(np.min(points[:, 1])))),
+            "x_max": int(math.ceil(float(np.max(points[:, 0])))),
+            "y_max": int(math.ceil(float(np.max(points[:, 1])))),
+        }
+
+    @staticmethod
+    def _point_in_crop(
+        *,
+        point: tuple[float, float],
+        crop_bounds: tuple[float, float, float, float],
+    ) -> bool:
+        x0, y0, x1, y1 = crop_bounds
+        return x0 <= float(point[0]) <= x1 and y0 <= float(point[1]) <= y1
+
+    def _points_within_crop(
+        self,
+        *,
+        points: np.ndarray,
+        crop_bounds: tuple[float, float, float, float],
+    ) -> bool:
+        if points.size == 0:
+            return False
+        x0, y0, x1, y1 = crop_bounds
+        return bool(
+            np.all(points[:, 0] >= x0)
+            and np.all(points[:, 0] <= x1)
+            and np.all(points[:, 1] >= y0)
+            and np.all(points[:, 1] <= y1)
         )
 
     def _segment_geometry_from_canvas(
