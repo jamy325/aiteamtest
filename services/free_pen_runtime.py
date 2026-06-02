@@ -1784,6 +1784,9 @@ class FreePenToolRuntime:
         light_gray = (210, 210, 210)
         dark_gray = (120, 120, 120)
         label_gray = (40, 40, 40)
+        ruler_bg = (36, 36, 36)
+        ruler_tick = (220, 220, 220)
+        ruler_text = (245, 245, 245)
         minor_step = max(1, int(round(10 * zoom_scale)))
         major_step = max(1, int(round(50 * zoom_scale)))
         for x in range(0, scaled_width, minor_step):
@@ -1792,96 +1795,123 @@ class FreePenToolRuntime:
         for y in range(0, scaled_height, minor_step):
             color = light_gray if y % major_step != 0 else dark_gray
             cv2.line(zoomed, (0, y), (scaled_width - 1, y), color, 1, cv2.LINE_AA)
-        axis_font_scale = 0.6
-        title_font_scale = 0.72
-        subtitle_font_scale = 0.58
-        title_line_height = 22
-        subtitle_line_height = 20
-        title_bar_height = title_line_height + subtitle_line_height + 12
-        x_axis_bar_height = 32
+        axis_font_scale = 0.62
+        x_axis_bar_height = 28
         max_y_label = max(y0, y0 + height - 1)
         (max_y_label_width, _), _ = cv2.getTextSize(str(max_y_label), cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, 1)
-        left_axis_width = max(44, max_y_label_width + 12)
-        footer_height = 30
-        top_padding = title_bar_height + x_axis_bar_height
+        left_axis_width = max(46, max_y_label_width + 16)
+        top_padding = x_axis_bar_height
         framed = cv2.copyMakeBorder(
             zoomed,
             top_padding,
-            footer_height,
+            0,
             left_axis_width,
             0,
             cv2.BORDER_CONSTANT,
             value=white,
         )
-        cv2.rectangle(framed, (0, 0), (framed.shape[1] - 1, title_bar_height - 1), white, -1)
         cv2.rectangle(
             framed,
-            (0, title_bar_height),
+            (0, 0),
             (framed.shape[1] - 1, top_padding - 1),
-            white,
+            ruler_bg,
             -1,
         )
         cv2.rectangle(
             framed,
             (0, top_padding),
             (left_axis_width - 1, top_padding + scaled_height - 1),
-            white,
+            ruler_bg,
             -1,
         )
-        cv2.putText(
+        cv2.rectangle(
             framed,
-            title,
-            (10, 22),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            title_font_scale,
-            black,
-            2,
-            cv2.LINE_AA,
+            (0, 0),
+            (left_axis_width - 1, top_padding - 1),
+            ruler_bg,
+            -1,
         )
-        cv2.putText(
+        cv2.line(
             framed,
-            f"origin=({x0},{y0}) size=({width},{height}) zoom={zoom_scale:.1f}x",
-            (10, 22 + subtitle_line_height),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            subtitle_font_scale,
-            black,
+            (left_axis_width, 0),
+            (left_axis_width, top_padding + scaled_height - 1),
+            dark_gray,
             1,
             cv2.LINE_AA,
         )
-        cv2.putText(
+        cv2.line(
             framed,
-            "Tool coordinates remain original image_px.",
-            (10, top_padding + scaled_height + 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.54,
-            black,
+            (left_axis_width, top_padding),
+            (left_axis_width + scaled_width - 1, top_padding),
+            dark_gray,
             1,
             cv2.LINE_AA,
         )
         for original_x in range(((x0 + 49) // 50) * 50, x0 + width, 50):
             label_x = left_axis_width + int(round((original_x - x0) * zoom_scale))
             label = str(original_x)
-            (text_width, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-            text_x = max(left_axis_width, min(label_x - text_width // 2, framed.shape[1] - text_width - 4))
+            (text_width, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, 1)
+            text_x = max(left_axis_width + 2, min(label_x - text_width // 2, framed.shape[1] - text_width - 4))
+            major_tick_top = max(2, x_axis_bar_height - 12)
+            cv2.line(
+                framed,
+                (label_x, major_tick_top),
+                (label_x, top_padding - 1),
+                ruler_tick,
+                1,
+                cv2.LINE_AA,
+            )
             cv2.putText(
                 framed,
                 label,
-                (text_x, title_bar_height + 24),
+                (text_x, 14),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 axis_font_scale,
-                label_gray,
+                ruler_text,
+                1,
+                cv2.LINE_AA,
+            )
+        for scaled_x in range(0, scaled_width, minor_step):
+            if scaled_x % major_step == 0:
+                continue
+            tick_x = left_axis_width + scaled_x
+            cv2.line(
+                framed,
+                (tick_x, x_axis_bar_height - 7),
+                (tick_x, top_padding - 1),
+                ruler_tick,
                 1,
                 cv2.LINE_AA,
             )
         for original_y in range(((y0 + 49) // 50) * 50, y0 + height, 50):
             label_y = int(round((original_y - y0) * zoom_scale)) + top_padding
+            cv2.line(
+                framed,
+                (left_axis_width - 12, label_y),
+                (left_axis_width - 1, label_y),
+                ruler_tick,
+                1,
+                cv2.LINE_AA,
+            )
             cv2.putText(
                 framed,
                 str(original_y),
                 (3, max(top_padding + 18, min(label_y + 6, top_padding + scaled_height - 4))),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 axis_font_scale,
-                label_gray,
+                ruler_text,
+                1,
+                cv2.LINE_AA,
+            )
+        for scaled_y in range(0, scaled_height, minor_step):
+            if scaled_y % major_step == 0:
+                continue
+            tick_y = top_padding + scaled_y
+            cv2.line(
+                framed,
+                (left_axis_width - 7, tick_y),
+                (left_axis_width - 1, tick_y),
+                ruler_tick,
                 1,
                 cv2.LINE_AA,
             )

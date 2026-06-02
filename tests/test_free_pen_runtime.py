@@ -1315,13 +1315,13 @@ def test_request_segment_zoom_does_not_modify_canvas(tmp_path: Path) -> None:
 
 def test_write_zoom_image_renders_dedicated_x_and_y_axis_labels(tmp_path: Path) -> None:
     runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
-    composite = np.full((72, 96, 3), 255, dtype=np.uint8)
-    cv2.line(composite, (12, 52), (84, 18), (0, 0, 0), thickness=3)
+    composite = np.full((240, 320, 3), 255, dtype=np.uint8)
+    cv2.line(composite, (145, 120), (220, 65), (0, 0, 0), thickness=3)
     output_path = tmp_path / "zoom.png"
 
     runtime._write_zoom_image(
         composite_image=composite,
-        crop_origin=(0, 0),
+        crop_origin=(133, 35),
         crop_size=(96, 72),
         zoom_scale=4.0,
         output_path=output_path,
@@ -1330,12 +1330,14 @@ def test_write_zoom_image_renders_dedicated_x_and_y_axis_labels(tmp_path: Path) 
 
     image = cv2.imread(str(output_path), cv2.IMREAD_COLOR)
     assert image is not None
-    assert image.shape[0] > 72 * 4
+    assert image.shape[0] == 72 * 4 + 28
     assert image.shape[1] > 96 * 4
-    x_axis_band = image[52:84, 44:]
-    y_axis_band = image[84 : 84 + 72 * 4, :60]
-    assert np.any(np.any(x_axis_band < 245, axis=2))
-    assert np.any(np.any(y_axis_band < 245, axis=2))
+    x_axis_band = image[:28, 48:]
+    y_axis_band = image[28 : 28 + 72 * 4, :64]
+    assert np.any(np.all(x_axis_band < 80, axis=2))
+    assert np.any(np.all(y_axis_band < 80, axis=2))
+    assert np.any(np.any(x_axis_band > 200, axis=2))
+    assert np.any(np.any(y_axis_band > 200, axis=2))
 
 
 def test_request_zoom_window_does_not_modify_canvas(tmp_path: Path) -> None:
