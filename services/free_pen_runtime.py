@@ -2022,12 +2022,19 @@ class FreePenToolRuntime:
     ) -> None:
         stroke_color = (0, 170, 255) if not highlighted else (0, 110, 255)
         stroke_width = 2 if not highlighted else 4
-        sampled = sampled_override if sampled_override is not None else self._sample_segment_points(segment_record=segment_record)
+        sampled = (
+            sampled_override
+            if sampled_override is not None
+            else self._sample_segment_points_float_with_count(
+                segment_record=segment_record,
+                sample_count=max(8, int(self.sample_count_per_segment)),
+            )
+        )
         if sampled.size == 0:
             return
-        display_points = np.asarray(
+        display_points_float = np.asarray(
             [
-                self._map_original_point_to_zoom(
+                self._map_original_point_to_zoom_float(
                     point=(float(point[0]), float(point[1])),
                     crop_origin=crop_origin,
                     zoom_scale=zoom_scale,
@@ -2035,8 +2042,9 @@ class FreePenToolRuntime:
                 )
                 for point in sampled
             ],
-            dtype=np.int32,
+            dtype=np.float64,
         )
+        display_points = np.rint(display_points_float).astype(np.int32, copy=False)
         cv2.polylines(editor, [display_points], isClosed=False, color=stroke_color, thickness=stroke_width, lineType=cv2.LINE_AA)
         mid_point = display_points[len(display_points) // 2]
         self._draw_outlined_text(
@@ -2116,11 +2124,27 @@ class FreePenToolRuntime:
         zoom_scale: float,
         image_origin: tuple[int, int],
     ) -> tuple[int, int]:
+        mapped = self._map_original_point_to_zoom_float(
+            point=point,
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+            image_origin=image_origin,
+        )
+        return (int(round(mapped[0])), int(round(mapped[1])))
+
+    def _map_original_point_to_zoom_float(
+        self,
+        *,
+        point: tuple[float, float],
+        crop_origin: tuple[int, int],
+        zoom_scale: float,
+        image_origin: tuple[int, int],
+    ) -> tuple[float, float]:
         image_origin_x, image_origin_y = image_origin
         x0, y0 = crop_origin
         return (
-            int(round(image_origin_x + ((float(point[0]) - float(x0)) * float(zoom_scale)))),
-            int(round(image_origin_y + ((float(point[1]) - float(y0)) * float(zoom_scale)))),
+            float(image_origin_x) + ((float(point[0]) - float(x0)) * float(zoom_scale)),
+            float(image_origin_y) + ((float(point[1]) - float(y0)) * float(zoom_scale)),
         )
 
     @staticmethod
@@ -3803,6 +3827,55 @@ class FreePenToolRuntime:
             dtype=np.float64,
         )
 
+    @staticmethod
+    def _sample_cubic_segment_float(
+        *,
+        p0: tuple[float, float],
+        c1: tuple[float, float],
+        c2: tuple[float, float],
+        p1: tuple[float, float],
+        sample_count: int,
+    ) -> np.ndarray:
+        sample_total = max(8, int(sample_count))
+        p0_arr = np.asarray(p0, dtype=np.float64)
+        c1_arr = np.asarray(c1, dtype=np.float64)
+        c2_arr = np.asarray(c2, dtype=np.float64)
+        p1_arr = np.asarray(p1, dtype=np.float64)
+        ts = np.linspace(0.0, 1.0, sample_total, dtype=np.float64)
+        points = (
+            (((1.0 - ts) ** 3)[:, None] * p0_arr)
+            + (3.0 * (((1.0 - ts) ** 2) * ts)[:, None] * c1_arr)
+            + (3.0 * (((1.0 - ts) * (ts**2))[:, None] * c2_arr))
+            + (((ts**3))[:, None] * p1_arr)
+        )
+        return points.astype(np.float64, copy=False)
+
+    def _sample_segment_points_float_with_count(
+        self,
+        *,
+        segment_record: dict[str, Any],
+        sample_count: int,
+    ) -> np.ndarray:
+        from_point = segment_record.get("from_point")
+        to_point = segment_record.get("to_point")
+        raw_segment = segment_record["raw"]
+        if not from_point or not to_point:
+            return np.asarray([], dtype=np.float64)
+        effective_sample_count = max(8, int(sample_count))
+        if raw_segment["type"] == "line":
+            p0 = np.asarray(from_point, dtype=np.float64)
+            p1 = np.asarray(to_point, dtype=np.float64)
+            ts = np.linspace(0.0, 1.0, effective_sample_count, dtype=np.float64)
+            points = (((1.0 - ts)[:, None] * p0) + (ts[:, None] * p1)).astype(np.float64, copy=False)
+            return points
+        return self._sample_cubic_segment_float(
+            p0=(float(from_point[0]), float(from_point[1])),
+            c1=(float(raw_segment["c1"][0]), float(raw_segment["c1"][1])),
+            c2=(float(raw_segment["c2"][0]), float(raw_segment["c2"][1])),
+            p1=(float(to_point[0]), float(to_point[1])),
+            sample_count=effective_sample_count,
+        )
+
     def _build_zoom_segment_samples(
         self,
         *,
@@ -3816,7 +3889,7 @@ class FreePenToolRuntime:
             int(math.ceil(display_length_px / self._ZOOM_SAMPLE_SPACING_PX)) + 1,
         )
         sample_count = min(int(self._MAX_ZOOM_SAMPLE_COUNT), sample_count)
-        samples = self._sample_segment_points_with_count(
+        samples = self._sample_segment_points_float_with_count(
             segment_record=segment_record,
             sample_count=sample_count,
         )
@@ -3827,6 +3900,8 @@ class FreePenToolRuntime:
                 "sample_count": int(sample_count),
                 "base_zoom_sample_count": int(self._BASE_ZOOM_SAMPLE_COUNT),
                 "sample_spacing_px": float(self._ZOOM_SAMPLE_SPACING_PX),
+                "max_zoom_sample_count": int(self._MAX_ZOOM_SAMPLE_COUNT),
+                "float_sampling": True,
             },
         )
 
@@ -3838,7 +3913,7 @@ class FreePenToolRuntime:
             return 0.0
         if raw_segment["type"] == "line":
             return float(math.hypot(float(to_point[0]) - float(from_point[0]), float(to_point[1]) - float(from_point[1])))
-        coarse_samples = self._sample_segment_points_with_count(segment_record=segment_record, sample_count=64)
+        coarse_samples = self._sample_segment_points_float_with_count(segment_record=segment_record, sample_count=64)
         if coarse_samples.shape[0] < 2:
             return 0.0
         deltas = np.diff(coarse_samples, axis=0)

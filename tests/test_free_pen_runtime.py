@@ -2576,6 +2576,8 @@ def test_request_segment_zoom_creates_image_file_and_metadata(tmp_path: Path) ->
     assert requested["curve_visible"] is True
     assert requested["sampling"]["mode"] == "dynamic_zoom_polyline"
     assert requested["sampling"]["sample_count"] >= runtime._BASE_ZOOM_SAMPLE_COUNT
+    assert requested["sampling"]["float_sampling"] is True
+    assert requested["sampling"]["max_zoom_sample_count"] == runtime._MAX_ZOOM_SAMPLE_COUNT
 
 
 def test_request_zoom_window_creates_image_file(tmp_path: Path) -> None:
@@ -2763,6 +2765,8 @@ def test_zoom_editor_sampling_density_increases_with_zoom_scale(tmp_path: Path) 
     _, sampling_2x = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=2.0)
     _, sampling_4x = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=4.0)
     assert sampling_4x["sample_count"] > sampling_2x["sample_count"]
+    assert sampling_2x["float_sampling"] is True
+    assert sampling_4x["float_sampling"] is True
 
 
 def test_zoom_editor_sampling_density_has_minimum(tmp_path: Path) -> None:
@@ -2796,7 +2800,7 @@ def test_zoom_editor_sampling_points_remain_float_until_display_conversion(tmp_p
     assert np.issubdtype(sampled_points.dtype, np.floating)
     mapped = np.asarray(
         [
-            runtime._map_original_point_to_zoom(
+            runtime._map_original_point_to_zoom_float(
                 point=(float(point[0]), float(point[1])),
                 crop_origin=(90, 70),
                 zoom_scale=4.0,
@@ -2807,6 +2811,81 @@ def test_zoom_editor_sampling_points_remain_float_until_display_conversion(tmp_p
         dtype=np.int32,
     )
     assert np.issubdtype(mapped.dtype, np.integer)
+
+
+def test_zoom_cubic_sampling_returns_float64(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    samples = runtime._sample_cubic_segment_float(
+        p0=(478.0, 135.0),
+        c1=(600.0, 180.0),
+        c2=(750.0, 200.0),
+        p1=(844.0, 242.0),
+        sample_count=256,
+    )
+    assert samples.dtype == np.float64
+    assert samples.shape == (256, 2)
+    assert not np.issubdtype(samples.dtype, np.integer)
+
+
+def test_zoom_segment_sampling_does_not_use_canvas_int_sampler(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    segment_record = {
+        "id": "S1",
+        "type": "cubic",
+        "from_point": [478.0, 135.0],
+        "to_point": [844.0, 242.0],
+        "raw": {
+            "type": "cubic",
+            "c1": [600.0, 180.0],
+            "c2": [750.0, 200.0],
+            "p": [844.0, 242.0],
+        },
+    }
+    samples, sampling = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=4.0)
+    assert samples.dtype.kind == "f"
+    assert sampling["float_sampling"] is True
+
+
+def test_zoom_display_mapping_keeps_float_before_final_round(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    mapped = runtime._map_original_point_to_zoom_float(
+        point=(478.25, 135.75),
+        crop_origin=(470, 120),
+        zoom_scale=4.0,
+        image_origin=(runtime._ZOOM_EDITOR_LEFT_RULER_WIDTH, runtime._ZOOM_EDITOR_TOP_RULER_HEIGHT),
+    )
+    assert isinstance(mapped[0], float)
+    assert isinstance(mapped[1], float)
+
+
+def test_high_zoom_curve_sampling_no_integer_quantization_before_scale(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    segment_record = {
+        "id": "S1",
+        "type": "cubic",
+        "from_point": [478.0, 135.0],
+        "to_point": [844.0, 242.0],
+        "raw": {
+            "type": "cubic",
+            "c1": [600.0, 180.0],
+            "c2": [750.0, 200.0],
+            "p": [844.0, 242.0],
+        },
+    }
+    samples, _sampling = runtime._build_zoom_segment_samples(segment_record=segment_record, zoom_scale=4.0)
+    fractional_parts = np.abs(samples - np.rint(samples))
+    assert np.any(fractional_parts > 1e-6)
+
+
+def test_regular_overlay_sampling_unchanged(tmp_path: Path) -> None:
+    samples = FreePenCanvasState._sample_cubic_segment(
+        p0=(478.0, 135.0),
+        c1=(600.0, 180.0),
+        c2=(750.0, 200.0),
+        p1=(844.0, 242.0),
+        sample_count=64,
+    )
+    assert np.issubdtype(samples.dtype, np.integer)
 
 
 def test_requested_segment_zoom_metadata_contains_sampling_info(tmp_path: Path) -> None:
@@ -2840,6 +2919,9 @@ def test_requested_segment_zoom_metadata_contains_sampling_info(tmp_path: Path) 
     requested = tool_messages[2]["visual_feedback_metadata"]["requested_zoom_windows"][0]
     assert requested["sampling"]["sample_count"] >= runtime._BASE_ZOOM_SAMPLE_COUNT
     assert requested["sampling"]["mode"] == "dynamic_zoom_polyline"
+    assert requested["sampling"]["float_sampling"] is True
+    assert requested["sampling"]["sample_spacing_px"] == runtime._ZOOM_SAMPLE_SPACING_PX
+    assert requested["sampling"]["max_zoom_sample_count"] == runtime._MAX_ZOOM_SAMPLE_COUNT
 
 
 def test_visual_feedback_message_mentions_not_zoomed_coordinates(tmp_path: Path) -> None:
