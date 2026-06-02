@@ -1792,9 +1792,16 @@ class FreePenToolRuntime:
         for y in range(0, scaled_height, minor_step):
             color = light_gray if y % major_step != 0 else dark_gray
             cv2.line(zoomed, (0, y), (scaled_width - 1, y), color, 1, cv2.LINE_AA)
-        title_bar_height = 34
-        x_axis_bar_height = 30
-        left_axis_width = 44
+        axis_font_scale = 0.6
+        title_font_scale = 0.72
+        subtitle_font_scale = 0.58
+        title_line_height = 22
+        subtitle_line_height = 20
+        title_bar_height = title_line_height + subtitle_line_height + 12
+        x_axis_bar_height = 32
+        max_y_label = max(y0, y0 + height - 1)
+        (max_y_label_width, _), _ = cv2.getTextSize(str(max_y_label), cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, 1)
+        left_axis_width = max(44, max_y_label_width + 12)
         footer_height = 30
         top_padding = title_bar_height + x_axis_bar_height
         framed = cv2.copyMakeBorder(
@@ -1821,13 +1828,22 @@ class FreePenToolRuntime:
             white,
             -1,
         )
-        cv2.putText(framed, title, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.72, black, 2, cv2.LINE_AA)
+        cv2.putText(
+            framed,
+            title,
+            (10, 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            title_font_scale,
+            black,
+            2,
+            cv2.LINE_AA,
+        )
         cv2.putText(
             framed,
             f"origin=({x0},{y0}) size=({width},{height}) zoom={zoom_scale:.1f}x",
-            (10, title_bar_height - 8),
+            (10, 22 + subtitle_line_height),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.58,
+            subtitle_font_scale,
             black,
             1,
             cv2.LINE_AA,
@@ -1850,9 +1866,9 @@ class FreePenToolRuntime:
             cv2.putText(
                 framed,
                 label,
-                (text_x, title_bar_height + 22),
+                (text_x, title_bar_height + 24),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                axis_font_scale,
                 label_gray,
                 1,
                 cv2.LINE_AA,
@@ -1864,7 +1880,7 @@ class FreePenToolRuntime:
                 str(original_y),
                 (3, max(top_padding + 18, min(label_y + 6, top_padding + scaled_height - 4))),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                axis_font_scale,
                 label_gray,
                 1,
                 cv2.LINE_AA,
