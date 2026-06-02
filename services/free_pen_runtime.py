@@ -843,12 +843,14 @@ class FreePenToolRuntime:
     _MIN_ZOOM_WINDOW_HEIGHT_PX = 80.0
     _MAX_ZOOM_WINDOW_WIDTH_PX = 600.0
     _MAX_ZOOM_WINDOW_HEIGHT_PX = 600.0
-    _MIN_SEGMENT_ZOOM_WIDTH_PX = 220
-    _MIN_SEGMENT_ZOOM_HEIGHT_PX = 160
-    _MAX_SEGMENT_ZOOM_WIDTH_PX = 600
-    _MAX_SEGMENT_ZOOM_HEIGHT_PX = 420
+    _MIN_SEGMENT_ZOOM_WIDTH_PX = 180.0
+    _MIN_SEGMENT_ZOOM_HEIGHT_PX = 140.0
+    _MAX_SEGMENT_ZOOM_WIDTH_PX = 360.0
+    _MAX_SEGMENT_ZOOM_HEIGHT_PX = 240.0
     _MAX_REQUESTED_ZOOMS_PER_SEGMENT = 2
     _MAX_REQUESTED_ZOOMS_TOTAL = 8
+    _ZOOM_EDITOR_LEFT_RULER_WIDTH = 56
+    _ZOOM_EDITOR_TOP_RULER_HEIGHT = 36
 
     def run(self, source_image_path: Path, output_dir: Path) -> FreePenToolRunResult:
         import os
@@ -1562,19 +1564,12 @@ class FreePenToolRuntime:
         source_image: np.ndarray,
     ) -> list[dict[str, Any]]:
         tool = str(tool_call.get("tool"))
-        composite_image = canvas.render_composite(
-            source_image,
-            stroke_width=max(1, int(self.stroke_width)),
-            stroke_rgba=self.stroke_rgba,
-            sample_count_per_segment=max(8, int(self.sample_count_per_segment)),
-            show_handles=True,
-        )
         if tool == "request_segment_zoom":
             metadata = self._build_requested_segment_zoom_metadata(
                 tool_call=tool_call,
                 canvas=canvas,
                 current_segment_context=current_segment_context,
-                composite_image=composite_image,
+                source_image=source_image,
                 output_dir=output_dir,
                 step_index=step_index,
             )
@@ -1582,7 +1577,9 @@ class FreePenToolRuntime:
         if tool == "request_zoom_window":
             metadata = self._build_requested_window_zoom_metadata(
                 tool_call=tool_call,
-                composite_image=composite_image,
+                canvas=canvas,
+                current_segment_context=current_segment_context,
+                source_image=source_image,
                 output_dir=output_dir,
                 step_index=step_index,
             )
@@ -1595,7 +1592,7 @@ class FreePenToolRuntime:
         tool_call: dict[str, Any],
         canvas: FreePenCanvasState,
         current_segment_context: dict[str, Any],
-        composite_image: np.ndarray,
+        source_image: np.ndarray,
         output_dir: Path,
         step_index: int,
     ) -> dict[str, Any] | None:
@@ -1628,7 +1625,7 @@ class FreePenToolRuntime:
         y_min = float(np.min(point_array[:, 1])) - float(padding_px)
         x_max = float(np.max(point_array[:, 0])) + float(padding_px)
         y_max = float(np.max(point_array[:, 1])) + float(padding_px)
-        crop_origin, crop_size, clipped = self._normalize_zoom_crop_window(
+        crop_origin, crop_size, clipped, clamped = self._normalize_zoom_crop_window(
             x=x_min,
             y=y_min,
             width=max(1.0, x_max - x_min),
@@ -1641,13 +1638,15 @@ class FreePenToolRuntime:
             max_height=self._MAX_SEGMENT_ZOOM_HEIGHT_PX,
         )
         output_path = output_dir / f"round_{step_index:03d}_requested_segment_zoom_{segment_id}.png"
-        self._write_zoom_image(
-            composite_image=composite_image,
+        self._write_zoom_editor_view(
+            source_image=source_image,
+            canvas=canvas,
+            editable_geometry=editable_geometry,
             crop_origin=crop_origin,
             crop_size=crop_size,
             zoom_scale=float(tool_call["zoom_scale"]),
             output_path=output_path,
-            title=f"Requested zoom {segment_id}",
+            highlighted_segment_id=segment_id,
         )
         return {
             "type": "requested_segment_zoom",
@@ -1657,7 +1656,17 @@ class FreePenToolRuntime:
             "crop_size": [int(crop_size[0]), int(crop_size[1])],
             "zoom_scale": float(tool_call["zoom_scale"]),
             "coordinate_space": "original_image_px",
+            "render_mode": "zoom_editor_view",
+            "highlighted_segment_id": segment_id,
             "clipped": bool(clipped),
+            "clamped": bool(clamped),
+            "ruler": {
+                "top": True,
+                "left": True,
+                "labels_are_original_coordinates": True,
+                "minor_tick_step_px": 10,
+                "major_tick_step_px": 50,
+            },
             "grid": {
                 "minor_step_px": 10,
                 "major_step_px": 50,
@@ -1669,30 +1678,35 @@ class FreePenToolRuntime:
         self,
         *,
         tool_call: dict[str, Any],
-        composite_image: np.ndarray,
+        canvas: FreePenCanvasState,
+        current_segment_context: dict[str, Any],
+        source_image: np.ndarray,
         output_dir: Path,
         step_index: int,
     ) -> dict[str, Any] | None:
-        crop_origin, crop_size, clipped = self._normalize_zoom_crop_window(
+        crop_origin, crop_size, clipped, clamped = self._normalize_zoom_crop_window(
             x=float(tool_call["x"]),
             y=float(tool_call["y"]),
             width=float(tool_call["width"]),
             height=float(tool_call["height"]),
-            canvas_width=int(composite_image.shape[1]),
-            canvas_height=int(composite_image.shape[0]),
+            canvas_width=int(canvas.width),
+            canvas_height=int(canvas.height),
             min_width=self._MIN_ZOOM_WINDOW_WIDTH_PX,
             min_height=self._MIN_ZOOM_WINDOW_HEIGHT_PX,
             max_width=self._MAX_ZOOM_WINDOW_WIDTH_PX,
             max_height=self._MAX_ZOOM_WINDOW_HEIGHT_PX,
         )
         output_path = output_dir / f"round_{step_index:03d}_requested_zoom_window_001.png"
-        self._write_zoom_image(
-            composite_image=composite_image,
+        highlighted_segment_id = current_segment_context.get("focus", {}).get("segment_id")
+        self._write_zoom_editor_view(
+            source_image=source_image,
+            canvas=canvas,
+            editable_geometry=current_segment_context["editable_geometry"],
             crop_origin=crop_origin,
             crop_size=crop_size,
             zoom_scale=float(tool_call["zoom_scale"]),
             output_path=output_path,
-            title="Requested window",
+            highlighted_segment_id=str(highlighted_segment_id) if highlighted_segment_id is not None else None,
         )
         return {
             "type": "requested_zoom_window",
@@ -1701,7 +1715,17 @@ class FreePenToolRuntime:
             "crop_size": [int(crop_size[0]), int(crop_size[1])],
             "zoom_scale": float(tool_call["zoom_scale"]),
             "coordinate_space": "original_image_px",
+            "render_mode": "zoom_editor_view",
+            "highlighted_segment_id": highlighted_segment_id,
             "clipped": bool(clipped),
+            "clamped": bool(clamped),
+            "ruler": {
+                "top": True,
+                "left": True,
+                "labels_are_original_coordinates": True,
+                "minor_tick_step_px": 10,
+                "major_tick_step_px": 50,
+            },
             "grid": {
                 "minor_step_px": 10,
                 "major_step_px": 50,
@@ -1722,7 +1746,7 @@ class FreePenToolRuntime:
         min_height: float,
         max_width: float,
         max_height: float,
-    ) -> tuple[tuple[int, int], tuple[int, int], bool]:
+    ) -> tuple[tuple[int, int], tuple[int, int], bool, bool]:
         requested_x0 = float(x)
         requested_y0 = float(y)
         requested_x1 = float(x + width)
@@ -1731,6 +1755,11 @@ class FreePenToolRuntime:
         y0 = max(0.0, requested_y0)
         x1 = min(float(canvas_width), requested_x1)
         y1 = min(float(canvas_height), requested_y1)
+        bounded_width = max(0.0, x1 - x0)
+        bounded_height = max(0.0, y1 - y0)
+        target_width = min(max(bounded_width, float(min_width)), float(max_width), float(canvas_width))
+        target_height = min(max(bounded_height, float(min_height)), float(max_height), float(canvas_height))
+        clamped = abs(target_width - bounded_width) >= 0.5 or abs(target_height - bounded_height) >= 0.5
         if x1 <= x0:
             center_x = min(max((requested_x0 + requested_x1) * 0.5, 0.0), float(canvas_width))
             half = max(1.0, min_width * 0.5)
@@ -1743,8 +1772,8 @@ class FreePenToolRuntime:
             y1 = min(float(canvas_height), center_y + half)
         center_x = (x0 + x1) * 0.5
         center_y = (y0 + y1) * 0.5
-        final_width = min(max(float(x1 - x0), float(min_width)), float(max_width), float(canvas_width))
-        final_height = min(max(float(y1 - y0), float(min_height)), float(max_height), float(canvas_height))
+        final_width = target_width
+        final_height = target_height
         x0 = max(0.0, min(float(canvas_width) - final_width, center_x - (final_width * 0.5)))
         y0 = max(0.0, min(float(canvas_height) - final_height, center_y - (final_height * 0.5)))
         x1 = x0 + final_width
@@ -1760,162 +1789,362 @@ class FreePenToolRuntime:
             and abs(crop_size[0] - width) < 0.5
             and abs(crop_size[1] - height) < 0.5
         )
-        return crop_origin, crop_size, clipped
+        return crop_origin, crop_size, clipped, clamped
 
-    def _write_zoom_image(
+    def _write_zoom_editor_view(
         self,
         *,
-        composite_image: np.ndarray,
+        source_image: np.ndarray,
+        canvas: FreePenCanvasState,
+        editable_geometry: dict[str, Any],
         crop_origin: tuple[int, int],
         crop_size: tuple[int, int],
         zoom_scale: float,
         output_path: Path,
-        title: str,
+        highlighted_segment_id: str | None,
     ) -> None:
         x0, y0 = crop_origin
         width, height = crop_size
-        crop = composite_image[y0 : y0 + height, x0 : x0 + width]
+        source_bgr = self._to_bgr_image(source_image)
+        source_crop = source_bgr[y0 : y0 + height, x0 : x0 + width]
         scaled_width = max(1, int(round(width * zoom_scale)))
         scaled_height = max(1, int(round(height * zoom_scale)))
-        zoomed = cv2.resize(crop, (scaled_width, scaled_height), interpolation=cv2.INTER_NEAREST)
-        zoomed = zoomed.copy()
-        white = (255, 255, 255)
-        black = (0, 0, 0)
-        light_gray = (210, 210, 210)
-        dark_gray = (120, 120, 120)
-        label_gray = (40, 40, 40)
-        ruler_bg = (36, 36, 36)
-        ruler_tick = (220, 220, 220)
-        ruler_text = (245, 245, 245)
+        zoomed_source = cv2.resize(source_crop, (scaled_width, scaled_height), interpolation=cv2.INTER_NEAREST)
+        left_ruler_width = self._ZOOM_EDITOR_LEFT_RULER_WIDTH
+        top_ruler_height = self._ZOOM_EDITOR_TOP_RULER_HEIGHT
+        image_origin_x = left_ruler_width
+        image_origin_y = top_ruler_height
+        editor = np.full((top_ruler_height + scaled_height, left_ruler_width + scaled_width, 3), 255, dtype=np.uint8)
+        editor[image_origin_y : image_origin_y + scaled_height, image_origin_x : image_origin_x + scaled_width] = zoomed_source
+        self._draw_zoom_editor_grid(
+            editor=editor,
+            image_origin=(image_origin_x, image_origin_y),
+            image_size=(scaled_width, scaled_height),
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+        )
+        self._draw_zoom_editor_geometry(
+            editor=editor,
+            canvas=canvas,
+            editable_geometry=editable_geometry,
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+            image_origin=(image_origin_x, image_origin_y),
+            highlighted_segment_id=highlighted_segment_id,
+        )
+        self._draw_zoom_editor_rulers(
+            editor=editor,
+            crop_origin=crop_origin,
+            crop_size=crop_size,
+            zoom_scale=zoom_scale,
+            left_ruler_width=left_ruler_width,
+            top_ruler_height=top_ruler_height,
+        )
+        self._draw_zoom_editor_overlay_info(
+            editor=editor,
+            crop_origin=crop_origin,
+            crop_size=crop_size,
+            zoom_scale=zoom_scale,
+            image_origin=(image_origin_x, image_origin_y),
+            highlighted_segment_id=highlighted_segment_id,
+        )
+        cv2.imwrite(str(output_path), editor)
+
+    def _draw_zoom_editor_grid(
+        self,
+        *,
+        editor: np.ndarray,
+        image_origin: tuple[int, int],
+        image_size: tuple[int, int],
+        crop_origin: tuple[int, int],
+        zoom_scale: float,
+    ) -> None:
+        image_origin_x, image_origin_y = image_origin
+        image_width, image_height = image_size
         minor_step = max(1, int(round(10 * zoom_scale)))
         major_step = max(1, int(round(50 * zoom_scale)))
-        for x in range(0, scaled_width, minor_step):
-            color = light_gray if x % major_step != 0 else dark_gray
-            cv2.line(zoomed, (x, 0), (x, scaled_height - 1), color, 1, cv2.LINE_AA)
-        for y in range(0, scaled_height, minor_step):
-            color = light_gray if y % major_step != 0 else dark_gray
-            cv2.line(zoomed, (0, y), (scaled_width - 1, y), color, 1, cv2.LINE_AA)
-        axis_font_scale = 0.62
-        x_axis_bar_height = 28
-        max_y_label = max(y0, y0 + height - 1)
-        (max_y_label_width, _), _ = cv2.getTextSize(str(max_y_label), cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, 1)
-        left_axis_width = max(46, max_y_label_width + 16)
-        top_padding = x_axis_bar_height
-        framed = cv2.copyMakeBorder(
-            zoomed,
-            top_padding,
-            0,
-            left_axis_width,
-            0,
-            cv2.BORDER_CONSTANT,
-            value=white,
-        )
-        cv2.rectangle(
-            framed,
-            (0, 0),
-            (framed.shape[1] - 1, top_padding - 1),
-            ruler_bg,
-            -1,
-        )
-        cv2.rectangle(
-            framed,
-            (0, top_padding),
-            (left_axis_width - 1, top_padding + scaled_height - 1),
-            ruler_bg,
-            -1,
-        )
-        cv2.rectangle(
-            framed,
-            (0, 0),
-            (left_axis_width - 1, top_padding - 1),
-            ruler_bg,
-            -1,
-        )
-        cv2.line(
-            framed,
-            (left_axis_width, 0),
-            (left_axis_width, top_padding + scaled_height - 1),
-            dark_gray,
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.line(
-            framed,
-            (left_axis_width, top_padding),
-            (left_axis_width + scaled_width - 1, top_padding),
-            dark_gray,
-            1,
-            cv2.LINE_AA,
-        )
-        for original_x in range(((x0 + 49) // 50) * 50, x0 + width, 50):
-            label_x = left_axis_width + int(round((original_x - x0) * zoom_scale))
-            label = str(original_x)
-            (text_width, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, 1)
-            text_x = max(left_axis_width + 2, min(label_x - text_width // 2, framed.shape[1] - text_width - 4))
-            major_tick_top = max(2, x_axis_bar_height - 12)
-            cv2.line(
-                framed,
-                (label_x, major_tick_top),
-                (label_x, top_padding - 1),
-                ruler_tick,
-                1,
-                cv2.LINE_AA,
-            )
+        x0, y0 = crop_origin
+        minor_color = (236, 236, 236)
+        major_color = (206, 206, 206)
+        first_x = ((x0 + 9) // 10) * 10
+        for original_x in range(first_x, x0 + int(round(image_width / zoom_scale)) + 1, 10):
+            scaled_x = int(round((original_x - x0) * zoom_scale))
+            color = major_color if original_x % 50 == 0 else minor_color
+            x = image_origin_x + min(max(scaled_x, 0), image_width - 1)
+            cv2.line(editor, (x, image_origin_y), (x, image_origin_y + image_height - 1), color, 1, cv2.LINE_AA)
+        first_y = ((y0 + 9) // 10) * 10
+        for original_y in range(first_y, y0 + int(round(image_height / zoom_scale)) + 1, 10):
+            scaled_y = int(round((original_y - y0) * zoom_scale))
+            color = major_color if original_y % 50 == 0 else minor_color
+            y = image_origin_y + min(max(scaled_y, 0), image_height - 1)
+            cv2.line(editor, (image_origin_x, y), (image_origin_x + image_width - 1, y), color, 1, cv2.LINE_AA)
+
+    def _draw_zoom_editor_rulers(
+        self,
+        *,
+        editor: np.ndarray,
+        crop_origin: tuple[int, int],
+        crop_size: tuple[int, int],
+        zoom_scale: float,
+        left_ruler_width: int,
+        top_ruler_height: int,
+    ) -> None:
+        x0, y0 = crop_origin
+        width, height = crop_size
+        scaled_width = max(1, int(round(width * zoom_scale)))
+        scaled_height = max(1, int(round(height * zoom_scale)))
+        ruler_bg = (238, 238, 238)
+        ruler_tick = (96, 96, 96)
+        ruler_text = (56, 56, 56)
+        border_color = (160, 160, 160)
+        axis_font_scale = 0.56
+        minor_step = 10
+        major_step = 50
+        cv2.rectangle(editor, (0, 0), (editor.shape[1] - 1, top_ruler_height - 1), ruler_bg, -1)
+        cv2.rectangle(editor, (0, top_ruler_height), (left_ruler_width - 1, editor.shape[0] - 1), ruler_bg, -1)
+        cv2.rectangle(editor, (0, 0), (left_ruler_width - 1, top_ruler_height - 1), ruler_bg, -1)
+        cv2.line(editor, (left_ruler_width, 0), (left_ruler_width, editor.shape[0] - 1), border_color, 1, cv2.LINE_AA)
+        cv2.line(editor, (left_ruler_width, top_ruler_height), (editor.shape[1] - 1, top_ruler_height), border_color, 1, cv2.LINE_AA)
+        cv2.line(editor, (0, top_ruler_height - 1), (editor.shape[1] - 1, top_ruler_height - 1), border_color, 1, cv2.LINE_AA)
+        cv2.line(editor, (left_ruler_width - 1, 0), (left_ruler_width - 1, editor.shape[0] - 1), border_color, 1, cv2.LINE_AA)
+        first_x = ((x0 + minor_step - 1) // minor_step) * minor_step
+        for original_x in range(first_x, x0 + width, minor_step):
+            tick_x = left_ruler_width + int(round((original_x - x0) * zoom_scale))
+            tick_len = 14 if original_x % major_step == 0 else 7
+            cv2.line(editor, (tick_x, top_ruler_height - tick_len), (tick_x, top_ruler_height - 1), ruler_tick, 1, cv2.LINE_AA)
+            if original_x % major_step == 0:
+                label = str(original_x)
+                (text_width, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, 1)
+                text_x = max(left_ruler_width + 2, min(tick_x - text_width // 2, editor.shape[1] - text_width - 2))
+                cv2.putText(editor, label, (text_x, 16), cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, ruler_text, 1, cv2.LINE_AA)
+        first_y = ((y0 + minor_step - 1) // minor_step) * minor_step
+        for original_y in range(first_y, y0 + height, minor_step):
+            tick_y = top_ruler_height + int(round((original_y - y0) * zoom_scale))
+            tick_len = 14 if original_y % major_step == 0 else 7
+            cv2.line(editor, (left_ruler_width - tick_len, tick_y), (left_ruler_width - 1, tick_y), ruler_tick, 1, cv2.LINE_AA)
+            if original_y % major_step == 0:
+                label = str(original_y)
+                (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, 1)
+                text_x = max(2, left_ruler_width - text_width - 4)
+                text_y = max(top_ruler_height + text_height, min(tick_y + text_height // 2, editor.shape[0] - 4))
+                cv2.putText(editor, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, axis_font_scale, ruler_text, 1, cv2.LINE_AA)
+
+    def _draw_zoom_editor_overlay_info(
+        self,
+        *,
+        editor: np.ndarray,
+        crop_origin: tuple[int, int],
+        crop_size: tuple[int, int],
+        zoom_scale: float,
+        image_origin: tuple[int, int],
+        highlighted_segment_id: str | None,
+    ) -> None:
+        image_origin_x, image_origin_y = image_origin
+        info_lines = [
+            f"{highlighted_segment_id or 'Zoom view'}  {int(round(zoom_scale))}x",
+            f"origin=({crop_origin[0]},{crop_origin[1]}) size={crop_size[0]}x{crop_size[1]} original image_px",
+        ]
+        padding = 8
+        line_height = 15
+        box_width = max(cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0][0] for line in info_lines) + (padding * 2)
+        box_height = len(info_lines) * line_height + padding
+        x = image_origin_x + 8
+        y = image_origin_y + 8
+        cv2.rectangle(editor, (x, y), (x + box_width, y + box_height), (255, 255, 255), -1)
+        cv2.rectangle(editor, (x, y), (x + box_width, y + box_height), (170, 170, 170), 1)
+        for index, line in enumerate(info_lines):
             cv2.putText(
-                framed,
-                label,
-                (text_x, 14),
+                editor,
+                line,
+                (x + padding, y + padding + 10 + (index * line_height)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                axis_font_scale,
-                ruler_text,
+                0.45,
+                (40, 40, 40),
                 1,
                 cv2.LINE_AA,
             )
-        for scaled_x in range(0, scaled_width, minor_step):
-            if scaled_x % major_step == 0:
-                continue
-            tick_x = left_axis_width + scaled_x
-            cv2.line(
-                framed,
-                (tick_x, x_axis_bar_height - 7),
-                (tick_x, top_padding - 1),
-                ruler_tick,
-                1,
-                cv2.LINE_AA,
+
+    def _draw_zoom_editor_geometry(
+        self,
+        *,
+        editor: np.ndarray,
+        canvas: FreePenCanvasState,
+        editable_geometry: dict[str, Any],
+        crop_origin: tuple[int, int],
+        zoom_scale: float,
+        image_origin: tuple[int, int],
+        highlighted_segment_id: str | None,
+    ) -> None:
+        if not editable_geometry["paths"]:
+            return
+        geometry_path = editable_geometry["paths"][0]
+        segment_payloads: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for segment in geometry_path["segments"]:
+            record = self._segment_record_from_canvas(
+                canvas=canvas,
+                editable_geometry=editable_geometry,
+                segment_id=str(segment["id"]),
             )
-        for original_y in range(((y0 + 49) // 50) * 50, y0 + height, 50):
-            label_y = int(round((original_y - y0) * zoom_scale)) + top_padding
-            cv2.line(
-                framed,
-                (left_axis_width - 12, label_y),
-                (left_axis_width - 1, label_y),
-                ruler_tick,
-                1,
-                cv2.LINE_AA,
+            if record is not None:
+                segment_payloads.append((segment, record))
+        normal_segments = [payload for payload in segment_payloads if str(payload[0]["id"]) != str(highlighted_segment_id)]
+        highlighted_segments = [payload for payload in segment_payloads if str(payload[0]["id"]) == str(highlighted_segment_id)]
+        for segment, record in [*normal_segments, *highlighted_segments]:
+            self._draw_zoom_editor_segment(
+                editor=editor,
+                segment=segment,
+                segment_record=record,
+                crop_origin=crop_origin,
+                zoom_scale=zoom_scale,
+                image_origin=image_origin,
+                highlighted=str(segment["id"]) == str(highlighted_segment_id),
             )
-            cv2.putText(
-                framed,
-                str(original_y),
-                (3, max(top_padding + 18, min(label_y + 6, top_padding + scaled_height - 4))),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                axis_font_scale,
-                ruler_text,
-                1,
-                cv2.LINE_AA,
+        for anchor in geometry_path["anchors"]:
+            self._draw_zoom_editor_anchor(
+                editor=editor,
+                anchor=anchor,
+                crop_origin=crop_origin,
+                zoom_scale=zoom_scale,
+                image_origin=image_origin,
             )
-        for scaled_y in range(0, scaled_height, minor_step):
-            if scaled_y % major_step == 0:
-                continue
-            tick_y = top_padding + scaled_y
-            cv2.line(
-                framed,
-                (left_axis_width - 7, tick_y),
-                (left_axis_width - 1, tick_y),
-                ruler_tick,
-                1,
-                cv2.LINE_AA,
-            )
-        cv2.imwrite(str(output_path), framed)
+
+    def _draw_zoom_editor_segment(
+        self,
+        *,
+        editor: np.ndarray,
+        segment: dict[str, Any],
+        segment_record: dict[str, Any],
+        crop_origin: tuple[int, int],
+        zoom_scale: float,
+        image_origin: tuple[int, int],
+        highlighted: bool,
+    ) -> None:
+        stroke_color = (0, 170, 255) if not highlighted else (0, 110, 255)
+        stroke_width = 2 if not highlighted else 4
+        sampled = self._sample_segment_points(segment_record=segment_record)
+        if sampled.size == 0:
+            return
+        display_points = np.asarray(
+            [
+                self._map_original_point_to_zoom(
+                    point=(float(point[0]), float(point[1])),
+                    crop_origin=crop_origin,
+                    zoom_scale=zoom_scale,
+                    image_origin=image_origin,
+                )
+                for point in sampled
+            ],
+            dtype=np.int32,
+        )
+        cv2.polylines(editor, [display_points], isClosed=False, color=stroke_color, thickness=stroke_width, lineType=cv2.LINE_AA)
+        mid_point = display_points[len(display_points) // 2]
+        self._draw_outlined_text(
+            image=editor,
+            text=str(segment["id"]),
+            origin=(int(mid_point[0] + 6), int(mid_point[1] - 6)),
+            font_scale=0.7 if highlighted else 0.58,
+            fill_color=(18, 18, 18),
+            outline_color=(250, 250, 250),
+        )
+        if segment_record["raw"]["type"] != "cubic":
+            return
+        from_point = self._map_original_point_to_zoom(
+            point=(float(segment_record["from_point"][0]), float(segment_record["from_point"][1])),
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+            image_origin=image_origin,
+        )
+        to_point = self._map_original_point_to_zoom(
+            point=(float(segment_record["to_point"][0]), float(segment_record["to_point"][1])),
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+            image_origin=image_origin,
+        )
+        c1_point = self._map_original_point_to_zoom(
+            point=(float(segment_record["raw"]["c1"][0]), float(segment_record["raw"]["c1"][1])),
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+            image_origin=image_origin,
+        )
+        c2_point = self._map_original_point_to_zoom(
+            point=(float(segment_record["raw"]["c2"][0]), float(segment_record["raw"]["c2"][1])),
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+            image_origin=image_origin,
+        )
+        handle_color = (0, 210, 0)
+        handle_radius = 5 if highlighted else 4
+        cv2.line(editor, from_point, c1_point, handle_color, 1, cv2.LINE_AA)
+        cv2.line(editor, to_point, c2_point, handle_color, 1, cv2.LINE_AA)
+        cv2.circle(editor, c1_point, handle_radius, handle_color, thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(editor, c2_point, handle_radius, handle_color, thickness=-1, lineType=cv2.LINE_AA)
+        if highlighted:
+            self._draw_outlined_text(editor, "c1", (c1_point[0] + 5, c1_point[1] - 5), 0.5, (18, 18, 18), (250, 250, 250))
+            self._draw_outlined_text(editor, "c2", (c2_point[0] + 5, c2_point[1] - 5), 0.5, (18, 18, 18), (250, 250, 250))
+
+    def _draw_zoom_editor_anchor(
+        self,
+        *,
+        editor: np.ndarray,
+        anchor: dict[str, Any],
+        crop_origin: tuple[int, int],
+        zoom_scale: float,
+        image_origin: tuple[int, int],
+    ) -> None:
+        point = self._map_original_point_to_zoom(
+            point=(float(anchor["p"][0]), float(anchor["p"][1])),
+            crop_origin=crop_origin,
+            zoom_scale=zoom_scale,
+            image_origin=image_origin,
+        )
+        cv2.circle(editor, point, 7, (255, 0, 0), thickness=-1, lineType=cv2.LINE_AA)
+        self._draw_outlined_text(
+            image=editor,
+            text=str(anchor["id"]),
+            origin=(point[0] + 6, point[1] - 6),
+            font_scale=0.72,
+            fill_color=(18, 18, 18),
+            outline_color=(250, 250, 250),
+        )
+
+    def _map_original_point_to_zoom(
+        self,
+        *,
+        point: tuple[float, float],
+        crop_origin: tuple[int, int],
+        zoom_scale: float,
+        image_origin: tuple[int, int],
+    ) -> tuple[int, int]:
+        image_origin_x, image_origin_y = image_origin
+        x0, y0 = crop_origin
+        return (
+            int(round(image_origin_x + ((float(point[0]) - float(x0)) * float(zoom_scale)))),
+            int(round(image_origin_y + ((float(point[1]) - float(y0)) * float(zoom_scale)))),
+        )
+
+    @staticmethod
+    def _draw_outlined_text(
+        image: np.ndarray,
+        text: str,
+        origin: tuple[int, int],
+        font_scale: float,
+        fill_color: tuple[int, int, int],
+        outline_color: tuple[int, int, int],
+    ) -> None:
+        cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, font_scale, outline_color, 3, cv2.LINE_AA)
+        cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, font_scale, fill_color, 1, cv2.LINE_AA)
+
+    @staticmethod
+    def _to_bgr_image(image: np.ndarray) -> np.ndarray:
+        if image.ndim == 2:
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        if image.shape[2] == 4:
+            alpha = image[:, :, 3:4].astype(np.float32) / 255.0
+            rgb = (image[:, :, :3].astype(np.float32) * alpha) + (255.0 * (1.0 - alpha))
+            return np.clip(rgb, 0.0, 255.0).astype(np.uint8)
+        if image.shape[2] == 3:
+            return image.copy()
+        raise ValueError(f"unsupported source image shape: {image.shape}")
     
     def _preflight_tool_call(
         self,
@@ -2758,16 +2987,19 @@ class FreePenToolRuntime:
             if not isinstance(image_path_value, str):
                 continue
             clipped_note = " The requested crop was clipped to the image bounds." if requested_zoom.get("clipped") else ""
+            clamped_note = " The requested crop was clamped to the configured zoom window limits." if requested_zoom.get("clamped") else ""
             content.extend(
                 self._build_image_parts(
                     semantic_text=(
                         "Requested zoom feedback after your previous inspection tool call. "
-                        "This zoom image is only a visual aid. "
+                        "This image is a local editor view, not a new coordinate system. "
+                        "Top and left rulers show original image_px coordinates. "
                         "Grid labels use original image_px coordinates. "
                         "Tool calls must still use original image_px coordinates. "
                         "Do not use zoomed display pixels as tool coordinates. "
-                        "Use this zoom image to decide the next single tool call."
+                        "Inspect the highlighted current segment before choosing the next tool."
                         + clipped_note
+                        + clamped_note
                     ),
                     image_path=Path(image_path_value),
                     resolver=resolver,

@@ -1313,31 +1313,35 @@ def test_request_segment_zoom_does_not_modify_canvas(tmp_path: Path) -> None:
     assert any("original image_px" in line for line in current_feedback)
 
 
-def test_write_zoom_image_renders_dedicated_x_and_y_axis_labels(tmp_path: Path) -> None:
+def test_write_zoom_editor_view_renders_rulers_and_margins(tmp_path: Path) -> None:
     runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
-    composite = np.full((240, 320, 3), 255, dtype=np.uint8)
-    cv2.line(composite, (145, 120), (220, 65), (0, 0, 0), thickness=3)
+    source = np.full((240, 320, 3), 255, dtype=np.uint8)
+    canvas = FreePenCanvasState(width=320, height=240)
+    canvas.apply_tool_call({"tool": "start_path", "x": 145, "y": 120})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [160, 110], "c2": [195, 90], "p": [220, 65]})
     output_path = tmp_path / "zoom.png"
 
-    runtime._write_zoom_image(
-        composite_image=composite,
+    runtime._write_zoom_editor_view(
+        source_image=source,
+        canvas=canvas,
+        editable_geometry=canvas.editable_geometry(),
         crop_origin=(133, 35),
         crop_size=(96, 72),
         zoom_scale=4.0,
         output_path=output_path,
-        title="Requested zoom S1",
+        highlighted_segment_id="S1",
     )
 
     image = cv2.imread(str(output_path), cv2.IMREAD_COLOR)
     assert image is not None
-    assert image.shape[0] == 72 * 4 + 28
-    assert image.shape[1] > 96 * 4
-    x_axis_band = image[:28, 48:]
-    y_axis_band = image[28 : 28 + 72 * 4, :64]
-    assert np.any(np.all(x_axis_band < 80, axis=2))
-    assert np.any(np.all(y_axis_band < 80, axis=2))
-    assert np.any(np.any(x_axis_band > 200, axis=2))
-    assert np.any(np.any(y_axis_band > 200, axis=2))
+    assert image.shape[0] == (72 * 4) + runtime._ZOOM_EDITOR_TOP_RULER_HEIGHT
+    assert image.shape[1] == (96 * 4) + runtime._ZOOM_EDITOR_LEFT_RULER_WIDTH
+    x_axis_band = image[: runtime._ZOOM_EDITOR_TOP_RULER_HEIGHT, runtime._ZOOM_EDITOR_LEFT_RULER_WIDTH :]
+    y_axis_band = image[runtime._ZOOM_EDITOR_TOP_RULER_HEIGHT :, : runtime._ZOOM_EDITOR_LEFT_RULER_WIDTH]
+    assert np.any(np.all(x_axis_band < 120, axis=2))
+    assert np.any(np.all(y_axis_band < 120, axis=2))
+    assert np.any(np.all(x_axis_band > 220, axis=2))
+    assert np.any(np.all(y_axis_band > 220, axis=2))
 
 
 def test_request_zoom_window_does_not_modify_canvas(tmp_path: Path) -> None:
@@ -2563,6 +2567,11 @@ def test_request_segment_zoom_creates_image_file_and_metadata(tmp_path: Path) ->
     assert requested["coordinate_space"] == "original_image_px"
     assert requested["segment_id"] == "S1"
     assert Path(requested["path"]).name == zoom_path.name
+    assert requested["render_mode"] == "zoom_editor_view"
+    assert requested["highlighted_segment_id"] == "S1"
+    assert requested["ruler"]["top"] is True
+    assert requested["ruler"]["left"] is True
+    assert requested["ruler"]["labels_are_original_coordinates"] is True
 
 
 def test_request_zoom_window_creates_image_file(tmp_path: Path) -> None:
@@ -2582,6 +2591,12 @@ def test_request_zoom_window_creates_image_file(tmp_path: Path) -> None:
     runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=2)
     runtime.run(input_path, output_dir)
     assert (output_dir / "round_001_requested_zoom_window_001.png").exists()
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [json.loads(message["content"]) for message in payload["messages"] if message["role"] == "tool"]
+    requested = tool_messages[0]["visual_feedback_metadata"]["requested_zoom_windows"][0]
+    assert requested["render_mode"] == "zoom_editor_view"
+    assert requested["ruler"]["top"] is True
+    assert requested["ruler"]["left"] is True
 
 
 def test_request_zoom_window_outside_canvas_clips(tmp_path: Path) -> None:
@@ -2604,6 +2619,34 @@ def test_request_zoom_window_outside_canvas_clips(tmp_path: Path) -> None:
     tool_messages = [json.loads(message["content"]) for message in payload["messages"] if message["role"] == "tool"]
     requested = tool_messages[0]["visual_feedback_metadata"]["requested_zoom_windows"][0]
     assert requested["clipped"] is True
+
+
+def test_segment_zoom_crop_clamped_to_max_size(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    output_dir = tmp_path / "request_segment_zoom_clamped_out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_image = np.full((720, 1280, 3), 255, dtype=np.uint8)
+    canvas = FreePenCanvasState(width=1280, height=720)
+    canvas.apply_tool_call({"tool": "start_path", "x": 240, "y": 420})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [360, 280], "c2": [680, 190], "p": [920, 160]})
+    current_segment_context = runtime._build_current_segment_context(
+        canvas=canvas,
+        source_distance_map=runtime._build_source_distance_map(runtime._build_source_mask(source_image)),
+        focus_tool_call={"tool": "curve_to", "c1": [360, 280], "c2": [680, 190], "p": [920, 160]},
+        segment_refinement={},
+    )
+    requested = runtime._build_requested_segment_zoom_metadata(
+        tool_call={"tool": "request_segment_zoom", "segment_id": "S1", "zoom_scale": 4, "padding_px": 500},
+        canvas=canvas,
+        current_segment_context=current_segment_context,
+        source_image=source_image,
+        output_dir=output_dir,
+        step_index=3,
+    )
+    assert requested is not None
+    assert requested["clamped"] is True
+    assert requested["crop_size"][0] <= runtime._MAX_SEGMENT_ZOOM_WIDTH_PX
+    assert requested["crop_size"][1] <= runtime._MAX_SEGMENT_ZOOM_HEIGHT_PX
 
 
 def test_visual_feedback_message_mentions_not_zoomed_coordinates(tmp_path: Path) -> None:
