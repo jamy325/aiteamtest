@@ -982,6 +982,7 @@ class FreePenToolRuntime:
                         rollback_count=rollback_count,
                         current_segment_context=current_segment_context,
                         source_distance_map=source_distance_map,
+                        segment_refinement=segment_refinement,
                     )
                     warnings = list(preflight_result["warnings"])
                     if not preflight_result["success"]:
@@ -1014,46 +1015,66 @@ class FreePenToolRuntime:
                             warnings,
                             rollback_applied,
                             current_feedback,
+                            execution_accepted,
                         ) = self._execute_tool_call(
                             tool_call=tool_call,
                             ai_reason=final_reason or "",
                             canvas=canvas,
                             successful_drawing_tool_calls=successful_drawing_tool_calls,
                             history=history,
+                            segment_refinement=segment_refinement,
                         )
-                        rollback_count += rollback_applied
-                        if tool_call["tool"] in {"undo_last", "rollback_to_step", "restart_path"}:
-                            segment_refinement = self._prune_segment_refinement_state(
-                                segment_refinement=segment_refinement,
+                        if not execution_accepted:
+                            rejected_step_count += 1
+                            rejected_tool_call = tool_call
+                            current_segment_context = self._build_current_segment_context(
                                 canvas=canvas,
+                                source_distance_map=source_distance_map,
+                                focus_tool_call=tool_call,
+                                segment_refinement=segment_refinement,
                             )
-                        current_segment_context = self._build_current_segment_context(
-                            canvas=canvas,
-                            source_distance_map=source_distance_map,
-                            focus_tool_call=tool_call,
-                            segment_refinement=segment_refinement,
-                        )
-                        segment_refinement = self._update_segment_refinement_state(
-                            segment_refinement=segment_refinement,
-                            tool_call=tool_call,
-                            current_segment_context=current_segment_context,
-                            canvas=canvas,
-                            successful_step_count=len(successful_drawing_tool_calls),
-                        )
-                        current_segment_context = self._build_current_segment_context(
-                            canvas=canvas,
-                            source_distance_map=source_distance_map,
-                            focus_tool_call=tool_call,
-                            segment_refinement=segment_refinement,
-                        )
-                        round_status = "tool_applied"
-                        execution_result = {
-                            "ok": True,
-                            "accepted": True,
-                            "runtime_description": runtime_description,
-                            "quality_summary": quality_summary,
-                            "warnings": warnings,
-                        }
+                            round_status = "rejected_action"
+                            execution_result = {
+                                "ok": False,
+                                "accepted": False,
+                                "runtime_description": runtime_description,
+                                "quality_summary": quality_summary,
+                                "warnings": warnings,
+                            }
+                        else:
+                            rollback_count += rollback_applied
+                            if tool_call["tool"] in {"undo_last", "rollback_to_step", "restart_path"}:
+                                segment_refinement = self._prune_segment_refinement_state(
+                                    segment_refinement=segment_refinement,
+                                    canvas=canvas,
+                                )
+                            current_segment_context = self._build_current_segment_context(
+                                canvas=canvas,
+                                source_distance_map=source_distance_map,
+                                focus_tool_call=tool_call,
+                                segment_refinement=segment_refinement,
+                            )
+                            segment_refinement = self._update_segment_refinement_state(
+                                segment_refinement=segment_refinement,
+                                tool_call=tool_call,
+                                current_segment_context=current_segment_context,
+                                canvas=canvas,
+                                successful_step_count=len(successful_drawing_tool_calls),
+                            )
+                            current_segment_context = self._build_current_segment_context(
+                                canvas=canvas,
+                                source_distance_map=source_distance_map,
+                                focus_tool_call=tool_call,
+                                segment_refinement=segment_refinement,
+                            )
+                            round_status = "tool_applied"
+                            execution_result = {
+                                "ok": True,
+                                "accepted": True,
+                                "runtime_description": runtime_description,
+                                "quality_summary": quality_summary,
+                                "warnings": warnings,
+                            }
                 elif final_decision == "finish":
                     finish_blocked_by_quality = bool(
                         current_segment_context["status"].get("may_advance_to_next_segment") is False
@@ -1421,6 +1442,7 @@ class FreePenToolRuntime:
         rollback_count: int,
         current_segment_context: dict[str, Any],
         source_distance_map: np.ndarray | None,
+        segment_refinement: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         tool = str(tool_call["tool"])
         warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
@@ -1644,8 +1666,11 @@ class FreePenToolRuntime:
                 reject_codes.add("segment_not_line")
                 warnings.append(self._warning("segment_not_line", f"{segment_id} is not a line segment."))
             elif tool == "restore_best_segment":
-                refinement_state = current_segment_context.get("refinement_summary", {})
-                if current_segment_context.get("best_candidate_hint", {}).get("can_restore") is not True:
+                best_geometry = self._get_best_segment_geometry(
+                    segment_refinement=segment_refinement,
+                    segment_id=segment_id,
+                )
+                if best_geometry is None:
                     reject_codes.add("best_segment_not_available")
                     warnings.append(self._warning("best_segment_not_available", f"No best segment geometry is available for {segment_id}.")) 
 
@@ -1698,7 +1723,8 @@ class FreePenToolRuntime:
         canvas: FreePenCanvasState,
         successful_drawing_tool_calls: list[dict[str, Any]],
         history: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any] | None, str, str, str, list[dict[str, Any]], int, list[str]]:
+        segment_refinement: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any] | None, str, str, str, list[dict[str, Any]], int, list[str], bool]:
         tool = str(tool_call["tool"])
         warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
         rollback_applied = 0
@@ -1717,6 +1743,7 @@ class FreePenToolRuntime:
                 warnings,
                 rollback_applied,
                 current_feedback,
+                True,
             )
 
         if tool == "undo_last":
@@ -1736,6 +1763,7 @@ class FreePenToolRuntime:
                 warnings,
                 rollback_applied,
                 current_feedback,
+                True,
             )
 
         if tool == "rollback_to_step":
@@ -1758,6 +1786,7 @@ class FreePenToolRuntime:
                 warnings,
                 rollback_applied,
                 current_feedback,
+                True,
             )
 
         if tool == "restart_path":
@@ -1778,6 +1807,7 @@ class FreePenToolRuntime:
                 warnings,
                 rollback_applied,
                 current_feedback,
+                True,
             )
 
         if tool in {"move_anchor", "move_handle", "set_segment_handles", "convert_line_to_curve", "restore_best_segment"}:
@@ -1786,7 +1816,40 @@ class FreePenToolRuntime:
                 canvas.successful_step_count += 1
                 canvas.step_count += 1
             elif tool == "restore_best_segment":
-                executed = self._restore_best_segment(canvas=canvas, tool_call=tool_call)
+                best_geometry = self._get_best_segment_geometry(
+                    segment_refinement=segment_refinement,
+                    segment_id=str(tool_call["segment_id"]),
+                )
+                executed = self._restore_best_segment(
+                    canvas=canvas,
+                    tool_call=tool_call,
+                    best_geometry=best_geometry,
+                )
+                if executed is None:
+                    warnings.append(
+                        self._warning(
+                            "best_segment_not_available",
+                            f"No best segment geometry is available for {tool_call['segment_id']}.",
+                        )
+                    )
+                    runtime_description = (
+                        f"Rejected restore_best_segment because no best recorded geometry is available for {tool_call['segment_id']}."
+                    )
+                    quality_summary = "restore_best_segment requires a previously recorded best geometry."
+                    current_feedback = [
+                        "No best segment geometry is available to restore.",
+                        "Use undo_last, rollback_to_step, restart_path, or continue local refinement if no best candidate is available.",
+                    ]
+                    return (
+                        None,
+                        runtime_description,
+                        "bad",
+                        quality_summary,
+                        warnings,
+                        rollback_applied,
+                        current_feedback,
+                        False,
+                    )
                 canvas.successful_step_count += 1
                 canvas.step_count += 1
             else:
@@ -1826,7 +1889,7 @@ class FreePenToolRuntime:
                 "Inspect the BLUE anchors and GREEN handles before continuing.",
                 "If the current segment is still misaligned, adjust handles or anchors before adding new geometry.",
             ]
-            return (executed, runtime_description, "good", quality_summary, warnings, rollback_applied, current_feedback)
+            return (executed, runtime_description, "good", quality_summary, warnings, rollback_applied, current_feedback, True)
 
         before_current_point = canvas.current_point
         executed = canvas.apply_tool_call(tool_call)
@@ -1840,7 +1903,7 @@ class FreePenToolRuntime:
         )
         runtime_description = self._runtime_description_for_tool(tool_call=tool_call, executed_tool_call=executed, before_current_point=before_current_point)
         current_feedback = self._feedback_from_executed_action(warnings=warnings, quality_summary=quality_summary, canvas=canvas)
-        return (executed, runtime_description, quality, quality_summary, warnings, rollback_applied, current_feedback)
+        return (executed, runtime_description, quality, quality_summary, warnings, rollback_applied, current_feedback, True)
 
     def _post_execution_warnings(
         self,
@@ -2544,7 +2607,10 @@ class FreePenToolRuntime:
             }
         if refinement_limit_reached:
             recommended = ["move_anchor", "undo_last", "rollback_to_step", "restart_path", "inspect_history", "stalled"]
-            if (refinement_state or {}).get("best_segment_geometry") is not None:
+            if self._normalize_best_segment_geometry(
+                segment_id=str(segment_id),
+                geometry=(refinement_state or {}).get("best_segment_geometry"),
+            ) is not None:
                 recommended.insert(0, "restore_best_segment")
             if focus.get("type") == "line":
                 recommended.insert(0, "convert_line_to_curve")
@@ -2625,6 +2691,59 @@ class FreePenToolRuntime:
         if segment_id is None:
             return None
         return segment_refinement.get(str(segment_id))
+
+    @classmethod
+    def _normalize_best_segment_geometry(
+        cls,
+        *,
+        segment_id: str,
+        geometry: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(geometry, dict):
+            return None
+        segment_type = str(geometry.get("type") or "").strip().lower()
+        if segment_type not in {"line", "cubic"}:
+            return None
+        point = geometry.get("p")
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            return None
+        point_x = cls._finite_number_or_none(point[0])
+        point_y = cls._finite_number_or_none(point[1])
+        if point_x is None or point_y is None:
+            return None
+        normalized: dict[str, Any] = {
+            "segment_id": str(segment_id),
+            "type": segment_type,
+            "p": [point_x, point_y],
+        }
+        if segment_type == "cubic":
+            c1 = geometry.get("c1")
+            c2 = geometry.get("c2")
+            if not isinstance(c1, (list, tuple)) or len(c1) != 2 or not isinstance(c2, (list, tuple)) or len(c2) != 2:
+                return None
+            c1x = cls._finite_number_or_none(c1[0])
+            c1y = cls._finite_number_or_none(c1[1])
+            c2x = cls._finite_number_or_none(c2[0])
+            c2y = cls._finite_number_or_none(c2[1])
+            if c1x is None or c1y is None or c2x is None or c2y is None:
+                return None
+            normalized["c1"] = [c1x, c1y]
+            normalized["c2"] = [c2x, c2y]
+        return normalized
+
+    def _get_best_segment_geometry(
+        self,
+        *,
+        segment_refinement: dict[str, dict[str, Any]] | None,
+        segment_id: str | None,
+    ) -> dict[str, Any] | None:
+        if segment_id is None or segment_refinement is None:
+            return None
+        payload = segment_refinement.get(str(segment_id)) or {}
+        return self._normalize_best_segment_geometry(
+            segment_id=str(segment_id),
+            geometry=payload.get("best_segment_geometry"),
+        )
 
     def _build_quality_delta(
         self,
@@ -2714,8 +2833,15 @@ class FreePenToolRuntime:
             if best_quality
             else {},
             "best_tool_call": (refinement_state or {}).get("best_tool_call"),
-            "best_segment_geometry": (refinement_state or {}).get("best_segment_geometry"),
-            "best_restore_available": (refinement_state or {}).get("best_segment_geometry") is not None,
+            "best_segment_geometry": self._normalize_best_segment_geometry(
+                segment_id=str(segment_id),
+                geometry=(refinement_state or {}).get("best_segment_geometry"),
+            ),
+            "best_restore_available": self._normalize_best_segment_geometry(
+                segment_id=str(segment_id),
+                geometry=(refinement_state or {}).get("best_segment_geometry"),
+            )
+            is not None,
             "created_at_successful_step": (refinement_state or {}).get("created_at_successful_step"),
             "rollback_before_segment_step": (
                 None
@@ -2739,7 +2865,10 @@ class FreePenToolRuntime:
                 "message": "No current segment exists yet.",
             }
         best_quality = (refinement_state or {}).get("best_quality") or {}
-        can_restore = (refinement_state or {}).get("best_segment_geometry") is not None
+        can_restore = self._normalize_best_segment_geometry(
+            segment_id=str(segment_id),
+            geometry=(refinement_state or {}).get("best_segment_geometry"),
+        ) is not None
         message = "No best candidate is currently recorded for this segment."
         if can_restore:
             message = "The best known version of this segment is available. Use restore_best_segment before trying rollback or split."
@@ -2863,13 +2992,17 @@ class FreePenToolRuntime:
         *,
         canvas: FreePenCanvasState,
         tool_call: dict[str, Any],
-    ) -> dict[str, Any]:
+        best_geometry: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         path = canvas.current_path()
         if path is None:
             raise FreePenCanvasError("restore_best_segment requires an open path")
-        geometry = tool_call.get("best_segment_geometry")
-        if not isinstance(geometry, dict):
-            raise FreePenCanvasError(f"restore_best_segment requires best geometry for {tool_call['segment_id']}")
+        geometry = best_geometry or self._normalize_best_segment_geometry(
+            segment_id=str(tool_call["segment_id"]),
+            geometry=tool_call.get("best_segment_geometry"),
+        )
+        if geometry is None:
+            return None
         editable_geometry = self._build_editable_geometry(canvas)
         geometry_path = editable_geometry["paths"][0] if editable_geometry["paths"] else {"segments": []}
         drawable_segments = [segment for segment in path.segments if segment["type"] in {"line", "cubic"}]
@@ -2934,7 +3067,10 @@ class FreePenToolRuntime:
         previous_quality = existing.get("last_quality")
         best_quality = existing.get("best_quality")
         best_tool_call = existing.get("best_tool_call")
-        best_segment_geometry = existing.get("best_segment_geometry")
+        best_segment_geometry = self._normalize_best_segment_geometry(
+            segment_id=str(segment_id),
+            geometry=existing.get("best_segment_geometry"),
+        )
         refine_count = int(existing.get("refine_count", 0))
         worse_streak = int(existing.get("worse_streak", 0))
 
@@ -2955,7 +3091,10 @@ class FreePenToolRuntime:
             worse_streak = 0
             created_at_successful_step = existing.get("created_at_successful_step")
             if tool_call.get("best_segment_geometry"):
-                best_segment_geometry = dict(tool_call["best_segment_geometry"])
+                best_segment_geometry = self._normalize_best_segment_geometry(
+                    segment_id=str(segment_id),
+                    geometry=tool_call.get("best_segment_geometry"),
+                )
         else:
             refine_count += 1
             created_at_successful_step = existing.get("created_at_successful_step")
@@ -2974,11 +3113,17 @@ class FreePenToolRuntime:
             ):
                 best_quality = dict(current_quality)
                 best_tool_call = dict(tool_call)
-                best_segment_geometry = self._segment_geometry_from_canvas(canvas=canvas, segment_id=str(segment_id))
+                best_segment_geometry = self._normalize_best_segment_geometry(
+                    segment_id=str(segment_id),
+                    geometry=self._segment_geometry_from_canvas(canvas=canvas, segment_id=str(segment_id)),
+                )
             elif best_quality is None:
                 best_quality = dict(current_quality)
                 best_tool_call = dict(tool_call)
-                best_segment_geometry = self._segment_geometry_from_canvas(canvas=canvas, segment_id=str(segment_id))
+                best_segment_geometry = self._normalize_best_segment_geometry(
+                    segment_id=str(segment_id),
+                    geometry=self._segment_geometry_from_canvas(canvas=canvas, segment_id=str(segment_id)),
+                )
 
         updated[str(segment_id)] = {
             "refine_count": refine_count,

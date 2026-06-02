@@ -1179,8 +1179,186 @@ def test_restore_best_segment_allowed_when_refinement_limit_reached(tmp_path: Pa
             "best_candidate_hint": {"segment_id": "S1", "can_restore": True},
         },
         source_distance_map=None,
+        segment_refinement={
+            "S1": {
+                "best_segment_geometry": {
+                    "segment_id": "S1",
+                    "type": "cubic",
+                    "c1": [24, 40],
+                    "c2": [60, 26],
+                    "p": [84, 18],
+                }
+            }
+        },
     )
     assert preflight["success"] is True
+
+
+def test_best_candidate_hint_matches_real_restore_state(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    focus = {"segment_id": "S1", "type": "cubic"}
+    assert runtime._build_best_candidate_hint(focus=focus, refinement_state={})["can_restore"] is False
+    hint = runtime._build_best_candidate_hint(
+        focus=focus,
+        refinement_state={
+            "best_segment_geometry": {
+                "segment_id": "S1",
+                "type": "cubic",
+                "c1": [24, 40],
+                "c2": [60, 26],
+                "p": [84, 18],
+            }
+        },
+    )
+    assert hint["can_restore"] is True
+
+
+def test_restore_best_segment_missing_best_geometry_is_rejected_not_invalid(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]})
+    executed, runtime_description, quality, quality_summary, warnings, _, current_feedback, accepted = runtime._execute_tool_call(
+        tool_call={"tool": "restore_best_segment", "segment_id": "S1"},
+        ai_reason="restore best",
+        canvas=canvas,
+        successful_drawing_tool_calls=[
+            {"tool": "start_path", "x": 12, "y": 52},
+            {"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]},
+        ],
+        history=[],
+        segment_refinement={},
+    )
+    assert executed is None
+    assert accepted is False
+    assert quality == "bad"
+    assert "restore_best_segment" in runtime_description
+    assert "previously recorded best geometry" in quality_summary
+    assert {warning["code"] for warning in warnings} == {"best_segment_not_available"}
+    assert any("undo_last" in line or "rollback_to_step" in line for line in current_feedback)
+
+
+def test_allowed_next_actions_include_restore_only_when_best_exists(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    status_with_restore = runtime._build_current_segment_status(
+        focus={"segment_id": "S1", "type": "cubic"},
+        metrics={"current_segment": {"segment_id": "S1", "path_to_source_mean_px": 7.0, "path_to_source_max_px": 10.0, "path_to_source_p90_px": 9.0}},
+        refinement_state={
+            "refine_count": runtime._MAX_REFINES_PER_SEGMENT,
+            "best_segment_geometry": {
+                "segment_id": "S1",
+                "type": "cubic",
+                "c1": [24, 40],
+                "c2": [60, 26],
+                "p": [84, 18],
+            },
+        },
+        anchor_quality={"current_segment": {"from_anchor": {"status": "ok"}, "to_anchor": {"status": "ok"}}},
+    )
+    assert "restore_best_segment" in status_with_restore["recommended_next_tools"]
+    status_without_restore = runtime._build_current_segment_status(
+        focus={"segment_id": "S1", "type": "cubic"},
+        metrics={"current_segment": {"segment_id": "S1", "path_to_source_mean_px": 7.0, "path_to_source_max_px": 10.0, "path_to_source_p90_px": 9.0}},
+        refinement_state={"refine_count": runtime._MAX_REFINES_PER_SEGMENT},
+        anchor_quality={"current_segment": {"from_anchor": {"status": "ok"}, "to_anchor": {"status": "ok"}}},
+    )
+    assert "restore_best_segment" not in status_without_restore["recommended_next_tools"]
+
+
+def test_restore_best_segment_updates_current_point_when_last_segment(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]})
+    canvas.apply_tool_call({"tool": "set_segment_handles", "segment_id": "S1", "c1": [5, 5], "c2": [95, 5]})
+    runtime._restore_best_segment(
+        canvas=canvas,
+        tool_call={"tool": "restore_best_segment", "segment_id": "S1"},
+        best_geometry={
+            "segment_id": "S1",
+            "type": "cubic",
+            "c1": [24, 40],
+            "c2": [60, 26],
+            "p": [84, 18],
+        },
+    )
+    assert canvas.current_point == (84.0, 18.0)
+
+
+def test_restore_best_segment_undo_snapshot(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    successful = [
+        {"tool": "start_path", "x": 12, "y": 52},
+        {"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]},
+    ]
+    runtime._replay_successful_tool_calls(canvas=canvas, tool_calls=successful)
+    bad_geometry_call = {"tool": "set_segment_handles", "segment_id": "S1", "c1": [5, 5], "c2": [95, 5]}
+    canvas.apply_tool_call(bad_geometry_call)
+    successful.append(dict(bad_geometry_call))
+    restore_geometry = {"segment_id": "S1", "type": "cubic", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]}
+    executed, *_rest, accepted = runtime._execute_tool_call(
+        tool_call={"tool": "restore_best_segment", "segment_id": "S1"},
+        ai_reason="restore",
+        canvas=canvas,
+        successful_drawing_tool_calls=successful,
+        history=[],
+        segment_refinement={"S1": {"best_segment_geometry": restore_geometry}},
+    )
+    assert accepted is True
+    assert executed is not None
+    undo_executed, *_undo_rest, undo_accepted = runtime._execute_tool_call(
+        tool_call={"tool": "undo_last"},
+        ai_reason="undo restore",
+        canvas=canvas,
+        successful_drawing_tool_calls=successful,
+        history=[],
+        segment_refinement={"S1": {"best_segment_geometry": restore_geometry}},
+    )
+    assert undo_accepted is True
+    assert undo_executed["target_step"] == 3
+    geometry = runtime._segment_geometry_from_canvas(canvas=canvas, segment_id="S1")
+    assert geometry["c1"] == [5.0, 5.0]
+    assert geometry["c2"] == [95.0, 5.0]
+
+
+def test_tool_result_can_restore_true_then_next_restore_succeeds(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "restore_best_flow_out"
+    response_path = tmp_path / "restore_best_flow_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "set_segment_handles",
+                    {"segment_id": "S1", "c1": [5, 5], "c2": [95, 5], "reason": "bad refine"},
+                    call_id="call_003",
+                ),
+                _native_tool_call(
+                    "restore_best_segment",
+                    {"segment_id": "S1", "reason": "restore best"},
+                    call_id="call_004",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_005"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=5)
+    result = runtime.run(input_path, output_dir)
+    assert result.status != "invalid_response"
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [json.loads(message["content"]) for message in payload["messages"] if message["role"] == "tool"]
+    assert tool_messages[2]["best_candidate_hint"]["can_restore"] is True
+    assert tool_messages[3]["accepted"] is True
+    assert "restored" in tool_messages[3]["runtime_description"].lower()
 
 
 def test_current_segment_needs_refinement_allows_restart_path(tmp_path: Path) -> None:
