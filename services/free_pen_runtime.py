@@ -594,6 +594,46 @@ def load_free_pen_tool_schema() -> dict[str, Any]:
                 },
             }
         )
+    if not any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("properties"), dict)
+        and entry["properties"].get("tool", {}).get("const") == "request_segment_zoom"
+        for entry in tool_one_of
+    ):
+        tool_one_of.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["tool", "segment_id", "zoom_scale", "padding_px"],
+                "properties": {
+                    "tool": {"const": "request_segment_zoom"},
+                    "segment_id": {"type": "string", "minLength": 1},
+                    "zoom_scale": {"type": "number", "minimum": 2, "maximum": 6},
+                    "padding_px": {"type": "number", "minimum": 20, "maximum": 200},
+                },
+            }
+        )
+    if not any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("properties"), dict)
+        and entry["properties"].get("tool", {}).get("const") == "request_zoom_window"
+        for entry in tool_one_of
+    ):
+        tool_one_of.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["tool", "x", "y", "width", "height", "zoom_scale"],
+                "properties": {
+                    "tool": {"const": "request_zoom_window"},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "width": {"type": "number", "minimum": 80, "maximum": 600},
+                    "height": {"type": "number", "minimum": 80, "maximum": 600},
+                    "zoom_scale": {"type": "number", "minimum": 2, "maximum": 6},
+                },
+            }
+        )
     return schema
 
 
@@ -650,6 +690,18 @@ def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         return normalized
     if tool == "restore_best_segment":
         normalized["segment_id"] = str(normalized["segment_id"])
+        return normalized
+    if tool == "request_segment_zoom":
+        normalized["segment_id"] = str(normalized["segment_id"])
+        normalized["zoom_scale"] = float(normalized["zoom_scale"])
+        normalized["padding_px"] = float(normalized["padding_px"])
+        return normalized
+    if tool == "request_zoom_window":
+        normalized["x"] = float(normalized["x"])
+        normalized["y"] = float(normalized["y"])
+        normalized["width"] = float(normalized["width"])
+        normalized["height"] = float(normalized["height"])
+        normalized["zoom_scale"] = float(normalized["zoom_scale"])
         return normalized
     if tool == "move_anchor":
         normalized["anchor_id"] = str(normalized["anchor_id"])
@@ -783,6 +835,20 @@ class FreePenToolRuntime:
     _MAX_REFINES_PER_SEGMENT = 3
     _MAX_WORSE_STREAK = 2
     _QUALITY_DELTA_EPSILON_PX = 0.5
+    _MIN_ZOOM_SCALE = 2.0
+    _MAX_ZOOM_SCALE = 6.0
+    _MIN_ZOOM_PADDING_PX = 20.0
+    _MAX_ZOOM_PADDING_PX = 200.0
+    _MIN_ZOOM_WINDOW_WIDTH_PX = 80.0
+    _MIN_ZOOM_WINDOW_HEIGHT_PX = 80.0
+    _MAX_ZOOM_WINDOW_WIDTH_PX = 600.0
+    _MAX_ZOOM_WINDOW_HEIGHT_PX = 600.0
+    _MIN_SEGMENT_ZOOM_WIDTH_PX = 220
+    _MIN_SEGMENT_ZOOM_HEIGHT_PX = 160
+    _MAX_SEGMENT_ZOOM_WIDTH_PX = 600
+    _MAX_SEGMENT_ZOOM_HEIGHT_PX = 420
+    _MAX_REQUESTED_ZOOMS_PER_SEGMENT = 2
+    _MAX_REQUESTED_ZOOMS_TOTAL = 8
 
     def run(self, source_image_path: Path, output_dir: Path) -> FreePenToolRunResult:
         import os
@@ -817,6 +883,8 @@ class FreePenToolRuntime:
         invalid_step_count = 0
         rollback_count = 0
         segment_refinement: dict[str, dict[str, Any]] = {}
+        requested_zoom_total_count = 0
+        requested_zoom_by_segment: dict[str, int] = {}
         resolver = self._build_public_image_resolver()
         conversation = FreePenConversationMemory(
             system_message={"role": "system", "content": build_free_pen_tool_system_prompt()},
@@ -843,6 +911,8 @@ class FreePenToolRuntime:
                 current_feedback=current_feedback,
                 current_segment_context=current_segment_context,
                 source_contour_summary=source_contour_summary,
+                requested_zoom_total_count=requested_zoom_total_count,
+                requested_zoom_by_segment=requested_zoom_by_segment,
             )
 
             if step_index == 1:
@@ -924,6 +994,7 @@ class FreePenToolRuntime:
             round_status = "received"
             execution_result: dict[str, Any] | None = None
             tool_result_message: dict[str, Any] | None = None
+            requested_zoom_windows: list[dict[str, Any]] = []
             self._record_interaction(
                 {
                     "interaction_id": interaction_id,
@@ -983,6 +1054,8 @@ class FreePenToolRuntime:
                         current_segment_context=current_segment_context,
                         source_distance_map=source_distance_map,
                         segment_refinement=segment_refinement,
+                        requested_zoom_total_count=requested_zoom_total_count,
+                        requested_zoom_by_segment=requested_zoom_by_segment,
                     )
                     warnings = list(preflight_result["warnings"])
                     if not preflight_result["success"]:
@@ -1075,6 +1148,9 @@ class FreePenToolRuntime:
                                 "quality_summary": quality_summary,
                                 "warnings": warnings,
                             }
+                            if tool_call["tool"] in {"request_segment_zoom", "request_zoom_window"}:
+                                execution_result["inspection_only"] = True
+                                execution_result["state_changed"] = False
                 elif final_decision == "finish":
                     finish_blocked_by_quality = bool(
                         current_segment_context["status"].get("may_advance_to_next_segment") is False
@@ -1148,6 +1224,32 @@ class FreePenToolRuntime:
                     }
                 else:
                     raise ValueError(f"unsupported free-pen tool decision: {final_decision}")
+
+                if (
+                    validation_error is None
+                    and final_decision == "tool_call"
+                    and round_status == "tool_applied"
+                    and str(normalized_response.get("tool_call", {}).get("tool")) in {"request_segment_zoom", "request_zoom_window"}
+                ):
+                    requested_zoom_windows = self._build_requested_zoom_windows(
+                        output_dir=output_dir,
+                        step_index=step_index,
+                        tool_call=dict(normalized_response["tool_call"]),
+                        canvas=canvas,
+                        current_segment_context=current_segment_context,
+                        source_image=source_image,
+                    )
+                    if requested_zoom_windows:
+                        requested_zoom_total_count += 1
+                        for requested_zoom in requested_zoom_windows:
+                            segment_id = requested_zoom.get("segment_id")
+                            if segment_id is not None:
+                                requested_zoom_by_segment[str(segment_id)] = int(requested_zoom_by_segment.get(str(segment_id), 0)) + 1
+                        execution_result["inspection_only"] = True
+                        execution_result["state_changed"] = False
+                        execution_result["visual_feedback_metadata"] = {
+                            "requested_zoom_windows": requested_zoom_windows,
+                        }
                 
                 if raw_tool_calls:
                     tool_call_id = raw_tool_calls[0].get("id")
@@ -1158,7 +1260,23 @@ class FreePenToolRuntime:
                             current_feedback=current_feedback,
                             current_segment_context=current_segment_context,
                             source_contour_summary=source_contour_summary,
+                            requested_zoom_total_count=requested_zoom_total_count,
+                            requested_zoom_by_segment=requested_zoom_by_segment,
                         )
+                        next_hint_text = self._next_hint(
+                            final_decision=final_decision,
+                            round_status=round_status,
+                            warnings=warnings,
+                            session_state=session_state_after,
+                            current_segment_context=current_segment_context,
+                        )
+                        if (
+                            final_decision == "tool_call"
+                            and isinstance(normalized_response, dict)
+                            and str(normalized_response.get("tool_call", {}).get("tool")) in {"request_segment_zoom", "request_zoom_window"}
+                            and round_status == "tool_applied"
+                        ):
+                            next_hint_text = "Inspect the requested zoom image before choosing exactly one next drawing or editing tool."
                         tool_result_content = {
                             **execution_result,
                             "state_after": session_state_after,
@@ -1175,18 +1293,14 @@ class FreePenToolRuntime:
                             "quality_delta": current_segment_context["quality_delta"],
                             "refinement_summary": current_segment_context["refinement_summary"],
                             "best_candidate_hint": current_segment_context["best_candidate_hint"],
+                            "visual_feedback_metadata": {"requested_zoom_windows": requested_zoom_windows},
                             "allowed_next_actions": session_state_after["allowed_next_actions"],
                             "forbidden_next_actions": session_state_after["forbidden_next_actions"],
-                            "next_hint": self._next_hint(
-                                final_decision=final_decision,
-                                round_status=round_status,
-                                warnings=warnings,
-                                session_state=session_state_after,
-                                current_segment_context=current_segment_context,
-                            ),
+                            "next_hint": next_hint_text,
                             "visual_feedback_hint": (
                                 "A visual feedback user message with overlay/composite images will follow this tool result. "
-                                "Inspect it before choosing the next tool. BLACK is target; ORANGE is your drawing; BLUE are anchors; GREEN are control handles."
+                                "If a requested zoom image is provided, inspect it before choosing the next tool. "
+                                "BLACK is target; ORANGE is your drawing; BLUE are anchors; GREEN are control handles."
                             ),
                         }
                         conversation.append_tool_result(tool_call_id, tool_result_content)
@@ -1243,6 +1357,7 @@ class FreePenToolRuntime:
                     composite_image_path=post_tool_composite_path,
                     resolver=resolver,
                     step_index=step_index,
+                    requested_zoom_windows=requested_zoom_windows,
                 )
                 conversation.append_user_message(visual_feedback_content)
                 conversation.save(
@@ -1298,9 +1413,10 @@ class FreePenToolRuntime:
                 "segment_split_hint": current_segment_context["segment_split_hint"],
                 "quality_delta": current_segment_context["quality_delta"],
                 "refinement_summary": current_segment_context["refinement_summary"],
-                "best_candidate_hint": current_segment_context["best_candidate_hint"],
-                "reason": final_reason,
-                "output_overlay_path": str(overlay_path),
+                    "best_candidate_hint": current_segment_context["best_candidate_hint"],
+                    "reason": final_reason,
+                    "output_overlay_path": str(overlay_path),
+                    "requested_zoom_windows": requested_zoom_windows,
                     "request_snapshot_path": str(request_snapshot_path),
                     "image_urls": self._collect_image_urls_from_messages(request_messages),
                     "parsed_from": parsed_from,
@@ -1330,6 +1446,7 @@ class FreePenToolRuntime:
                     "final_decision": final_decision,
                     "request_snapshot_path": str(request_snapshot_path),
                     "conversation_history_path": str(conversation_history_path),
+                    "requested_zoom_windows": requested_zoom_windows,
                 }
             )
 
@@ -1373,6 +1490,8 @@ class FreePenToolRuntime:
                     "request_snapshot_paths": request_snapshot_paths,
                     "image_transport": self.image_transport_config.mode,
                     "segment_refinement": segment_refinement,
+                    "requested_zoom_total_count": requested_zoom_total_count,
+                    "requested_zoom_by_segment": requested_zoom_by_segment,
                     "history": history,
                     "rounds": trace_rounds,
                 },
@@ -1431,6 +1550,280 @@ class FreePenToolRuntime:
         composite_path = output_dir / f"round_{step_index:03d}_post_tool_composite.png"
         cv2.imwrite(str(composite_path), composite)
         return composite_path
+
+    def _build_requested_zoom_windows(
+        self,
+        *,
+        output_dir: Path,
+        step_index: int,
+        tool_call: dict[str, Any],
+        canvas: FreePenCanvasState,
+        current_segment_context: dict[str, Any],
+        source_image: np.ndarray,
+    ) -> list[dict[str, Any]]:
+        tool = str(tool_call.get("tool"))
+        composite_image = canvas.render_composite(
+            source_image,
+            stroke_width=max(1, int(self.stroke_width)),
+            stroke_rgba=self.stroke_rgba,
+            sample_count_per_segment=max(8, int(self.sample_count_per_segment)),
+            show_handles=True,
+        )
+        if tool == "request_segment_zoom":
+            metadata = self._build_requested_segment_zoom_metadata(
+                tool_call=tool_call,
+                canvas=canvas,
+                current_segment_context=current_segment_context,
+                composite_image=composite_image,
+                output_dir=output_dir,
+                step_index=step_index,
+            )
+            return [] if metadata is None else [metadata]
+        if tool == "request_zoom_window":
+            metadata = self._build_requested_window_zoom_metadata(
+                tool_call=tool_call,
+                composite_image=composite_image,
+                output_dir=output_dir,
+                step_index=step_index,
+            )
+            return [] if metadata is None else [metadata]
+        return []
+
+    def _build_requested_segment_zoom_metadata(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        canvas: FreePenCanvasState,
+        current_segment_context: dict[str, Any],
+        composite_image: np.ndarray,
+        output_dir: Path,
+        step_index: int,
+    ) -> dict[str, Any] | None:
+        segment_id = str(tool_call["segment_id"])
+        editable_geometry = current_segment_context["editable_geometry"]
+        segment_record = self._segment_record_from_canvas(
+            canvas=canvas,
+            editable_geometry=editable_geometry,
+            segment_id=segment_id,
+        )
+        if segment_record is None:
+            return None
+        sampled_points = self._sample_segment_points(segment_record=segment_record)
+        points: list[list[float]] = []
+        if segment_record.get("from_point") is not None:
+            points.append([float(segment_record["from_point"][0]), float(segment_record["from_point"][1])])
+        if segment_record.get("to_point") is not None:
+            points.append([float(segment_record["to_point"][0]), float(segment_record["to_point"][1])])
+        raw_segment = segment_record["raw"]
+        if raw_segment["type"] == "cubic":
+            points.append([float(raw_segment["c1"][0]), float(raw_segment["c1"][1])])
+            points.append([float(raw_segment["c2"][0]), float(raw_segment["c2"][1])])
+        if sampled_points.size:
+            points.extend(sampled_points.tolist())
+        if not points:
+            return None
+        point_array = np.asarray(points, dtype=np.float64)
+        padding_px = int(round(float(tool_call["padding_px"])))
+        x_min = float(np.min(point_array[:, 0])) - float(padding_px)
+        y_min = float(np.min(point_array[:, 1])) - float(padding_px)
+        x_max = float(np.max(point_array[:, 0])) + float(padding_px)
+        y_max = float(np.max(point_array[:, 1])) + float(padding_px)
+        crop_origin, crop_size, clipped = self._normalize_zoom_crop_window(
+            x=x_min,
+            y=y_min,
+            width=max(1.0, x_max - x_min),
+            height=max(1.0, y_max - y_min),
+            canvas_width=canvas.width,
+            canvas_height=canvas.height,
+            min_width=self._MIN_SEGMENT_ZOOM_WIDTH_PX,
+            min_height=self._MIN_SEGMENT_ZOOM_HEIGHT_PX,
+            max_width=self._MAX_SEGMENT_ZOOM_WIDTH_PX,
+            max_height=self._MAX_SEGMENT_ZOOM_HEIGHT_PX,
+        )
+        output_path = output_dir / f"round_{step_index:03d}_requested_segment_zoom_{segment_id}.png"
+        self._write_zoom_image(
+            composite_image=composite_image,
+            crop_origin=crop_origin,
+            crop_size=crop_size,
+            zoom_scale=float(tool_call["zoom_scale"]),
+            output_path=output_path,
+            title=f"Requested zoom {segment_id}",
+        )
+        return {
+            "type": "requested_segment_zoom",
+            "segment_id": segment_id,
+            "path": str(output_path),
+            "crop_origin": [int(crop_origin[0]), int(crop_origin[1])],
+            "crop_size": [int(crop_size[0]), int(crop_size[1])],
+            "zoom_scale": float(tool_call["zoom_scale"]),
+            "coordinate_space": "original_image_px",
+            "clipped": bool(clipped),
+            "grid": {
+                "minor_step_px": 10,
+                "major_step_px": 50,
+                "labels_are_original_coordinates": True,
+            },
+        }
+
+    def _build_requested_window_zoom_metadata(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        composite_image: np.ndarray,
+        output_dir: Path,
+        step_index: int,
+    ) -> dict[str, Any] | None:
+        crop_origin, crop_size, clipped = self._normalize_zoom_crop_window(
+            x=float(tool_call["x"]),
+            y=float(tool_call["y"]),
+            width=float(tool_call["width"]),
+            height=float(tool_call["height"]),
+            canvas_width=int(composite_image.shape[1]),
+            canvas_height=int(composite_image.shape[0]),
+            min_width=self._MIN_ZOOM_WINDOW_WIDTH_PX,
+            min_height=self._MIN_ZOOM_WINDOW_HEIGHT_PX,
+            max_width=self._MAX_ZOOM_WINDOW_WIDTH_PX,
+            max_height=self._MAX_ZOOM_WINDOW_HEIGHT_PX,
+        )
+        output_path = output_dir / f"round_{step_index:03d}_requested_zoom_window_001.png"
+        self._write_zoom_image(
+            composite_image=composite_image,
+            crop_origin=crop_origin,
+            crop_size=crop_size,
+            zoom_scale=float(tool_call["zoom_scale"]),
+            output_path=output_path,
+            title="Requested window",
+        )
+        return {
+            "type": "requested_zoom_window",
+            "path": str(output_path),
+            "crop_origin": [int(crop_origin[0]), int(crop_origin[1])],
+            "crop_size": [int(crop_size[0]), int(crop_size[1])],
+            "zoom_scale": float(tool_call["zoom_scale"]),
+            "coordinate_space": "original_image_px",
+            "clipped": bool(clipped),
+            "grid": {
+                "minor_step_px": 10,
+                "major_step_px": 50,
+                "labels_are_original_coordinates": True,
+            },
+        }
+
+    def _normalize_zoom_crop_window(
+        self,
+        *,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        canvas_width: int,
+        canvas_height: int,
+        min_width: float,
+        min_height: float,
+        max_width: float,
+        max_height: float,
+    ) -> tuple[tuple[int, int], tuple[int, int], bool]:
+        requested_x0 = float(x)
+        requested_y0 = float(y)
+        requested_x1 = float(x + width)
+        requested_y1 = float(y + height)
+        x0 = max(0.0, requested_x0)
+        y0 = max(0.0, requested_y0)
+        x1 = min(float(canvas_width), requested_x1)
+        y1 = min(float(canvas_height), requested_y1)
+        if x1 <= x0:
+            center_x = min(max((requested_x0 + requested_x1) * 0.5, 0.0), float(canvas_width))
+            half = max(1.0, min_width * 0.5)
+            x0 = max(0.0, center_x - half)
+            x1 = min(float(canvas_width), center_x + half)
+        if y1 <= y0:
+            center_y = min(max((requested_y0 + requested_y1) * 0.5, 0.0), float(canvas_height))
+            half = max(1.0, min_height * 0.5)
+            y0 = max(0.0, center_y - half)
+            y1 = min(float(canvas_height), center_y + half)
+        center_x = (x0 + x1) * 0.5
+        center_y = (y0 + y1) * 0.5
+        final_width = min(max(float(x1 - x0), float(min_width)), float(max_width), float(canvas_width))
+        final_height = min(max(float(y1 - y0), float(min_height)), float(max_height), float(canvas_height))
+        x0 = max(0.0, min(float(canvas_width) - final_width, center_x - (final_width * 0.5)))
+        y0 = max(0.0, min(float(canvas_height) - final_height, center_y - (final_height * 0.5)))
+        x1 = x0 + final_width
+        y1 = y0 + final_height
+        crop_origin = (int(round(x0)), int(round(y0)))
+        crop_size = (
+            max(1, min(int(round(final_width)), canvas_width - crop_origin[0])),
+            max(1, min(int(round(final_height)), canvas_height - crop_origin[1])),
+        )
+        clipped = not (
+            abs(crop_origin[0] - requested_x0) < 0.5
+            and abs(crop_origin[1] - requested_y0) < 0.5
+            and abs(crop_size[0] - width) < 0.5
+            and abs(crop_size[1] - height) < 0.5
+        )
+        return crop_origin, crop_size, clipped
+
+    def _write_zoom_image(
+        self,
+        *,
+        composite_image: np.ndarray,
+        crop_origin: tuple[int, int],
+        crop_size: tuple[int, int],
+        zoom_scale: float,
+        output_path: Path,
+        title: str,
+    ) -> None:
+        x0, y0 = crop_origin
+        width, height = crop_size
+        crop = composite_image[y0 : y0 + height, x0 : x0 + width]
+        scaled_width = max(1, int(round(width * zoom_scale)))
+        scaled_height = max(1, int(round(height * zoom_scale)))
+        zoomed = cv2.resize(crop, (scaled_width, scaled_height), interpolation=cv2.INTER_NEAREST)
+        zoomed = zoomed.copy()
+        white = (255, 255, 255)
+        black = (0, 0, 0)
+        light_gray = (210, 210, 210)
+        dark_gray = (120, 120, 120)
+        label_gray = (40, 40, 40)
+        minor_step = max(1, int(round(10 * zoom_scale)))
+        major_step = max(1, int(round(50 * zoom_scale)))
+        for x in range(0, scaled_width, minor_step):
+            color = light_gray if x % major_step != 0 else dark_gray
+            cv2.line(zoomed, (x, 0), (x, scaled_height - 1), color, 1, cv2.LINE_AA)
+        for y in range(0, scaled_height, minor_step):
+            color = light_gray if y % major_step != 0 else dark_gray
+            cv2.line(zoomed, (0, y), (scaled_width - 1, y), color, 1, cv2.LINE_AA)
+        info_bar_height = 54
+        footer_height = 28
+        framed = cv2.copyMakeBorder(zoomed, info_bar_height, footer_height, 0, 0, cv2.BORDER_CONSTANT, value=white)
+        cv2.rectangle(framed, (0, 0), (scaled_width - 1, info_bar_height - 1), white, -1)
+        cv2.putText(framed, title, (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, black, 1, cv2.LINE_AA)
+        cv2.putText(
+            framed,
+            f"origin=({x0},{y0}) size=({width},{height}) zoom={zoom_scale:.1f}x",
+            (10, 39),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            black,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            framed,
+            "Tool coordinates remain original image_px.",
+            (10, scaled_height + info_bar_height + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            black,
+            1,
+            cv2.LINE_AA,
+        )
+        for original_x in range(((x0 + 49) // 50) * 50, x0 + width, 50):
+            label_x = int(round((original_x - x0) * zoom_scale))
+            cv2.putText(framed, str(original_x), (max(0, min(label_x + 2, scaled_width - 40)), 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, label_gray, 1, cv2.LINE_AA)
+        for original_y in range(((y0 + 49) // 50) * 50, y0 + height, 50):
+            label_y = int(round((original_y - y0) * zoom_scale)) + info_bar_height
+            cv2.putText(framed, str(original_y), (4, max(info_bar_height + 14, min(label_y - 2, scaled_height + info_bar_height - 4))), cv2.FONT_HERSHEY_SIMPLEX, 0.4, label_gray, 1, cv2.LINE_AA)
+        cv2.imwrite(str(output_path), framed)
     
     def _preflight_tool_call(
         self,
@@ -1443,9 +1836,12 @@ class FreePenToolRuntime:
         current_segment_context: dict[str, Any],
         source_distance_map: np.ndarray | None,
         segment_refinement: dict[str, dict[str, Any]] | None = None,
+        requested_zoom_total_count: int = 0,
+        requested_zoom_by_segment: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         tool = str(tool_call["tool"])
         warnings = self._reason_based_warnings(ai_reason=ai_reason, tool=tool)
+        requested_zoom_by_segment = requested_zoom_by_segment or {}
         if tool in {"start_path", "line_to", "restart_path", "move_anchor"}:
             warnings.extend(self._coordinate_warnings(x=tool_call["x"], y=tool_call["y"], width=canvas.width, height=canvas.height))
         elif tool == "curve_to":
@@ -1481,6 +1877,14 @@ class FreePenToolRuntime:
                         width=canvas.width,
                         height=canvas.height,
                         point_name=key,
+                    )
+                )
+        elif tool == "request_zoom_window":
+            if self._finite_number_or_none(tool_call.get("x")) is None or self._finite_number_or_none(tool_call.get("y")) is None:
+                warnings.append(
+                    self._warning(
+                        "non_finite_coordinate",
+                        "zoom_window_origin contains NaN, Infinity, or another non-finite coordinate.",
                     )
                 )
         reject_codes = {warning["code"] for warning in warnings if warning["code"] in {"non_finite_coordinate", "out_of_bounds_coordinate"}}
@@ -1641,6 +2045,14 @@ class FreePenToolRuntime:
                 )
         if tool == "inspect_history" and rollback_count > self.max_rollbacks:
             warnings.append(self._warning("rollback_budget_exceeded", "Rollback budget has already been exceeded. Prefer a direct correction."))
+        if tool in {"request_segment_zoom", "request_zoom_window"} and requested_zoom_total_count >= self._MAX_REQUESTED_ZOOMS_TOTAL:
+            reject_codes.add("zoom_budget_exceeded")
+            warnings.append(
+                self._warning(
+                    "zoom_budget_exceeded",
+                    "Zoom budget reached. Use the current visual feedback to choose a drawing or editing tool.",
+                )
+            )
         if tool == "move_anchor" and canvas.path_open:
             geometry = canvas.editable_geometry()
             anchors = {anchor["id"] for path in geometry["paths"] for anchor in path["anchors"]}
@@ -1648,7 +2060,7 @@ class FreePenToolRuntime:
                 reject_codes.add("unknown_anchor_id")
                 warnings.append(self._warning("unknown_anchor_id", f"Unknown anchor_id: {tool_call['anchor_id']}"))
         editable_geometry = current_segment_context["editable_geometry"]
-        if tool in {"move_handle", "set_segment_handles", "convert_line_to_curve", "restore_best_segment"} and canvas.path_open:
+        if tool in {"move_handle", "set_segment_handles", "convert_line_to_curve", "restore_best_segment", "request_segment_zoom"}:
             geometry = editable_geometry
             segments = {
                 segment["id"]: segment["type"]
@@ -1673,6 +2085,76 @@ class FreePenToolRuntime:
                 if best_geometry is None:
                     reject_codes.add("best_segment_not_available")
                     warnings.append(self._warning("best_segment_not_available", f"No best segment geometry is available for {segment_id}.")) 
+            elif tool == "request_segment_zoom":
+                if int(requested_zoom_by_segment.get(segment_id, 0)) >= self._MAX_REQUESTED_ZOOMS_PER_SEGMENT:
+                    reject_codes.add("zoom_budget_exceeded")
+                    warnings.append(
+                        self._warning(
+                            "zoom_budget_exceeded",
+                            f"Zoom budget for {segment_id} has been exhausted. Use the current visual feedback to choose the next tool.",
+                        )
+                    )
+                zoom_scale = self._finite_number_or_none(tool_call.get("zoom_scale"))
+                padding_px = self._finite_number_or_none(tool_call.get("padding_px"))
+                if zoom_scale is None or zoom_scale < self._MIN_ZOOM_SCALE or zoom_scale > self._MAX_ZOOM_SCALE:
+                    reject_codes.add("zoom_scale_out_of_range")
+                    warnings.append(
+                        self._warning(
+                            "zoom_scale_out_of_range",
+                            f"zoom_scale must be between {self._MIN_ZOOM_SCALE:.0f} and {self._MAX_ZOOM_SCALE:.0f}.",
+                        )
+                    )
+                if padding_px is None or padding_px < self._MIN_ZOOM_PADDING_PX or padding_px > self._MAX_ZOOM_PADDING_PX:
+                    reject_codes.add("zoom_padding_out_of_range")
+                    warnings.append(
+                        self._warning(
+                            "zoom_padding_out_of_range",
+                            f"padding_px must be between {self._MIN_ZOOM_PADDING_PX:.0f} and {self._MAX_ZOOM_PADDING_PX:.0f}.",
+                        )
+                    )
+        if tool == "request_zoom_window":
+            zoom_scale = self._finite_number_or_none(tool_call.get("zoom_scale"))
+            window_width = self._finite_number_or_none(tool_call.get("width"))
+            window_height = self._finite_number_or_none(tool_call.get("height"))
+            origin_x = self._finite_number_or_none(tool_call.get("x"))
+            origin_y = self._finite_number_or_none(tool_call.get("y"))
+            if zoom_scale is None or zoom_scale < self._MIN_ZOOM_SCALE or zoom_scale > self._MAX_ZOOM_SCALE:
+                reject_codes.add("zoom_scale_out_of_range")
+                warnings.append(
+                    self._warning(
+                        "zoom_scale_out_of_range",
+                        f"zoom_scale must be between {self._MIN_ZOOM_SCALE:.0f} and {self._MAX_ZOOM_SCALE:.0f}.",
+                    )
+                )
+            if (
+                window_width is None
+                or window_height is None
+                or window_width < self._MIN_ZOOM_WINDOW_WIDTH_PX
+                or window_width > self._MAX_ZOOM_WINDOW_WIDTH_PX
+                or window_height < self._MIN_ZOOM_WINDOW_HEIGHT_PX
+                or window_height > self._MAX_ZOOM_WINDOW_HEIGHT_PX
+            ):
+                reject_codes.add("zoom_window_size_out_of_range")
+                warnings.append(
+                    self._warning(
+                        "zoom_window_size_out_of_range",
+                        f"Zoom window width/height must stay within [{self._MIN_ZOOM_WINDOW_WIDTH_PX:.0f},{self._MAX_ZOOM_WINDOW_WIDTH_PX:.0f}] and [{self._MIN_ZOOM_WINDOW_HEIGHT_PX:.0f},{self._MAX_ZOOM_WINDOW_HEIGHT_PX:.0f}] pixels.",
+                    )
+                )
+            if (
+                origin_x is not None
+                and origin_y is not None
+                and window_width is not None
+                and window_height is not None
+                and (origin_x + window_width <= 0.0 or origin_y + window_height <= 0.0 or origin_x >= float(canvas.width) or origin_y >= float(canvas.height))
+            ):
+                reject_codes.add("zoom_window_outside_canvas")
+                warnings.append(
+                    self._warning(
+                        "zoom_window_outside_canvas",
+                        "The requested zoom window does not intersect the canvas.",
+                    )
+                )
 
         if reject_codes:
             runtime_description = f"Rejected {tool} during preflight validation."
@@ -1692,12 +2174,18 @@ class FreePenToolRuntime:
             elif "best_segment_not_available" in reject_codes:
                 runtime_description = f"Rejected restore_best_segment because no best recorded geometry is available for {tool_call.get('segment_id')}."
                 quality_summary = "No best segment candidate is currently available to restore."
+            elif "zoom_budget_exceeded" in reject_codes:
+                runtime_description = f"Rejected {tool} because the zoom inspection budget has been exhausted."
+                quality_summary = "Zoom budget reached. Use the current visual feedback to choose a drawing or editing tool."
             elif "anchor_not_on_source_contour" in reject_codes:
                 runtime_description = f"Rejected {tool} because the proposed anchor is too far from the measured black source contour."
                 quality_summary = "Anchor points must lie on or very near the black source contour."
             elif "endpoint_not_on_source_contour" in reject_codes:
                 runtime_description = f"Rejected {tool} because the proposed endpoint anchor is too far from the measured black source contour."
                 quality_summary = "Endpoint anchors must lie on or very near the black source contour."
+            elif "zoom_window_outside_canvas" in reject_codes:
+                runtime_description = "Rejected request_zoom_window because the requested crop does not intersect the canvas."
+                quality_summary = "Requested zoom windows must overlap the canvas."
             return {
                 "success": False,
                 "rejected": True,
@@ -1801,6 +2289,31 @@ class FreePenToolRuntime:
             current_feedback = ["The previous path was discarded. Continue tracing the black source stroke from the new start point."]
             return (
                 {"tool": "restart_path", "x": tool_call["x"], "y": tool_call["y"], "executed_start_path": executed},
+                runtime_description,
+                "good",
+                quality_summary,
+                warnings,
+                rollback_applied,
+                current_feedback,
+                True,
+            )
+
+        if tool in {"request_segment_zoom", "request_zoom_window"}:
+            if tool == "request_segment_zoom":
+                runtime_description = (
+                    f"Generated an inspection-only requested zoom for {tool_call['segment_id']} at {float(tool_call['zoom_scale']):.1f}x."
+                )
+            else:
+                runtime_description = (
+                    "Generated an inspection-only requested zoom window for the requested original-image region."
+                )
+            quality_summary = "Inspection-only zoom request executed. The path was not modified."
+            current_feedback = [
+                "Inspect the requested zoom image before choosing exactly one next drawing or editing tool.",
+                "Tool calls must still use original image_px coordinates. Do not use zoomed display pixels as tool coordinates.",
+            ]
+            return (
+                dict(tool_call),
                 runtime_description,
                 "good",
                 quality_summary,
@@ -2029,6 +2542,8 @@ class FreePenToolRuntime:
         if any(warning["code"] == "out_of_bounds_coordinate" for warning in warnings):
             feedback.append("The previous tool call was rejected because one or more coordinates were outside the canvas bounds.")
             feedback.append("Do not continue to the next segment. Retry the same segment with in-bounds coordinates.")
+        if any(warning["code"] == "zoom_budget_exceeded" for warning in warnings):
+            feedback.append("Zoom budget reached. Use the current visual feedback to choose a drawing or editing tool.")
         if not feedback and quality_summary:
             feedback.append(quality_summary)
         return feedback
@@ -2105,6 +2620,7 @@ class FreePenToolRuntime:
         composite_image_path: Path | None,
         resolver: PublicImageResolver | None,
         step_index: int,
+        requested_zoom_windows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         content: list[dict[str, Any]] = []
 
@@ -2141,6 +2657,27 @@ class FreePenToolRuntime:
                         "Compare them carefully before deciding the next tool call."
                     ),
                     image_path=composite_image_path,
+                    resolver=resolver,
+                )
+            )
+
+        for requested_zoom in requested_zoom_windows or []:
+            image_path_value = requested_zoom.get("path")
+            if not isinstance(image_path_value, str):
+                continue
+            clipped_note = " The requested crop was clipped to the image bounds." if requested_zoom.get("clipped") else ""
+            content.extend(
+                self._build_image_parts(
+                    semantic_text=(
+                        "Requested zoom feedback after your previous inspection tool call. "
+                        "This zoom image is only a visual aid. "
+                        "Grid labels use original image_px coordinates. "
+                        "Tool calls must still use original image_px coordinates. "
+                        "Do not use zoomed display pixels as tool coordinates. "
+                        "Use this zoom image to decide the next single tool call."
+                        + clipped_note
+                    ),
+                    image_path=Path(image_path_value),
                     resolver=resolver,
                 )
             )
@@ -2395,7 +2932,7 @@ class FreePenToolRuntime:
         segment_lookup = {segment["id"]: segment for segment in all_segments}
         tool = str(focus_tool_call.get("tool")) if focus_tool_call else ""
         target_segment = all_segments[-1]
-        if tool in {"move_handle", "set_segment_handles", "convert_line_to_curve", "restore_best_segment"}:
+        if tool in {"move_handle", "set_segment_handles", "convert_line_to_curve", "restore_best_segment", "request_segment_zoom"}:
             target_segment = segment_lookup.get(str(focus_tool_call.get("segment_id")), target_segment)
         elif tool == "move_anchor":
             anchor_id = str(focus_tool_call.get("anchor_id"))
@@ -3179,6 +3716,8 @@ class FreePenToolRuntime:
         current_feedback: list[str],
         current_segment_context: dict[str, Any],
         source_contour_summary: dict[str, Any],
+        requested_zoom_total_count: int,
+        requested_zoom_by_segment: dict[str, int],
     ) -> dict[str, Any]:
         closed_path_count = sum(1 for path in canvas.paths if path.closed)
         last_action = str(history[-1]["runtime_description"]) if history else "none"
@@ -3218,6 +3757,12 @@ class FreePenToolRuntime:
             current_goal = "Start tracing the single black target contour."
             allowed_next_actions = ("start_path", "inspect_history", "stalled")
             forbidden_next_actions = ("line_to", "curve_to", "close_path", "finish")
+        zoom_actions = self._build_zoom_allowed_actions(
+            current_segment_context=current_segment_context,
+            requested_zoom_total_count=requested_zoom_total_count,
+            requested_zoom_by_segment=requested_zoom_by_segment,
+        )
+        allowed_next_actions = tuple(dict.fromkeys([*allowed_next_actions, *zoom_actions]))
         return {
             "task": "continue tracing the same single black target contour",
             "mode": "single_contour_pen_tracing",
@@ -3236,6 +3781,8 @@ class FreePenToolRuntime:
             "current_segment_focus": current_segment_focus,
             "current_segment_status": current_segment_status,
             "source_contour_summary": source_contour_summary,
+            "requested_zoom_total_count": int(requested_zoom_total_count),
+            "requested_zoom_total_budget": int(self._MAX_REQUESTED_ZOOMS_TOTAL),
         }
 
     def _write_round_composite_context(
@@ -3257,6 +3804,21 @@ class FreePenToolRuntime:
         composite_path = output_dir / f"round_{step_index:03d}_composite_context.png"
         cv2.imwrite(str(composite_path), composite)
         return composite_path
+
+    def _build_zoom_allowed_actions(
+        self,
+        *,
+        current_segment_context: dict[str, Any],
+        requested_zoom_total_count: int,
+        requested_zoom_by_segment: dict[str, int],
+    ) -> tuple[str, ...]:
+        if requested_zoom_total_count >= self._MAX_REQUESTED_ZOOMS_TOTAL:
+            return ()
+        allowed: list[str] = ["request_zoom_window"]
+        segment_id = current_segment_context.get("focus", {}).get("segment_id")
+        if segment_id is not None and int(requested_zoom_by_segment.get(str(segment_id), 0)) < self._MAX_REQUESTED_ZOOMS_PER_SEGMENT:
+            allowed.append("request_segment_zoom")
+        return tuple(allowed)
 
     def _write_request_snapshot(
         self,
@@ -3368,6 +3930,8 @@ class FreePenToolRuntime:
             return "The newest segment is not acceptable yet. Do not draw the next segment. Refine the current segment first using set_segment_handles, move_handle, move_anchor, or convert_line_to_curve if it is a line segment."
         if round_status == "rejected_action" and any(warning["code"] == "out_of_bounds_coordinate" for warning in warnings):
             return "The previous tool call was rejected because a coordinate was outside the canvas bounds. Do not continue to the next segment. Retry the same segment with in-bounds coordinates, or refine the latest existing segment with set_segment_handles."
+        if round_status == "rejected_action" and any(warning["code"] == "zoom_budget_exceeded" for warning in warnings):
+            return "Zoom budget reached. Use the current visual feedback to choose a drawing or editing tool."
         if round_status == "rejected_action":
             return "Revise the action instead of repeating the rejected call."
         if final_decision == "finish":

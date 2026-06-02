@@ -208,6 +208,16 @@ Segment split rule:
 - Place the intermediate anchor on the black contour.
 - Do not continue to later segments until the replacement segment is acceptable.
 
+Zoom inspection rule:
+- You may request a zoom image if the current visual feedback is not detailed enough.
+- Use request_segment_zoom to inspect a specific segment.
+- Use request_zoom_window to inspect a custom original-image coordinate region.
+- Zoom tools are inspection-only; they do not modify the path.
+- Do not overuse zoom tools.
+- After receiving a requested zoom, choose a drawing or editing tool, or call stalled if you still cannot continue reliably.
+- All zoom crop coordinates and grid labels use original image_px.
+- Tool coordinates must always remain original image_px, not zoomed display pixels.
+
 Single tool rule:
 - Call exactly one function tool per response.
 - Never call multiple function tools in the same response.

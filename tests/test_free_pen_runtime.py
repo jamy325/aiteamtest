@@ -1285,6 +1285,54 @@ def test_restore_best_segment_updates_current_point_when_last_segment(tmp_path: 
     assert canvas.current_point == (84.0, 18.0)
 
 
+def test_request_segment_zoom_does_not_modify_canvas(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]})
+    before = json.dumps(canvas.paths_payload(), sort_keys=True)
+    current_point = canvas.current_point
+    executed, runtime_description, quality, quality_summary, warnings, _, current_feedback, accepted = runtime._execute_tool_call(
+        tool_call={"tool": "request_segment_zoom", "segment_id": "S1", "zoom_scale": 4, "padding_px": 100},
+        ai_reason="inspect S1",
+        canvas=canvas,
+        successful_drawing_tool_calls=[
+            {"tool": "start_path", "x": 12, "y": 52},
+            {"tool": "curve_to", "c1": [24, 40], "c2": [60, 26], "p": [84, 18]},
+        ],
+        history=[],
+        segment_refinement={},
+    )
+    assert accepted is True
+    assert executed["tool"] == "request_segment_zoom"
+    assert "inspection-only" in quality_summary.lower()
+    assert "requested zoom" in runtime_description.lower()
+    assert json.dumps(canvas.paths_payload(), sort_keys=True) == before
+    assert canvas.current_point == current_point
+    assert warnings == []
+    assert any("original image_px" in line for line in current_feedback)
+
+
+def test_request_zoom_window_does_not_modify_canvas(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    before = json.dumps(canvas.paths_payload(), sort_keys=True)
+    current_point = canvas.current_point
+    executed, *_rest, accepted = runtime._execute_tool_call(
+        tool_call={"tool": "request_zoom_window", "x": -10, "y": 5, "width": 80, "height": 80, "zoom_scale": 4},
+        ai_reason="inspect region",
+        canvas=canvas,
+        successful_drawing_tool_calls=[{"tool": "start_path", "x": 12, "y": 52}],
+        history=[],
+        segment_refinement={},
+    )
+    assert accepted is True
+    assert executed["tool"] == "request_zoom_window"
+    assert json.dumps(canvas.paths_payload(), sort_keys=True) == before
+    assert canvas.current_point == current_point
+
+
 def test_restore_best_segment_undo_snapshot(tmp_path: Path) -> None:
     runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
     canvas = FreePenCanvasState(width=96, height=72)
@@ -1320,6 +1368,65 @@ def test_restore_best_segment_undo_snapshot(tmp_path: Path) -> None:
     geometry = runtime._segment_geometry_from_canvas(canvas=canvas, segment_id="S1")
     assert geometry["c1"] == [5.0, 5.0]
     assert geometry["c2"] == [95.0, 5.0]
+
+
+def test_request_zoom_budget_exceeded_rejects(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "request_zoom_window", "x": 0, "y": 0, "width": 80, "height": 80, "zoom_scale": 4},
+        ai_reason="inspect",
+        canvas=canvas,
+        successful_drawing_step_count=0,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": {"paths": []},
+            "focus": {"segment_id": None, "type": None},
+            "status": {"status": "unknown", "may_advance_to_next_segment": True},
+            "quality_metrics": {"current_segment": {"segment_id": None, "unavailable_reason": "no_current_segment"}},
+            "anchor_quality": {},
+            "segment_split_hint": {},
+            "quality_delta": {},
+            "refinement_summary": {},
+            "best_candidate_hint": {"segment_id": None, "can_restore": False},
+        },
+        source_distance_map=None,
+        segment_refinement={},
+        requested_zoom_total_count=runtime._MAX_REQUESTED_ZOOMS_TOTAL,
+        requested_zoom_by_segment={},
+    )
+    assert preflight["success"] is False
+    assert {warning["code"] for warning in preflight["warnings"]} == {"zoom_budget_exceeded"}
+
+
+def test_request_segment_zoom_unknown_segment_rejects(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=96, height=72)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 52})
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "request_segment_zoom", "segment_id": "S9", "zoom_scale": 4, "padding_px": 100},
+        ai_reason="inspect",
+        canvas=canvas,
+        successful_drawing_step_count=1,
+        rollback_count=0,
+        current_segment_context={
+            "editable_geometry": canvas.editable_geometry(),
+            "focus": {"segment_id": None, "type": None},
+            "status": {"status": "unknown", "may_advance_to_next_segment": True},
+            "quality_metrics": {"current_segment": {"segment_id": None, "unavailable_reason": "no_current_segment"}},
+            "anchor_quality": {},
+            "segment_split_hint": {},
+            "quality_delta": {},
+            "refinement_summary": {},
+            "best_candidate_hint": {"segment_id": None, "can_restore": False},
+        },
+        source_distance_map=None,
+        segment_refinement={},
+        requested_zoom_total_count=0,
+        requested_zoom_by_segment={},
+    )
+    assert preflight["success"] is False
+    assert "unknown_segment_id" in {warning["code"] for warning in preflight["warnings"]}
 
 
 def test_tool_result_can_restore_true_then_next_restore_succeeds(tmp_path: Path) -> None:
@@ -2391,6 +2498,177 @@ def test_tool_result_contains_best_candidate_hint(tmp_path: Path) -> None:
     assert parsed_tool_content["best_candidate_hint"]["can_restore"] is True
 
 
+def test_request_segment_zoom_creates_image_file_and_metadata(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "request_segment_zoom_out"
+    response_path = tmp_path / "request_segment_zoom_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "request_segment_zoom",
+                    {"segment_id": "S1", "zoom_scale": 4, "padding_px": 100, "reason": "zoom S1"},
+                    call_id="call_003",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_004"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=4)
+    result = runtime.run(input_path, output_dir)
+    assert result.successful_step_count == 2
+    zoom_path = output_dir / "round_003_requested_segment_zoom_S1.png"
+    assert zoom_path.exists()
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [json.loads(message["content"]) for message in payload["messages"] if message["role"] == "tool"]
+    zoom_tool = tool_messages[2]
+    assert zoom_tool["inspection_only"] is True
+    assert zoom_tool["state_changed"] is False
+    requested = zoom_tool["visual_feedback_metadata"]["requested_zoom_windows"][0]
+    assert requested["coordinate_space"] == "original_image_px"
+    assert requested["segment_id"] == "S1"
+    assert Path(requested["path"]).name == zoom_path.name
+
+
+def test_request_zoom_window_creates_image_file(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "request_window_out"
+    response_path = tmp_path / "request_window_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("request_zoom_window", {"x": -10, "y": 0, "width": 80, "height": 80, "zoom_scale": 4, "reason": "inspect left"}, call_id="call_001"),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_002"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=2)
+    runtime.run(input_path, output_dir)
+    assert (output_dir / "round_001_requested_zoom_window_001.png").exists()
+
+
+def test_request_zoom_window_outside_canvas_clips(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "request_window_clip_out"
+    response_path = tmp_path / "request_window_clip_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("request_zoom_window", {"x": -10, "y": 0, "width": 80, "height": 80, "zoom_scale": 4, "reason": "inspect left"}, call_id="call_001"),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_002"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=2)
+    runtime.run(input_path, output_dir)
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    tool_messages = [json.loads(message["content"]) for message in payload["messages"] if message["role"] == "tool"]
+    requested = tool_messages[0]["visual_feedback_metadata"]["requested_zoom_windows"][0]
+    assert requested["clipped"] is True
+
+
+def test_visual_feedback_message_mentions_not_zoomed_coordinates(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "request_window_feedback_out"
+    response_path = tmp_path / "request_window_feedback_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("request_zoom_window", {"x": 0, "y": 0, "width": 80, "height": 80, "zoom_scale": 4, "reason": "inspect"}, call_id="call_001"),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_002"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=2)
+    runtime.run(input_path, output_dir)
+    payload = json.loads((output_dir / "conversation_messages.json").read_text(encoding="utf-8"))
+    user_texts = []
+    for message in payload["messages"]:
+        if message["role"] != "user" or not isinstance(message["content"], list):
+            continue
+        for part in message["content"]:
+            if isinstance(part, dict) and part.get("type") == "text":
+                user_texts.append(part.get("text", ""))
+    combined = "\n".join(user_texts)
+    assert "Tool calls must still use original image_px coordinates" in combined
+    assert "Do not use zoomed display pixels" in combined
+
+
+def test_requested_zoom_not_counted_as_successful_drawing_step(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "request_zoom_not_drawing_out"
+    response_path = tmp_path / "request_zoom_not_drawing_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "request_segment_zoom",
+                    {"segment_id": "S1", "zoom_scale": 4, "padding_px": 100, "reason": "zoom S1"},
+                    call_id="call_003",
+                ),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_004"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=4)
+    result = runtime.run(input_path, output_dir)
+    assert result.successful_step_count == 2
+
+
+def test_undo_last_after_request_zoom_undoes_previous_drawing_not_zoom(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    _write_source_image(input_path)
+    output_dir = tmp_path / "undo_after_zoom_out"
+    response_path = tmp_path / "undo_after_zoom_sequence.json"
+    response_path.write_text(
+        json.dumps(
+            [
+                _native_tool_call("start_path", {"x": 12, "y": 52, "reason": "start"}, call_id="call_001"),
+                _native_tool_call(
+                    "curve_to",
+                    {"c1": [24, 40], "c2": [60, 26], "p": [84, 18], "reason": "curve"},
+                    call_id="call_002",
+                ),
+                _native_tool_call(
+                    "request_segment_zoom",
+                    {"segment_id": "S1", "zoom_scale": 4, "padding_px": 100, "reason": "zoom S1"},
+                    call_id="call_003",
+                ),
+                _native_tool_call("undo_last", {"reason": "undo curve"}, call_id="call_004"),
+                _native_tool_call("stalled", {"reason": "stop"}, call_id="call_005"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=response_path), max_steps=5)
+    result = runtime.run(input_path, output_dir)
+    assert result.successful_step_count == 1
+    paths_payload = json.loads(result.paths_json_path.read_text(encoding="utf-8"))
+    assert paths_payload["paths"][0]["segments"] == [{"type": "move", "p": [12.0, 52.0]}]
+
+
 def test_next_hint_changes_strategy_after_repeated_bad_edits(tmp_path: Path) -> None:
     runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
     next_hint = runtime._next_hint(
@@ -2601,3 +2879,13 @@ def test_system_prompt_mentions_restore_best_and_segment_split() -> None:
     assert "best-known version" in system_prompt
     assert "segment may be too long" in system_prompt
     assert "two shorter curve_to segments" in system_prompt
+
+
+def test_system_prompt_mentions_zoom_inspection_rule() -> None:
+    from services.free_pen_prompt import build_free_pen_tool_system_prompt
+
+    system_prompt = build_free_pen_tool_system_prompt()
+    assert "request_segment_zoom" in system_prompt
+    assert "request_zoom_window" in system_prompt
+    assert "inspection-only" in system_prompt
+    assert "Tool coordinates must always remain original image_px" in system_prompt

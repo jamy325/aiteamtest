@@ -14,6 +14,8 @@ _ALLOWED_TOOL_NAMES = (
     "curve_to",
     "convert_line_to_curve",
     "restore_best_segment",
+    "request_segment_zoom",
+    "request_zoom_window",
     "move_anchor",
     "move_handle",
     "set_segment_handles",
@@ -111,6 +113,44 @@ def build_free_pen_native_tools_schema() -> list[dict[str, Any]]:
                         "reason": {"type": "string"},
                     },
                     "required": ["segment_id", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "request_segment_zoom",
+                "description": "Request a magnified visual crop around an existing segment. This is an inspection-only tool and does not modify the path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "segment_id": {"type": "string"},
+                        "zoom_scale": {"type": "number", "minimum": 2, "maximum": 6},
+                        "padding_px": {"type": "number", "minimum": 20, "maximum": 200},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["segment_id", "zoom_scale", "padding_px", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "request_zoom_window",
+                "description": "Request a magnified crop for a custom original-image coordinate window. This is an inspection-only tool and does not modify the path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "width": {"type": "number", "minimum": 80, "maximum": 600},
+                        "height": {"type": "number", "minimum": 80, "maximum": 600},
+                        "zoom_scale": {"type": "number", "minimum": 2, "maximum": 6},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["x", "y", "width", "height", "zoom_scale", "reason"],
                     "additionalProperties": False,
                 },
             },
@@ -310,6 +350,28 @@ def parse_native_tool_call(name: str, arguments: str | dict[str, Any]) -> dict[s
         return _tool_call_response(
             "restore_best_segment",
             {"segment_id": _require_key(parsed_args, "segment_id")},
+            reason,
+        )
+    if normalized_name == "request_segment_zoom":
+        return _tool_call_response(
+            "request_segment_zoom",
+            {
+                "segment_id": _require_key(parsed_args, "segment_id"),
+                "zoom_scale": _require_key(parsed_args, "zoom_scale"),
+                "padding_px": _require_key(parsed_args, "padding_px"),
+            },
+            reason,
+        )
+    if normalized_name == "request_zoom_window":
+        return _tool_call_response(
+            "request_zoom_window",
+            {
+                "x": _require_key(parsed_args, "x"),
+                "y": _require_key(parsed_args, "y"),
+                "width": _require_key(parsed_args, "width"),
+                "height": _require_key(parsed_args, "height"),
+                "zoom_scale": _require_key(parsed_args, "zoom_scale"),
+            },
             reason,
         )
     if normalized_name == "move_anchor":

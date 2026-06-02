@@ -128,6 +128,15 @@ def test_native_tools_schema_contains_restore_best_segment() -> None:
     assert "restore_best_segment" in tool_names
 
 
+def test_native_tools_schema_contains_request_zoom_tools() -> None:
+    tool_names = {
+        entry["function"]["name"]
+        for entry in build_free_pen_native_tools_schema()
+        if entry.get("type") == "function"
+    }
+    assert {"request_segment_zoom", "request_zoom_window"} <= tool_names
+
+
 def test_parse_native_move_anchor() -> None:
     result = parse_native_tool_call(
         "move_anchor",
@@ -198,4 +207,40 @@ def test_parse_native_restore_best_segment() -> None:
             "segment_id": "S3",
         },
         "reason": "restore best",
+    }
+
+
+def test_parse_native_request_segment_zoom() -> None:
+    result = parse_native_tool_call(
+        "request_segment_zoom",
+        {"segment_id": "S3", "zoom_scale": 4, "padding_px": 100, "reason": "Need a closer view."},
+    )
+    assert result == {
+        "decision": "tool_call",
+        "tool_call": {
+            "tool": "request_segment_zoom",
+            "segment_id": "S3",
+            "zoom_scale": 4,
+            "padding_px": 100,
+        },
+        "reason": "Need a closer view.",
+    }
+
+
+def test_parse_native_request_zoom_window() -> None:
+    result = parse_native_tool_call(
+        "request_zoom_window",
+        {"x": 1080, "y": 80, "width": 360, "height": 260, "zoom_scale": 4, "reason": "Need this local region."},
+    )
+    assert result == {
+        "decision": "tool_call",
+        "tool_call": {
+            "tool": "request_zoom_window",
+            "x": 1080,
+            "y": 80,
+            "width": 360,
+            "height": 260,
+            "zoom_scale": 4,
+        },
+        "reason": "Need this local region.",
     }
