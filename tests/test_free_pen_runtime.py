@@ -251,6 +251,7 @@ def test_free_pen_cli_prints_raw_provider_response_to_stderr(tmp_path: Path, mon
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "[free_pen_raw_response][round=1]" in captured.err
+    assert "[provider_duration_ms=" in captured.err
     assert '"decision": "draw"' in captured.err
 
 

@@ -120,7 +120,7 @@ class FreePenRuntime:
     stroke_rgba: tuple[int, int, int, int] = (0, 255, 0, 255)
     sample_count_per_segment: int = 64
     interaction_logger: Callable[[dict[str, Any]], None] | None = None
-    raw_response_logger: Callable[[int, Any], None] | None = None
+    raw_response_logger: Callable[[int, Any, float | None], None] | None = None
     provider_name: str = ""
     provider_model: str = ""
 
@@ -181,7 +181,7 @@ class FreePenRuntime:
                 provider_start = perf_counter()
                 raw_response = self.adapter.review(prompt, review_input)
                 provider_duration_ms = (perf_counter() - provider_start) * 1000.0
-                self._record_raw_response(round_index, raw_response)
+                self._record_raw_response(round_index, raw_response, provider_duration_ms)
                 normalized_response = normalize_free_pen_response(raw_response)
                 validate_free_pen_response(normalized_response)
                 final_decision = str(normalized_response["decision"])
@@ -367,9 +367,9 @@ class FreePenRuntime:
         if self.interaction_logger is not None:
             self.interaction_logger(payload)
 
-    def _record_raw_response(self, round_index: int, raw_response: Any) -> None:
+    def _record_raw_response(self, round_index: int, raw_response: Any, provider_duration_ms: float | None) -> None:
         if self.raw_response_logger is not None:
-            self.raw_response_logger(round_index, raw_response)
+            self.raw_response_logger(round_index, raw_response, provider_duration_ms)
 
     def _image_upload_summary(self, source_image_path: Path) -> dict[str, Any]:
         raw_bytes = source_image_path.read_bytes()
@@ -830,7 +830,7 @@ class FreePenToolRuntime:
     stroke_rgba: tuple[int, int, int, int] = (0, 128, 255, 255)
     sample_count_per_segment: int = 64
     interaction_logger: Callable[[dict[str, Any]], None] | None = None
-    raw_response_logger: Callable[[int, Any], None] | None = None
+    raw_response_logger: Callable[[int, Any, float | None], None] | None = None
     provider_name: str = ""
     provider_model: str = ""
     history_summary_steps: int = 8
@@ -1049,7 +1049,7 @@ class FreePenToolRuntime:
                 provider_start = perf_counter()
                 raw_response = self.adapter.review(prompt, review_input)
                 provider_duration_ms = (perf_counter() - provider_start) * 1000.0
-                self._record_raw_response(step_index, raw_response)
+                self._record_raw_response(step_index, raw_response, provider_duration_ms)
 
                 assistant_message = raw_response.get("_assistant_message")
                 if assistant_message:
@@ -4581,9 +4581,9 @@ class FreePenToolRuntime:
         if self.interaction_logger is not None:
             self.interaction_logger(payload)
 
-    def _record_raw_response(self, step_index: int, raw_response: Any) -> None:
+    def _record_raw_response(self, step_index: int, raw_response: Any, provider_duration_ms: float | None) -> None:
         if self.raw_response_logger is not None:
-            self.raw_response_logger(step_index, raw_response)
+            self.raw_response_logger(step_index, raw_response, provider_duration_ms)
 
 
 __all__ = [

@@ -663,12 +663,17 @@ def _emit_error(error_type: str, message: str, details: dict[str, object] | None
     return 1
 
 
-def _print_free_pen_raw_response(round_index: int, raw_response: object) -> None:
+def _print_free_pen_raw_response(round_index: int, raw_response: object, provider_duration_ms: float | None) -> None:
     try:
         rendered = json.dumps(raw_response, ensure_ascii=False)
     except TypeError:
         rendered = repr(raw_response)
-    print(f"[free_pen_raw_response][round={round_index}] {rendered}", file=sys.stderr)
+    duration_suffix = (
+        f"[provider_duration_ms={round(float(provider_duration_ms), 3)}]"
+        if provider_duration_ms is not None
+        else ""
+    )
+    print(f"[free_pen_raw_response][round={round_index}]{duration_suffix} {rendered}", file=sys.stderr)
 
 
 class _ProgressReporter:
