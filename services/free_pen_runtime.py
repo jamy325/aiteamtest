@@ -7,6 +7,7 @@ import mimetypes
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -152,6 +153,8 @@ class FreePenRuntime:
             raw_response: Any = None
             normalized_response: dict[str, Any] | None = None
             response_error: str | None = None
+            provider_duration_ms: float | None = None
+            provider_start: float | None = None
             status = "received"
             self._record_interaction(
                 {
@@ -175,7 +178,9 @@ class FreePenRuntime:
                 }
             )
             try:
+                provider_start = perf_counter()
                 raw_response = self.adapter.review(prompt, review_input)
+                provider_duration_ms = (perf_counter() - provider_start) * 1000.0
                 self._record_raw_response(round_index, raw_response)
                 normalized_response = normalize_free_pen_response(raw_response)
                 validate_free_pen_response(normalized_response)
@@ -191,6 +196,7 @@ class FreePenRuntime:
                         "raw_response": raw_response,
                         "normalized_response": normalized_response,
                         "final_decision": final_decision,
+                        "provider_duration_ms": round(float(provider_duration_ms), 3),
                     }
                 )
                 if final_decision == "draw":
@@ -211,6 +217,7 @@ class FreePenRuntime:
                             normalized_response=normalized_response,
                             status=status,
                             error=None,
+                            provider_duration_ms=provider_duration_ms,
                         )
                     )
                     round_summaries.append(
@@ -233,6 +240,7 @@ class FreePenRuntime:
                             normalized_response=normalized_response,
                             status=status,
                             error=None,
+                            provider_duration_ms=provider_duration_ms,
                         )
                     )
                     round_summaries.append(
@@ -250,6 +258,8 @@ class FreePenRuntime:
                 response_error = str(exc)
                 error_message = response_error
                 status = "invalid_response"
+                if provider_duration_ms is None and raw_response is None and provider_start is not None:
+                    provider_duration_ms = (perf_counter() - provider_start) * 1000.0
                 self._record_interaction(
                     {
                         "interaction_id": interaction_id,
@@ -260,6 +270,7 @@ class FreePenRuntime:
                         "raw_response": raw_response,
                         "normalized_response": normalized_response,
                         "error": response_error,
+                        "provider_duration_ms": None if provider_duration_ms is None else round(float(provider_duration_ms), 3),
                     }
                 )
 
@@ -272,6 +283,7 @@ class FreePenRuntime:
                     normalized_response=normalized_response,
                     status=status,
                     error=response_error,
+                    provider_duration_ms=provider_duration_ms,
                 )
             )
             round_summaries.append(
@@ -281,6 +293,7 @@ class FreePenRuntime:
                     "status": status,
                     "reason": final_reason,
                     "error": response_error,
+                    "provider_duration_ms": None if provider_duration_ms is None else round(float(provider_duration_ms), 3),
                 }
             )
 
@@ -445,6 +458,7 @@ class FreePenRuntime:
         normalized_response: dict[str, Any] | None,
         status: str,
         error: str | None,
+        provider_duration_ms: float | None,
     ) -> Path:
         response_path = output_dir / f"round_{round_index:03d}_response.json"
         payload = {
@@ -454,6 +468,7 @@ class FreePenRuntime:
             "raw_response": raw_response,
             "normalized_response": normalized_response,
             "error": error,
+            "provider_duration_ms": None if provider_duration_ms is None else round(float(provider_duration_ms), 3),
         }
         response_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         return response_path
@@ -1001,6 +1016,8 @@ class FreePenToolRuntime:
             execution_result: dict[str, Any] | None = None
             tool_result_message: dict[str, Any] | None = None
             requested_zoom_windows: list[dict[str, Any]] = []
+            provider_duration_ms: float | None = None
+            provider_start: float | None = None
             self._record_interaction(
                 {
                     "interaction_id": interaction_id,
@@ -1029,7 +1046,9 @@ class FreePenToolRuntime:
                 review_input = FreePenToolReviewInput(
                     **{**asdict(review_input), "messages": tuple(request_messages)}
                 )
+                provider_start = perf_counter()
                 raw_response = self.adapter.review(prompt, review_input)
+                provider_duration_ms = (perf_counter() - provider_start) * 1000.0
                 self._record_raw_response(step_index, raw_response)
 
                 assistant_message = raw_response.get("_assistant_message")
@@ -1308,6 +1327,7 @@ class FreePenToolRuntime:
                                 "If a requested zoom image is provided, inspect it before choosing the next tool. "
                                 "BLACK is target; ORANGE is your drawing; BLUE are anchors; GREEN are control handles."
                             ),
+                            "provider_duration_ms": round(float(provider_duration_ms), 3),
                         }
                         conversation.append_tool_result(tool_call_id, tool_result_content)
                         tool_result_message = {
@@ -1325,6 +1345,8 @@ class FreePenToolRuntime:
                 error_message = validation_error
                 error_type = "ProviderTimeout" if self._is_timeout_error(exc) else type(exc).__name__
                 round_status = "provider_timeout" if error_type == "ProviderTimeout" else "invalid_response"
+                if provider_duration_ms is None and raw_response is None and provider_start is not None:
+                    provider_duration_ms = (perf_counter() - provider_start) * 1000.0
                 canvas.final_status = round_status
                 invalid_step_count += 1
                 quality = "bad"
@@ -1380,6 +1402,7 @@ class FreePenToolRuntime:
                     normalized_response=normalized_response,
                     status=round_status,
                     error=validation_error,
+                    provider_duration_ms=provider_duration_ms,
                 )
             )
             history_entry = {
@@ -1431,6 +1454,7 @@ class FreePenToolRuntime:
                     "provider_parse_error": validation_error if validation_error else None,
                     "execution_result": execution_result,
                     "tool_result_message": tool_result_message,
+                    "provider_duration_ms": None if provider_duration_ms is None else round(float(provider_duration_ms), 3),
                 }
             )
             self._record_interaction(
@@ -1453,6 +1477,7 @@ class FreePenToolRuntime:
                     "request_snapshot_path": str(request_snapshot_path),
                     "conversation_history_path": str(conversation_history_path),
                     "requested_zoom_windows": requested_zoom_windows,
+                    "provider_duration_ms": None if provider_duration_ms is None else round(float(provider_duration_ms), 3),
                 }
             )
 

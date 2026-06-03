@@ -222,6 +222,9 @@ def test_free_pen_cli_writes_ai_review_interaction_log(tmp_path: Path, monkeypat
     assert interaction["provider_request_content_summary"]["content"][0]["type"] == "image_file"
     assert interaction["provider_request_content_summary"]["content"][-1]["type"] == "text"
     assert interaction["normalized_response"]["decision"] == "draw"
+    assert float(interaction["provider_duration_ms"]) >= 0.0
+    response_payload = json.loads((output_dir / "round_001_response.json").read_text(encoding="utf-8"))
+    assert float(response_payload["provider_duration_ms"]) >= 0.0
 
 
 def test_free_pen_cli_prints_raw_provider_response_to_stderr(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -295,9 +298,12 @@ def test_free_pen_tool_runtime_sequence_generates_overlay_paths_and_trace(tmp_pa
     trace_payload = json.loads(result.tool_trace_path.read_text(encoding="utf-8"))
     assert trace_payload["successful_step_count"] == 2
     assert trace_payload["rounds"][0]["executed_tool_call"]["tool"] == "start_path"
+    assert float(trace_payload["rounds"][0]["provider_duration_ms"]) >= 0.0
     paths_payload = json.loads(result.paths_json_path.read_text(encoding="utf-8"))
     assert paths_payload["paths"][0]["segments"][0]["type"] == "move"
     assert paths_payload["paths"][0]["segments"][1]["type"] == "cubic"
+    response_payload = json.loads((output_dir / "round_001_response.json").read_text(encoding="utf-8"))
+    assert float(response_payload["provider_duration_ms"]) >= 0.0
 
 
 def test_editable_geometry_exports_anchor_and_segment_ids() -> None:
