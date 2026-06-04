@@ -177,6 +177,7 @@ class FreePenCanvasState:
 
     def close_path(self) -> dict[str, Any]:
         path = self._require_open_path(tool="close_path")
+        distance_to_start_before_close = self.distance_to_start()
         path.segments.append({"type": "close"})
         path.closed = True
         self.path_open = False
@@ -187,6 +188,7 @@ class FreePenCanvasState:
         return {
             "tool": "close_path",
             "path_id": closed_path_id,
+            "distance_to_start_before_close": distance_to_start_before_close,
         }
 
     def move_anchor(self, *, anchor_id: Any, x: Any, y: Any) -> dict[str, Any]:

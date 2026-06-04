@@ -53,6 +53,44 @@ def _native_tool_call(name: str, arguments: dict[str, object], *, call_id: str) 
     }
 
 
+def _tool_context(
+    canvas: FreePenCanvasState,
+    *,
+    segment_id: str | None = "S1",
+    segment_type: str | None = "line",
+    status: str = "acceptable",
+    recommended_next_tools: list[str] | None = None,
+    may_advance_to_next_segment: bool = True,
+    refinement_limit_reached: bool = False,
+    may_continue_handle_refinement: bool = True,
+) -> dict[str, object]:
+    focus: dict[str, object] = {}
+    quality_metrics: dict[str, object] = {"current_segment": {"segment_id": segment_id, "path_to_source_p90_px": 1.0}}
+    if segment_id is not None:
+        focus = {"segment_id": segment_id, "type": segment_type}
+    else:
+        quality_metrics = {"current_segment": {"segment_id": None, "unavailable_reason": "no_current_segment"}}
+    return {
+        "editable_geometry": canvas.editable_geometry(),
+        "focus": focus,
+        "status": {
+            "segment_id": segment_id,
+            "status": status,
+            "reason": status,
+            "recommended_next_tools": recommended_next_tools or ["curve_to", "line_to", "close_path"],
+            "may_advance_to_next_segment": may_advance_to_next_segment,
+            "refinement_limit_reached": refinement_limit_reached,
+            "may_continue_handle_refinement": may_continue_handle_refinement,
+        },
+        "quality_metrics": quality_metrics,
+        "quality_delta": {},
+        "refinement_summary": {},
+        "segment_split_hint": {},
+        "best_candidate_hint": {},
+        "anchor_quality": {},
+    }
+
+
 def test_free_pen_runtime_generates_transparent_png_for_single_and_multi_segment_draws(tmp_path: Path) -> None:
     input_path = tmp_path / "source.png"
     _write_source_image(input_path)
@@ -618,6 +656,224 @@ def test_close_path_too_early_is_rejected(tmp_path: Path) -> None:
     assert "close_path_used_too_early" in warning_codes
     assert "long_chord_if_closed" in warning_codes
     assert rejected_round["canvas_state_summary"]["path_open"] is True
+
+
+def test_close_path_allows_pure_line_polygon(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=120, height=120)
+    successful_tool_calls = [
+        {"tool": "start_path", "x": 12, "y": 12},
+        {"tool": "line_to", "x": 60, "y": 12},
+        {"tool": "line_to", "x": 60, "y": 60},
+        {"tool": "line_to", "x": 16, "y": 16},
+    ]
+    for tool_call in successful_tool_calls:
+        canvas.apply_tool_call(tool_call)
+
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "close_path"},
+        ai_reason="close the polygon",
+        history=[],
+        canvas=canvas,
+        successful_drawing_step_count=len(successful_tool_calls),
+        rollback_count=0,
+        current_segment_context=_tool_context(canvas),
+        source_distance_map=None,
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+
+    assert preflight["success"] is True
+    assert "close_path_used_too_early" not in warning_codes
+
+    executed, runtime_description, _, _, _, _, _, accepted = runtime._execute_tool_call(
+        tool_call={"tool": "close_path"},
+        ai_reason="close the polygon",
+        canvas=canvas,
+        successful_drawing_tool_calls=list(successful_tool_calls),
+        history=[],
+    )
+    assert accepted is True
+    assert executed is not None
+    assert canvas.paths[0].closed is True
+    assert "near the path start" in runtime_description.lower()
+
+
+def test_close_path_does_not_require_cubic_segment(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=120, height=120)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 60, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 60, "y": 60})
+    canvas.apply_tool_call({"tool": "line_to", "x": 16, "y": 16})
+
+    assert canvas.current_path_has_cubic_segment() is False
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "close_path"},
+        ai_reason="close line polygon",
+        history=[],
+        canvas=canvas,
+        successful_drawing_step_count=4,
+        rollback_count=0,
+        current_segment_context=_tool_context(canvas),
+        source_distance_map=None,
+    )
+
+    assert preflight["success"] is True
+
+
+def test_warning_message_no_smooth_for_close_path_too_early(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=120, height=120)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 18, "y": 16})
+
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "close_path"},
+        ai_reason="close too early",
+        history=[],
+        canvas=canvas,
+        successful_drawing_step_count=2,
+        rollback_count=0,
+        current_segment_context=_tool_context(canvas),
+        source_distance_map=None,
+    )
+    too_early_messages = [
+        warning["message"]
+        for warning in preflight["warnings"]
+        if warning["code"] == "close_path_used_too_early"
+    ]
+
+    assert preflight["success"] is False
+    assert too_early_messages
+    assert "smooth" not in too_early_messages[0].lower()
+    assert "cubic" not in too_early_messages[0].lower()
+    assert "bezier" not in too_early_messages[0].lower()
+
+
+def test_allowed_actions_do_not_include_close_path_when_preflight_would_reject(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=120, height=120)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 60, "y": 12})
+
+    session_state = runtime._build_session_state(
+        canvas=canvas,
+        history=[],
+        current_feedback=[],
+        current_segment_context=_tool_context(canvas),
+        source_contour_summary={"canvas_width": 120, "canvas_height": 120, "bbox": {}, "anchors": {}},
+        requested_zoom_total_count=0,
+        requested_zoom_by_segment={},
+    )
+
+    assert "close_path" not in session_state["allowed_next_actions"]
+
+
+def test_allowed_actions_include_close_path_for_near_start_polygon(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=120, height=120)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 60, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 60, "y": 60})
+    canvas.apply_tool_call({"tool": "line_to", "x": 16, "y": 16})
+
+    session_state = runtime._build_session_state(
+        canvas=canvas,
+        history=[],
+        current_feedback=[],
+        current_segment_context=_tool_context(canvas),
+        source_contour_summary={"canvas_width": 120, "canvas_height": 120, "bbox": {}, "anchors": {}},
+        requested_zoom_total_count=0,
+        requested_zoom_by_segment={},
+    )
+
+    assert "close_path" in session_state["allowed_next_actions"]
+
+
+def test_closed_path_allows_finish(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=120, height=120)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 60, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 60, "y": 60})
+    canvas.apply_tool_call({"tool": "line_to", "x": 16, "y": 16})
+    canvas.apply_tool_call({"tool": "close_path"})
+
+    session_state = runtime._build_session_state(
+        canvas=canvas,
+        history=[],
+        current_feedback=[],
+        current_segment_context=_tool_context(canvas, segment_id=None, segment_type=None),
+        source_contour_summary={"canvas_width": 120, "canvas_height": 120, "bbox": {}, "anchors": {}},
+        requested_zoom_total_count=0,
+        requested_zoom_by_segment={},
+    )
+
+    assert "finish" in session_state["allowed_next_actions"]
+    assert "close_path" not in session_state["allowed_next_actions"]
+
+
+def test_repeated_close_path_rejection_guard(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=120, height=120)
+    canvas.apply_tool_call({"tool": "start_path", "x": 12, "y": 12})
+    canvas.apply_tool_call({"tool": "line_to", "x": 18, "y": 16})
+    history = [
+        {
+            "step": 2,
+            "tool": "close_path",
+            "round_status": "rejected_action",
+            "runtime_description": "Rejected close_path during preflight validation.",
+            "warnings": [{"code": "close_path_used_too_early", "message": "close_path requires enough drawable segments before closing the path."}],
+        }
+        for _ in range(3)
+    ]
+
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "close_path"},
+        ai_reason="close again",
+        history=history,
+        canvas=canvas,
+        successful_drawing_step_count=2,
+        rollback_count=0,
+        current_segment_context=_tool_context(canvas),
+        source_distance_map=None,
+    )
+    warning_codes = {warning["code"] for warning in preflight["warnings"]}
+    next_hint = runtime._next_hint(
+        final_decision="tool_call",
+        round_status="rejected_action",
+        warnings=preflight["warnings"],
+        session_state={"allowed_next_actions": ["rollback_to_step", "inspect_history", "restart_path", "stalled"]},
+        current_segment_context=_tool_context(canvas),
+    )
+
+    assert preflight["success"] is False
+    assert "repeated_rejected_tool" in warning_codes
+    assert "Do not repeat close_path" in next_hint
+
+
+def test_circle_cubic_close_path_still_works(tmp_path: Path) -> None:
+    runtime = FreePenToolRuntime(adapter=NativeToolCallSequenceAdapter(response_path=tmp_path / "unused.json"))
+    canvas = FreePenCanvasState(width=160, height=160)
+    canvas.apply_tool_call({"tool": "start_path", "x": 60, "y": 20})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [90, 20], "c2": [120, 50], "p": [120, 80]})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [120, 110], "c2": [90, 140], "p": [60, 140]})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [30, 140], "c2": [0, 110], "p": [0, 80]})
+    canvas.apply_tool_call({"tool": "curve_to", "c1": [0, 50], "c2": [30, 20], "p": [60, 22]})
+
+    preflight = runtime._preflight_tool_call(
+        tool_call={"tool": "close_path"},
+        ai_reason="close the circle",
+        history=[],
+        canvas=canvas,
+        successful_drawing_step_count=5,
+        rollback_count=0,
+        current_segment_context=_tool_context(canvas, segment_type="cubic"),
+        source_distance_map=None,
+    )
+
+    assert preflight["success"] is True
 
 
 def test_finish_with_open_path_is_rejected_in_closed_contour_mode(tmp_path: Path) -> None:

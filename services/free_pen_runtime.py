@@ -1073,6 +1073,7 @@ class FreePenToolRuntime:
                     preflight_result = self._preflight_tool_call(
                         tool_call=tool_call,
                         ai_reason=final_reason or "",
+                        history=history,
                         canvas=canvas,
                         successful_drawing_step_count=len(successful_drawing_tool_calls),
                         rollback_count=rollback_count,
@@ -2172,6 +2173,71 @@ class FreePenToolRuntime:
             float(image_origin_y) + ((float(point[1]) - float(y0)) * float(zoom_scale)),
         )
 
+    def _evaluate_close_path_state(self, *, canvas: FreePenCanvasState) -> dict[str, Any]:
+        drawable_count = int(canvas.current_path_drawable_segment_count())
+        distance_to_start = canvas.distance_to_start()
+        threshold = max(8.0, float(canvas.current_path_bbox_diagonal()) * 0.10)
+        reject_codes: list[str] = []
+        warnings: list[dict[str, Any]] = []
+        if drawable_count < 2:
+            reject_codes.append("close_path_used_too_early")
+            warnings.append(
+                self._warning(
+                    "close_path_used_too_early",
+                    "close_path requires enough drawable segments before closing the path.",
+                )
+            )
+        if distance_to_start is not None and distance_to_start > threshold:
+            reject_codes.append("long_chord_if_closed")
+            warnings.append(
+                self._warning(
+                    "long_chord_if_closed",
+                    f"Closing now would create a long straight chord of length {distance_to_start:.2f} back to the start point.",
+                )
+            )
+        return {
+            "drawable_count": drawable_count,
+            "distance_to_start": None if distance_to_start is None else float(distance_to_start),
+            "threshold": float(threshold),
+            "can_close": not reject_codes,
+            "reject_codes": tuple(reject_codes),
+            "warnings": warnings,
+        }
+
+    def _repeated_rejected_tool_state(self, history: list[dict[str, Any]]) -> dict[str, Any]:
+        if not history:
+            return {"tool": None, "warning_code": None, "count": 0}
+        last_entry = history[-1]
+        if str(last_entry.get("round_status")) != "rejected_action":
+            return {"tool": None, "warning_code": None, "count": 0}
+        tool = str(last_entry.get("tool") or "")
+        warning_codes = [
+            str(warning.get("code"))
+            for warning in last_entry.get("warnings") or []
+            if isinstance(warning, dict) and warning.get("code")
+        ]
+        if not tool or not warning_codes:
+            return {"tool": None, "warning_code": None, "count": 0}
+        best_code = None
+        best_count = 0
+        for warning_code in warning_codes:
+            count = 0
+            for entry in reversed(history):
+                if str(entry.get("round_status")) != "rejected_action" or str(entry.get("tool") or "") != tool:
+                    break
+                entry_codes = {
+                    str(warning.get("code"))
+                    for warning in entry.get("warnings") or []
+                    if isinstance(warning, dict) and warning.get("code")
+                }
+                if warning_code not in entry_codes:
+                    break
+                count += 1
+            if count > best_count:
+                best_code = warning_code
+                best_count = count
+        return {"tool": tool or None, "warning_code": best_code, "count": int(best_count)}
+
     @staticmethod
     def _draw_outlined_text(
         image: np.ndarray,
@@ -2201,6 +2267,7 @@ class FreePenToolRuntime:
         *,
         tool_call: dict[str, Any],
         ai_reason: str,
+        history: list[dict[str, Any]] | None = None,
         canvas: FreePenCanvasState,
         successful_drawing_step_count: int,
         rollback_count: int,
@@ -2382,25 +2449,9 @@ class FreePenToolRuntime:
                 )
             )
         if tool == "close_path" and canvas.path_open:
-            if canvas.current_path_drawable_segment_count() < 2 or not canvas.current_path_has_cubic_segment():
-                reject_codes.add("close_path_used_too_early")
-                warnings.append(
-                    self._warning(
-                        "close_path_used_too_early",
-                        "close_path was called when the path had too few smooth drawable segments.",
-                    )
-                )
-            distance_to_start = canvas.distance_to_start()
-            if distance_to_start is not None:
-                threshold = max(8.0, canvas.current_path_bbox_diagonal() * 0.10)
-                if distance_to_start > threshold:
-                    reject_codes.add("long_chord_if_closed")
-                    warnings.append(
-                        self._warning(
-                            "long_chord_if_closed",
-                            f"Closing now would create a long straight chord of length {distance_to_start:.2f} back to the start point.",
-                        )
-                    )
+            close_state = self._evaluate_close_path_state(canvas=canvas)
+            reject_codes.update(str(code) for code in close_state["reject_codes"])
+            warnings.extend(close_state["warnings"])
         if tool == "undo_last" and successful_drawing_step_count == 0:
             reject_codes.add("undo_without_history")
             warnings.append(self._warning("undo_without_history", "There is no successful drawing step to undo."))
@@ -2527,6 +2578,21 @@ class FreePenToolRuntime:
                     )
                 )
 
+        repeated_rejection = self._repeated_rejected_tool_state(history or [])
+        if (
+            repeated_rejection.get("count", 0) >= 3
+            and repeated_rejection.get("tool") == tool
+            and repeated_rejection.get("warning_code") in reject_codes
+        ):
+            repeated_warning_code = str(repeated_rejection["warning_code"])
+            reject_codes.add("repeated_rejected_tool")
+            warnings.append(
+                self._warning(
+                    "repeated_rejected_tool",
+                    f"{tool} was rejected repeatedly for {repeated_warning_code}. Do not call {tool} again unless the path state changes.",
+                )
+            )
+
         if reject_codes:
             runtime_description = f"Rejected {tool} during preflight validation."
             quality_summary = " ; ".join(warning["message"] for warning in warnings)
@@ -2557,6 +2623,9 @@ class FreePenToolRuntime:
             elif "zoom_window_outside_canvas" in reject_codes:
                 runtime_description = "Rejected request_zoom_window because the requested crop does not intersect the canvas."
                 quality_summary = "Requested zoom windows must overlap the canvas."
+            elif "repeated_rejected_tool" in reject_codes:
+                runtime_description = f"Rejected repeated {tool} because it has already been rejected for the same reason several times."
+                quality_summary = "Do not repeat the same rejected tool call unless the path state changes."
             return {
                 "success": False,
                 "rejected": True,
@@ -2856,7 +2925,10 @@ class FreePenToolRuntime:
         if tool == "convert_line_to_curve":
             return f"Converted line segment {tool_call['segment_id']} into an editable cubic segment."
         if tool == "close_path":
-            return "Closed the current path by drawing a straight chord from the current point back to the path start."
+            distance_to_start_before_close = self._finite_number_or_none(executed_tool_call.get("distance_to_start_before_close"))
+            if distance_to_start_before_close is not None and distance_to_start_before_close <= 8.0:
+                return "Closed the current path; the current point was already near the path start."
+            return "Closed the current path by connecting the current point back to the path start."
         return f"Executed {tool}."
 
     def _recent_history_summary(self, history: list[dict[str, Any]], *, last_n: int | None = None) -> list[str]:
@@ -4322,11 +4394,14 @@ class FreePenToolRuntime:
         requested_zoom_by_segment: dict[str, int],
     ) -> dict[str, Any]:
         closed_path_count = sum(1 for path in canvas.paths if path.closed)
+        repeated_rejection = self._repeated_rejected_tool_state(history)
         last_action = str(history[-1]["runtime_description"]) if history else "none"
         current_segment_focus = current_segment_context["focus"]
         current_segment_status = current_segment_context["status"]
+        feedback_messages = list(current_feedback)
         if canvas.path_open:
             near_start = canvas.distance_to_start()
+            close_state = self._evaluate_close_path_state(canvas=canvas)
             if current_segment_status.get("may_advance_to_next_segment") is False and current_segment_focus.get("segment_id"):
                 if current_segment_status.get("refinement_limit_reached"):
                     if current_segment_context.get("segment_split_hint", {}).get("should_consider_split"):
@@ -4340,16 +4415,16 @@ class FreePenToolRuntime:
                 allowed_next_actions = tuple(current_segment_status.get("recommended_next_tools") or ())
                 forbidden_next_actions = ("curve_to", "line_to", "close_path", "finish")
             elif (
-                near_start is not None
-                and near_start <= max(8.0, canvas.current_path_bbox_diagonal() * 0.10)
-                and canvas.current_path_drawable_segment_count() >= 2
+                close_state["can_close"]
+                and near_start is not None
+                and near_start <= float(close_state["threshold"])
             ):
                 current_goal = "The path has returned to the start point. Inspect the final visual feedback. If the orange path matches the black contour, call close_path as the next single tool call."
                 allowed_next_actions = ("close_path", "set_segment_handles", "move_handle", "move_anchor", "convert_line_to_curve", "undo_last", "rollback_to_step", "inspect_history", "stalled")
                 forbidden_next_actions = ("finish", "start_path", "curve_to", "line_to")
             else:
                 current_goal = "Continue tracing the current open target contour. Prefer curve_to over line_to unless the source contour is clearly straight."
-                allowed_next_actions = ("curve_to", "line_to", "close_path", "undo_last", "rollback_to_step", "inspect_history", "restart_path", "move_anchor", "move_handle", "set_segment_handles", "convert_line_to_curve")
+                allowed_next_actions = ("curve_to", "line_to", "undo_last", "rollback_to_step", "inspect_history", "restart_path", "move_anchor", "move_handle", "set_segment_handles", "convert_line_to_curve")
                 forbidden_next_actions = ("finish", "start_path")
         elif closed_path_count >= 1:
             current_goal = "Return finish if the closed path matches the source; otherwise use rollback_to_step or restart_path."
@@ -4364,6 +4439,16 @@ class FreePenToolRuntime:
             requested_zoom_total_count=requested_zoom_total_count,
             requested_zoom_by_segment=requested_zoom_by_segment,
         )
+        if (
+            repeated_rejection.get("tool") == "close_path"
+            and repeated_rejection.get("count", 0) >= 3
+            and "close_path" in allowed_next_actions
+        ):
+            allowed_next_actions = tuple(action for action in allowed_next_actions if action != "close_path")
+            warning_code = str(repeated_rejection.get("warning_code") or "same_reason")
+            feedback_messages.append(
+                f"Do not repeat close_path. It was rejected repeatedly for {warning_code}. Change the path state before trying to close it again."
+            )
         allowed_next_actions = tuple(dict.fromkeys([*allowed_next_actions, *zoom_actions]))
         return {
             "task": "continue tracing the same single black target contour",
@@ -4379,7 +4464,7 @@ class FreePenToolRuntime:
             "current_goal": current_goal,
             "allowed_next_actions": list(allowed_next_actions),
             "forbidden_next_actions": list(forbidden_next_actions),
-            "current_feedback": list(current_feedback),
+            "current_feedback": feedback_messages,
             "current_segment_focus": current_segment_focus,
             "current_segment_status": current_segment_status,
             "source_contour_summary": source_contour_summary,
@@ -4534,6 +4619,10 @@ class FreePenToolRuntime:
             return "The previous tool call was rejected because a coordinate was outside the canvas bounds. Do not continue to the next segment. Retry the same segment with in-bounds coordinates, or refine the latest existing segment with set_segment_handles."
         if round_status == "rejected_action" and any(warning["code"] == "zoom_budget_exceeded" for warning in warnings):
             return "Zoom budget reached. Use the current visual feedback to choose a drawing or editing tool."
+        if round_status == "rejected_action" and any(warning["code"] == "repeated_rejected_tool" for warning in warnings):
+            if any(warning["code"] == "close_path_used_too_early" for warning in warnings):
+                return "Do not repeat close_path. It was rejected for the same reason. Use rollback_to_step, inspect_history, restart_path, or stalled instead."
+            return "Do not repeat the same rejected tool call unless the path state changes."
         if round_status == "rejected_action":
             return "Revise the action instead of repeating the rejected call."
         if final_decision == "finish":
