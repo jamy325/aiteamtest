@@ -5,7 +5,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:
     from services.ai_agent import AIReviewInput
@@ -19,8 +19,9 @@ class ProviderConfigurationError(RuntimeError):
     pass
 
 
-def load_response_schema() -> dict[str, Any]:
-    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+def load_response_schema(schema_path: Path | None = None) -> dict[str, Any]:
+    resolved_path = SCHEMA_PATH if schema_path is None else Path(schema_path)
+    return json.loads(resolved_path.read_text(encoding="utf-8"))
 
 
 def resolve_api_key(*names: str) -> str | None:
@@ -80,6 +81,38 @@ def parse_json_response_text(text: str, *, provider_name: str) -> dict[str, Any]
     return payload
 
 
+def get_review_messages(review_input: object) -> tuple[dict[str, Any], ...] | None:
+    messages = getattr(review_input, "messages", None)
+    if messages is None:
+        return None
+    if not isinstance(messages, (list, tuple)):
+        raise ValueError("review_input.messages must be a list or tuple")
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            raise ValueError("each review_input.messages entry must be a dict")
+        normalized.append(dict(message))
+    return tuple(normalized)
+
+
+def get_message_image_urls(messages: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+    image_urls: list[str] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            url = image_url.get("url")
+            if isinstance(url, str) and url:
+                image_urls.append(url)
+    return tuple(image_urls)
+
+
 def extract_text_value(response: Any, *, provider_name: str, attr_names: tuple[str, ...]) -> str:
     for attr_name in attr_names:
         if isinstance(response, dict):
@@ -108,6 +141,8 @@ __all__ = [
     "ensure_review_image_path",
     "encode_image_as_data_url",
     "extract_text_value",
+    "get_message_image_urls",
+    "get_review_messages",
     "load_response_schema",
     "parse_json_response_text",
     "resolve_api_key",

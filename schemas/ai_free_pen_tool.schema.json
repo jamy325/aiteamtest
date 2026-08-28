@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/ai_free_pen_tool.schema.json",
+  "title": "AI Free Pen Tool Response",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "tool_call", "reason"],
+      "properties": {
+        "decision": { "const": "tool_call" },
+        "tool_call": { "$ref": "#/$defs/tool_call" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "reason"],
+      "properties": {
+        "decision": { "const": "finish" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "reason"],
+      "properties": {
+        "decision": { "const": "stalled" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  ],
+  "$defs": {
+    "point2d": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "type": "number" }
+    },
+    "tool_call": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "x", "y"],
+          "properties": {
+            "tool": { "const": "start_path" },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "x", "y"],
+          "properties": {
+            "tool": { "const": "line_to" },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "c1", "c2", "p"],
+          "properties": {
+            "tool": { "const": "curve_to" },
+            "c1": { "$ref": "#/$defs/point2d" },
+            "c2": { "$ref": "#/$defs/point2d" },
+            "p": { "$ref": "#/$defs/point2d" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool"],
+          "properties": {
+            "tool": { "const": "close_path" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool"],
+          "properties": {
+            "tool": { "const": "undo_last" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "step"],
+          "properties": {
+            "tool": { "const": "rollback_to_step" },
+            "step": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool"],
+          "properties": {
+            "tool": { "const": "inspect_history" },
+            "last_n": { "type": "integer", "minimum": 1, "maximum": 20 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "x", "y"],
+          "properties": {
+            "tool": { "const": "restart_path" },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "anchor_id", "x", "y"],
+          "properties": {
+            "tool": { "const": "move_anchor" },
+            "anchor_id": { "type": "string", "minLength": 1 },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "segment_id", "handle", "x", "y"],
+          "properties": {
+            "tool": { "const": "move_handle" },
+            "segment_id": { "type": "string", "minLength": 1 },
+            "handle": { "type": "string", "enum": ["c1", "c2"] },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "segment_id", "c1", "c2"],
+          "properties": {
+            "tool": { "const": "set_segment_handles" },
+            "segment_id": { "type": "string", "minLength": 1 },
+            "c1": { "$ref": "#/$defs/point2d" },
+            "c2": { "$ref": "#/$defs/point2d" }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -10,12 +10,15 @@ from services.ai_adapters.gemini_provider import GeminiVisionAdapter
 from services.ai_adapters.mock import MockVisionAdapter
 from services.ai_adapters.openai_provider import OpenAIVisionAdapter
 from services.ai_adapters.siliconflow_provider import SiliconFlowVisionAdapter
+from services.ai_adapters.gemini_openai_provider import GeminiOpenAICompatibleVisionAdapter
 from services.ai_recorded_provider import DEFAULT_RECORDED_FIXTURE_DIR, RecordedVisionProvider
 
 
 def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
     normalized_provider = str(provider).strip().lower()
     recorded_mode = kwargs.pop("recorded_mode", None)
+    response_schema = kwargs.get("response_schema")
+    response_schema_path = kwargs.get("response_schema_path")
 
     if recorded_mode is not None:
         normalized_mode = str(recorded_mode).strip().lower()
@@ -59,6 +62,21 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             image_detail=str(kwargs.get("image_detail", "auto")),
             max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
             timeout_seconds=None if kwargs.get("timeout_seconds") is None else float(kwargs.get("timeout_seconds")),
+            response_schema=response_schema,
+            response_schema_path=response_schema_path,
+        )
+    
+    if normalized_provider in {"gemini_openai", "gemini-openai"}:
+        return GeminiOpenAICompatibleVisionAdapter(
+            model=str(kwargs.get("model", "gemini-3-flash-preview")),
+            api_key=kwargs.get("api_key"),
+            base_url=str(kwargs.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai/")),
+            client=kwargs.get("client"),
+            image_detail=str(kwargs.get("image_detail", "auto")),
+            max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
+            timeout_seconds=None if kwargs.get("timeout_seconds") is None else float(kwargs.get("timeout_seconds")),
+            response_schema=response_schema,
+            response_schema_path=response_schema_path,
         )
 
     if normalized_provider == "gemini":
@@ -69,6 +87,8 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             image_loader=kwargs.get("image_loader"),
             max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
             timeout_seconds=None if kwargs.get("timeout_seconds") is None else float(kwargs.get("timeout_seconds")),
+            response_schema=response_schema,
+            response_schema_path=response_schema_path,
         )
 
     if normalized_provider == "siliconflow":
@@ -80,6 +100,8 @@ def create_vision_adapter(provider: str, **kwargs: Any) -> VisionReviewAdapter:
             image_detail=str(kwargs.get("image_detail", "auto")),
             max_image_bytes=int(kwargs.get("max_image_bytes", MAX_REVIEW_IMAGE_BYTES)),
             timeout_seconds=None if kwargs.get("timeout_seconds") is None else float(kwargs.get("timeout_seconds")),
+            response_schema=response_schema,
+            response_schema_path=response_schema_path,
         )
 
     if normalized_provider == "responder":

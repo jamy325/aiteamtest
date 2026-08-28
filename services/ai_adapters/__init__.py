@@ -6,6 +6,7 @@ from services.ai_adapters.mock import MockVisionAdapter
 from services.ai_adapters.openai_provider import OpenAIVisionAdapter
 from services.ai_adapters.provider_factory import create_vision_adapter
 from services.ai_adapters.siliconflow_provider import SiliconFlowVisionAdapter
+from services.ai_adapters.gemini_openai_provider  import GeminiOpenAICompatibleVisionAdapter
 
 __all__ = [
     "FileResponseVisionAdapter",
@@ -19,4 +20,5 @@ __all__ = [
     "VisionReviewAdapter",
     "collect_image_paths",
     "create_vision_adapter",
+    "GeminiOpenAICompatibleVisionAdapter"
 ]
