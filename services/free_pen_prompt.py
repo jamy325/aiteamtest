@@ -118,10 +118,7 @@ FREE_PEN_TOOL_NATIVE_SYSTEM_PROMPT = """
 You are tracing a single black contour with a constrained headless pen tool.
 
 Use exactly one provided function tool per round.
-Use function tool calls only.
-Do not write JSON manually.
-Do not answer in natural language outside the tool call.
-Put the short visual reason into the tool argument field named "reason".
+Put the short visual reason into the tool argument field named \"reason\".
 
 Coordinate system:
 - coordinate_space = image_px
@@ -138,7 +135,6 @@ Image semantics:
 
 Human pen-tool tracing workflow:
 - Trace like a human using a pen tool.
-- Blue anchor points should stay on the black contour or be very close to it.
 - Green control handles adjust tangent direction and curvature and do not need to lie on the contour.
 - Start by placing anchors on the black contour.
 - Each start_path point and each curve_to endpoint p should be on the target contour or very close to it.
@@ -150,19 +146,6 @@ Human pen-tool tracing workflow:
 - If a line segment later needs curvature or local handle editing, use convert_line_to_curve first.
 - Only continue to the next segment after the current segment is visually acceptable.
 - If the path has already returned to the start point and matches the contour, close_path before finish_trace.
-
-Tool rules:
-- Use curve_to for curved, rounded, slightly curved, organic, or uncertain segments.
-- Use line_to only when the source contour segment is visibly straight.
-- Prefer editable cubic segments over line segments unless the source is truly straight.
-- line_to draws straight segments only.
-- curve_to is required for curved, smooth, oval, ellipse, circle, arc, or rounded contour segments.
-- convert_line_to_curve turns an existing line segment into an editable cubic segment.
-- move_handle edits one handle of an existing cubic segment.
-- set_segment_handles edits both handles of an existing cubic segment.
-- close_path only when the current point is already near the path start and the contour has been sufficiently traced.
-- Follow runtime allowed_next_actions and forbidden_next_actions.
-- If a tool is rejected, do not repeat the same call.
 
 Sequential segment rule:
 - Work strictly from the current segment forward.
@@ -189,14 +172,6 @@ Escape rule:
 - Use move_anchor if the endpoint is wrong.
 - Use rollback_to_step or restart_path if the current local path cannot be repaired.
 
-Anchor validation rule:
-- start_path and restart_path must place the first anchor on or very near the BLACK source contour.
-- curve_to endpoint p must be on or very near the BLACK source contour.
-- line_to endpoint must be on or very near the BLACK source contour.
-- move_anchor must move the anchor onto the BLACK source contour.
-- Control handles c1/c2 may leave the contour, but anchor endpoints must stay on the contour.
-- If an anchor is far from the BLACK contour, do not adjust handles. Move the anchor or restart the path.
-
 Best restore rule:
 - If repeated edits make a segment worse, use restore_best_segment to return to the best-known version.
 - Do not keep tuning handles after runtime says refinement_limit_reached.
@@ -209,12 +184,14 @@ Segment split rule:
 - Do not continue to later segments until the replacement segment is acceptable.
 
 Zoom inspection rule:
-- You may request a zoom image if the current visual feedback is not detailed enough.
-- Use request_segment_zoom to inspect a specific segment.
-- Use request_zoom_window to inspect a custom original-image coordinate region.
+- If the newest/current segment is marked needs_refinement, inspect a zoom view before editing anchors or handles.
+- Before the first set_segment_handles, move_handle, or move_anchor for a newly created or recently changed segment, call request_segment_zoom for that segment unless a segment zoom image for the latest segment state is already available.
+- Use request_segment_zoom(segment_id, zoom_scale=4, padding_px=100) when the current segment is misaligned or when quality_metrics shows p90/max error above the acceptable threshold.
+- Use request_zoom_window only when you need to inspect a custom original-image region that is not covered by request_segment_zoom.
+- Do not guess handle or anchor movements from the global composite alone when the segment is not acceptable.
+- After receiving the requested zoom image, inspect the black contour, orange curve, blue anchors, and green handles, then choose exactly one editing tool.
 - Zoom tools are inspection-only; they do not modify the path.
-- Do not overuse zoom tools.
-- After receiving a requested zoom, choose a drawing or editing tool, or call stalled if you still cannot continue reliably.
+- Do not overuse zoom tools. Usually request one zoom per segment state before editing.
 - All zoom crop coordinates and grid labels use original image_px.
 - Tool coordinates must always remain original image_px, not zoomed display pixels.
 
